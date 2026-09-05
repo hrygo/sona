@@ -712,11 +712,29 @@ def test_contract_artifacts_and_fixtures_are_loadable() -> None:
     assert fixture_files
     event_schema = json.loads((root / "schemas/event-envelope.schema.json").read_text())
     inner_os_event_schema = json.loads((root / "schemas/inner-os-event.schema.json").read_text())
+    speaker_details_validators = {
+        "transcript-reconciled-speaker-details.json": Draft202012Validator(
+            json.loads(
+                (root / "schemas/event-transcript-reconciled-speaker-details.schema.json")
+                .read_text()
+            ),
+            format_checker=FormatChecker(),
+        ),
+        "transcript-response-speaker-details.json": Draft202012Validator(
+            json.loads(
+                (root / "schemas/transcript-response-speaker-details.schema.json")
+                .read_text()
+            ),
+            format_checker=FormatChecker(),
+        ),
+    }
     validator = Draft202012Validator(event_schema, format_checker=FormatChecker())
     inner_os_validator = Draft202012Validator(inner_os_event_schema, format_checker=FormatChecker())
     for fixture in fixture_files:
         value = json.loads(fixture.read_text())
-        if fixture.name.startswith("inner-os-"):
+        if fixture.name in speaker_details_validators:
+            speaker_details_validators[fixture.name].validate(value)
+        elif fixture.name.startswith("inner-os-"):
             inner_os_validator.validate(value)
         else:
             validator.validate(value)

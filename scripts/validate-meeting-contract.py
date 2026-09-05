@@ -30,6 +30,12 @@ INNER_OS_FIXTURE_FILES = {
     "inner-os-insufficient.json",
     "inner-os-invalid-focus.json",
 }
+SPEAKER_DETAILS_FIXTURE_SCHEMAS = {
+    "transcript-reconciled-speaker-details.json": (
+        "event-transcript-reconciled-speaker-details.schema.json"
+    ),
+    "transcript-response-speaker-details.json": "transcript-response-speaker-details.schema.json",
+}
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -96,6 +102,13 @@ def validate_contract(repository_root: Path) -> tuple[int, int]:
         if fixture_path.name in INNER_OS_FIXTURE_FILES:
             fixture = _load_json(fixture_path)
             inner_os_envelope_validator.validate(fixture)
+            continue
+
+        if fixture_path.name in SPEAKER_DETAILS_FIXTURE_SCHEMAS:
+            fixture = _load_json(fixture_path)
+            schema_file = SPEAKER_DETAILS_FIXTURE_SCHEMAS[fixture_path.name]
+            schema = _load_json(schema_root / schema_file)
+            Draft202012Validator(schema, format_checker=format_checker).validate(fixture)
             continue
 
         fixture = _load_json(fixture_path)
