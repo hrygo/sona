@@ -7,12 +7,15 @@ import uuid
 import httpx
 import pytest
 
+from sona.config.meeting import MeetingSettings
 from sona.meeting.diarization_overlay import (
     MeetingDiarizationOverlay,
     SpeakerLabelledSpan,
     assign_speakers_by_overlap,
     meeting_diarization_group_id,
+    meeting_range,
     meeting_speaker_key,
+    overlay_gate_for_runtime,
 )
 from sona.meeting.models import NormalizedSegment
 from sona.speechrail.batch_transcriber import (
@@ -182,9 +185,11 @@ def test_overlay_buffers_and_flushes() -> None:
     async def run() -> None:
         overlay.start(group_id="g")
         overlay.push_pcm(b"\x00\x00" * 16_000 * 2)  # 2s audio > min flush
-        spans = await overlay.flush()
-        assert len(spans) == 1
-        assert spans[0].speaker_key == "group:g:speaker:spk_01"
+        result = await overlay.flush()
+        assert len(result.spans) == 1
+        assert result.spans[0].speaker_key == "group:g:speaker:spk_01"
+        assert result.covered_start_ms == 0
+        assert result.covered_end_ms == 2000
         assert overlay.buffered_pcm() == b""
         overlay.stop()
 
@@ -203,8 +208,8 @@ def test_overlay_does_not_flush_below_min_threshold() -> None:
     async def run() -> None:
         overlay.start(group_id="g")
         overlay.push_pcm(b"\x00\x00" * 1_000)  # too short
-        spans = await overlay.flush()
-        assert spans == []
+        result = await overlay.flush()
+        assert result.spans == ()
         overlay.stop()
 
     asyncio.run(run())
@@ -217,9 +222,129 @@ def test_overlay_finish_flushes_and_stops() -> None:
     async def run() -> None:
         overlay.start(group_id="g")
         overlay.push_pcm(b"\x00\x00" * 16_000 * 2)
-        spans = await overlay.finish()
-        assert len(spans) == 1
+        result = await overlay.finish()
+        assert len(result.spans) == 1
         assert not overlay.active
         assert overlay.buffered_pcm() == b""
 
     asyncio.run(run())
+
+
+# ---------------------------------------------------------------------------
+# S0: 缓冲裁剪偏移、请求上限前置校验与默认关闭
+# ---------------------------------------------------------------------------
+
+
+def test_meeting_range_offsets_buffer_relative_spans() -> None:
+    # 45 分钟输入只保留最后 30 分钟：缓冲起点是会议第 900 秒。
+    # 缓冲内相对第 1~2 秒的结果必须落在会议第 901~902 秒。
+    start, end = meeting_range(900 * 16000, 16000, 32000)
+    assert (start, end) == (901 * 16000, 902 * 16000)
+
+
+def test_meeting_range_without_trim_is_identity() -> None:
+    assert meeting_range(0, 16000, 32000) == (16000, 32000)
+
+
+def test_default_config_disables_overlay_and_extensions() -> None:
+    settings = MeetingSettings(_env_file=None)
+    assert settings.diarization_overlay_enabled is False
+    assert settings.diarization_extensions_enabled is False
+
+
+def test_overlay_gate_extensions_win_over_legacy_flag() -> None:
+    # 默认：不启用诊断 overlay。
+    assert overlay_gate_for_runtime(overlay_enabled=False, extensions_enabled=False) is False
+    # 显式 legacy 诊断（无扩展）：允许。
+    assert overlay_gate_for_runtime(overlay_enabled=True, extensions_enabled=False) is True
+    # 扩展开启后，旧 overlay 开关残留 true 也必须不启用。
+    assert overlay_gate_for_runtime(overlay_enabled=True, extensions_enabled=True) is False
+
+
+class _CountingTranscriber:
+    """记录调用次数与入参的 spy。"""
+
+    def __init__(self) -> None:
+        self.calls: list[bytes] = []
+
+    async def transcribe_diarize(self, pcm: bytes) -> SpeechRailDiarizeResult:
+        self.calls.append(pcm)
+        return SpeechRailDiarizeResult(
+            text="hi",
+            language="zh",
+            segments=(SpeechRailDiarizeSegment("你好", 1000, 2000, "spk_01"),),
+        )
+
+
+def _push_minutes(overlay: MeetingDiarizationOverlay, minutes: int) -> None:
+    # 每分钟 = 16_000 个 2 字节样本 = 32_000 字节。
+    minute_bytes = b"\x00\x00" * 16_000 * 60
+    for _ in range(minutes):
+        overlay.push_pcm(minute_bytes)
+
+
+def test_overlay_trims_to_tail_and_tracks_buffer_start_sample() -> None:
+    overlay = MeetingDiarizationOverlay(
+        transcriber=_CountingTranscriber(), group_id="g", max_buffer_seconds=1800
+    )
+    overlay.start(group_id="g")
+    _push_minutes(overlay, 45)
+
+    # 只保留最后 30 分钟，且样本起点可追溯：第 900 秒。
+    assert overlay.buffer_start_sample == 900 * 16000
+    buffered = overlay.buffered_pcm()
+    assert len(buffered) == 1800 * 32_000
+
+
+@pytest.mark.asyncio
+async def test_overlay_flush_returns_meeting_time_spans_and_coverage() -> None:
+    spy = _CountingTranscriber()
+    overlay = MeetingDiarizationOverlay(
+        transcriber=spy, group_id="g", max_buffer_seconds=1800
+    )
+    overlay.start(group_id="g")
+    _push_minutes(overlay, 45)
+
+    result = await overlay.flush()
+
+    assert len(spy.calls) == 1
+    # span 在缓冲内相对 1~2 秒，输出必须已加裁剪偏移到会议时间线。
+    assert result.spans[0].start_ms == 901 * 1000
+    assert result.spans[0].end_ms == 902 * 1000
+    assert result.covered_start_ms == 900 * 1000
+    assert result.covered_end_ms == 45 * 60 * 1000
+
+
+@pytest.mark.asyncio
+async def test_overlay_flush_without_trim_keeps_zero_offset() -> None:
+    spy = _CountingTranscriber()
+    overlay = MeetingDiarizationOverlay(transcriber=spy, group_id="g", max_buffer_seconds=60)
+    overlay.start(group_id="g")
+    overlay.push_pcm(b"\x00\x00" * 16_000 * 2)
+
+    result = await overlay.flush()
+
+    assert result.spans[0].start_ms == 1000
+    assert result.covered_start_ms == 0
+    assert result.covered_end_ms == 2000
+
+
+@pytest.mark.asyncio
+async def test_overlay_preflight_rejects_oversized_request_visibly(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # 7200 秒缓冲(230MB)超过 batch WAV 上限(120MB)：必须前置拒绝并可见告警，
+    # 而不是把超大请求发出去后静默失败。
+    spy = _CountingTranscriber()
+    overlay = MeetingDiarizationOverlay(
+        transcriber=spy, group_id="g", max_buffer_seconds=7200
+    )
+    overlay.start(group_id="g")
+    overlay.push_pcm(b"\x00\x00" * (60_000_001))
+
+    with caplog.at_level("WARNING"):
+        result = await overlay.flush()
+
+    assert spy.calls == []
+    assert result.spans == ()
+    assert any("长度上限" in record.message for record in caplog.records)

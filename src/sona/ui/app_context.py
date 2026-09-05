@@ -13,7 +13,10 @@ from fastapi import FastAPI
 from sona.config import Settings
 from sona.inference.scheduler import LocalInferenceScheduler
 from sona.lm_studio import LMStudioClient
-from sona.meeting.diarization_overlay import MeetingDiarizationOverlay
+from sona.meeting.diarization_overlay import (
+    MeetingDiarizationOverlay,
+    overlay_gate_for_runtime,
+)
 from sona.meeting.diarization_smoother import DiarizationSmoother
 from sona.meeting.events import MeetingEventBroadcaster
 from sona.meeting.inner_os.model_client import InnerOSModelClient
@@ -171,7 +174,10 @@ async def initialize_meeting_backend(context: UIAppContext) -> bool:
             await context.meeting_events.publish_event(event_type, meeting_id, payload)
 
         diarization_overlay: MeetingDiarizationOverlay | None = None
-        if settings.meeting.diarization_overlay_enabled:
+        if overlay_gate_for_runtime(
+            overlay_enabled=settings.meeting.diarization_overlay_enabled,
+            extensions_enabled=settings.meeting.diarization_extensions_enabled,
+        ):
             batch_transcriber = SpeechRailBatchTranscriber(
                 url=settings.subtitles.speechrail_url,
                 api_key=settings.subtitles.speechrail_api_key,

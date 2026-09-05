@@ -67,23 +67,67 @@ def test_diarization_smoother_filter_short_noise() -> None:
     assert smoothed.segments[1].order == 1
 
 
-def test_diarization_smoother_aba_flicker_correction() -> None:
+def test_diarization_smoother_keeps_meaningful_short_interjection() -> None:
     smoother = DiarizationSmoother(min_duration_ms=350, hangover_gap_ms=1000)
-    # A -> B -> A 模式，中间 B 只有 200ms
+    # A -> B -> A 模式，中间 B 只有 200ms 但有实质文本（真实短插话）：
+    # 不得凭时长把 B 改成 A，文字与 source speaker 都必须保留。
     seg_a1 = _make_segment(0, "speaker:s0", 0, 1000, "我们先看一下第一个方案")
-    seg_b = _make_segment(1, "speaker:s1", 1100, 1300, "嗯对")  # 短暂被误识为 s1
+    seg_b = _make_segment(1, "speaker:s1", 1100, 1300, "嗯对")
     seg_a2 = _make_segment(2, "speaker:s0", 1400, 2500, "这个方案的具体细节。")
 
     window = TranscriptWindow(source_epoch=1, segments=(seg_a1, seg_b, seg_a2))
     smoothed = smoother.smooth_window(window)
 
-    # 经过 A-B-A 纠偏后全部成为 speaker:s0，且时间相近被合并为一个完整段落
+    assert len(smoothed.segments) == 3
+    interjection = smoothed.segments[1]
+    assert interjection.id == seg_b.id
+    assert interjection.speaker_key == "speaker:s1"
+    assert interjection.text == "嗯对"
+    assert interjection.start_ms == 1100
+    assert interjection.end_ms == 1300
+
+
+def test_diarization_smoother_still_corrects_meaningless_flicker() -> None:
+    smoother = DiarizationSmoother(min_duration_ms=350, hangover_gap_ms=1000)
+    # 纯符号/无实质内容的 A-B-A 闪烁仍按原语义纠偏并合并。
+    seg_a1 = _make_segment(0, "speaker:s0", 0, 1000, "我们先看一下第一个方案")
+    seg_b = _make_segment(1, "speaker:s1", 1100, 1300, "。。。")
+    seg_a2 = _make_segment(2, "speaker:s0", 1400, 2500, "这个方案的具体细节。")
+
+    window = TranscriptWindow(source_epoch=1, segments=(seg_a1, seg_b, seg_a2))
+    smoothed = smoother.smooth_window(window)
+
     assert len(smoothed.segments) == 1
     assert smoothed.segments[0].speaker_key == "speaker:s0"
-    assert "我们先看一下第一个方案" in smoothed.segments[0].text
-    assert "这个方案的具体细节。" in smoothed.segments[0].text
-    assert smoothed.segments[0].start_ms == 0
-    assert smoothed.segments[0].end_ms == 2500
+
+
+def test_diarization_smoother_keeps_unknown_interjection() -> None:
+    smoother = DiarizationSmoother(min_duration_ms=350, hangover_gap_ms=1000)
+    # unknown（speaker:0）短片段不得被折叠进邻近真人，也不得把真人改写成 unknown。
+    seg_a1 = _make_segment(0, "speaker:s0", 0, 1000, "我们先看一下第一个方案")
+    seg_unknown = _make_segment(1, "epoch:1:speaker:0", 1100, 1300, "嗯")
+    seg_a2 = _make_segment(2, "speaker:s0", 1400, 2500, "这个方案的具体细节。")
+
+    window = TranscriptWindow(source_epoch=1, segments=(seg_a1, seg_unknown, seg_a2))
+    smoothed = smoother.smooth_window(window)
+
+    kept = next(seg for seg in smoothed.segments if seg.id == seg_unknown.id)
+    assert kept.speaker_key == "epoch:1:speaker:0"
+    assert kept.text == "嗯"
+
+
+def test_diarization_smoother_does_not_rewrite_named_into_unknown() -> None:
+    smoother = DiarizationSmoother(min_duration_ms=350, hangover_gap_ms=1000)
+    # 两侧是 unknown、中间是有名短片段：不得把真人身份抹成 unknown。
+    seg_u1 = _make_segment(0, "epoch:1:speaker:0", 0, 1000, "（杂音）")
+    seg_named = _make_segment(1, "speaker:s1", 1100, 1300, "对")
+    seg_u2 = _make_segment(2, "epoch:1:speaker:0", 1400, 2500, "（杂音）")
+
+    window = TranscriptWindow(source_epoch=1, segments=(seg_u1, seg_named, seg_u2))
+    smoothed = smoother.smooth_window(window)
+
+    kept = next(seg for seg in smoothed.segments if seg.id == seg_named.id)
+    assert kept.speaker_key == "speaker:s1"
 
 
 def test_diarization_smoother_same_speaker_merging() -> None:
@@ -122,7 +166,8 @@ def test_diarization_smoother_latin_text_spacing() -> None:
 
 def test_diarization_smoother_abba_flicker_correction() -> None:
     smoother = DiarizationSmoother(min_duration_ms=350, hangover_gap_ms=1000)
-    # A -> B -> B -> A 模式，中间两段 B 共 300ms
+    # A -> B -> B -> A 模式，中间两段 B 共 300ms，但都有实质文本：
+    # 真实短插话必须保留 speaker 与文字，不得合并。
     seg_a1 = _make_segment(0, "speaker:s0", 0, 1000, "第一阶段的")
     seg_b1 = _make_segment(1, "speaker:s1", 1050, 1200, "核心")
     seg_b2 = _make_segment(2, "speaker:s1", 1210, 1350, "工作是")
@@ -131,9 +176,18 @@ def test_diarization_smoother_abba_flicker_correction() -> None:
     window = TranscriptWindow(source_epoch=1, segments=(seg_a1, seg_b1, seg_b2, seg_a2))
     smoothed = smoother.smooth_window(window)
 
-    assert len(smoothed.segments) == 1
-    assert smoothed.segments[0].speaker_key == "speaker:s0"
-    assert "第一阶段的核心工作是治理说话人漂移。" in smoothed.segments[0].text
+    # 两段 B 同说话人相邻，阅读层允许合并，但 speaker 保持 s1、文字与时间不丢。
+    assert len(smoothed.segments) == 3
+    assert [seg.speaker_key for seg in smoothed.segments] == [
+        "speaker:s0",
+        "speaker:s1",
+        "speaker:s0",
+    ]
+    interjection = smoothed.segments[1]
+    assert interjection.id == seg_b1.id
+    assert interjection.text == "核心工作是"
+    assert interjection.start_ms == 1050
+    assert interjection.end_ms == 1350
 
 
 def test_diarization_smoother_cross_epoch_merging() -> None:

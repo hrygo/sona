@@ -101,10 +101,17 @@ class MeetingSettings(BaseSettings):
         description="同一说话人相邻段落合并最大时间间隙（毫秒）",
     )
     diarization_overlay_enabled: bool = Field(
-        default=True,
+        default=False,
         description=(
-            "是否在封存时用非流式 diarize 修正流式转录的说话人归属"
-            "（流式路径暂无法下发说话人标签，录制中恒为 speaker:0）"
+            "是否启用 legacy 诊断 overlay（封存时用非流式 diarize 按时间重叠修正"
+            " speaker_key）。默认关闭；新分人扩展启用时即使本开关为 true 也不会调用 batch"
+        ),
+    )
+    diarization_extensions_enabled: bool = Field(
+        default=False,
+        description=(
+            "是否对支持 speechrail.diarization.v1 能力的 SpeechRail 协商持续分人扩展；"
+            "关闭时保持 legacy 行为，绝不自动启用 batch overlay"
         ),
     )
     diarization_overlay_max_buffer_secs: int = Field(

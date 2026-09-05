@@ -2,11 +2,13 @@
 title: "SpeechRail 流式说话人分离对接手册"
 status: active
 audience: "sona 工程团队（会议实时字幕与纪要消费方）"
-version: "1.0.1"
+version: "1.0.2"
 date: 2026-09-05
 ---
 
 # 🎙️ SpeechRail 流式说话人分离对接手册
+
+> **2026-09-06 S0 更新：** 会议侧已按[逐任务计划](../superpowers/plans/2026-09-05-speaker-diarization-e2e.md) S0 隔离 legacy overlay 风险：`diarization_overlay_enabled` 默认改为 **false**，batch overlay 只保留为显式 legacy 诊断（且新分人扩展 `diarization_extensions_enabled` 开启时强制停用）；平滑器不再凭时长改写**有实质内容的短插话**与 unknown 段归属。本文正文中所有“无需改动”“无需额外改代码”均为 1.6.6 里程碑的历史表述，不代表当前默认行为。
 
 > **2026-09-05 基线更正：** 本文下述内容记录 1.6.6 的流式接线里程碑，不证明跨 commit/重连编号稳定、讲话人修订已闭环或真实会议质量已验收。“无需改动”“会话内稳定”和额外延迟估计均不能作为验收结论。当前源码的时间戳来自二次解码，Sona 默认 batch overlay 仍存在，严格 decoder 也不接受未协商的新事件。后续实施以[端到端设计](../architecture/speaker-diarization-e2e-design.md)的事实核验和[逐任务计划](../superpowers/plans/2026-09-05-speaker-diarization-e2e.md)为准；现有公共 API 仍以 SpeechRail 当前契约为准，新设计的扩展尚未上线。
 
@@ -44,7 +46,8 @@ SpeechRail 1.6.6（ADR-0010）修复后：
 | 显式配置 | `session.update.session.diarization`（需 SpeechRail diarization profile 就绪） |
 
 sona 现有 `SpeechRailStreamingTranscriber.connect()` 已按 `purpose == "meeting"` 通过
-`diarization=True` + `speaker_count_hint` + `diarization_group_id` 启用——**无需改动**。
+`diarization=True` + `speaker_count_hint` + `diarization_group_id` 启用——**无需改动**（此为
+1.6.6 里程碑表述；S0 未变更连接参数，仅将批路径 overlay 默认关闭，见文首 S0 更新）。
 
 ### 2.2 事件顺序（commit 后）
 
@@ -89,7 +92,7 @@ sona `transcription_events.py` 解码器约束（SpeechRail 发射格式**天然
 |---|---|---|
 | `speechrail/transcription_events.py` | `decode_transcription_event` → `TranscriptionSegment`/`TranscriptionCompleted` 等，含 speaker/时间戳协议校验 | 无需改动；`SPEECHRAIL_DIARIZATION_PROTOCOL_ERROR` 校验已按 `spk_*` 格式对齐 |
 | `speechrail/transcriber.py` | `SpeechRailStreamingTranscriber`：消费流式事件，把匿名 `spk_*` 重写进 `group:{id}` 命名空间 | 无需改动；`completed` 无 segment 时已有兜底单 segment（保留本轮转写） |
-| `meeting/diarization_overlay`（批路径） | 批量转写的分人归属回流 | 与流式链路并存；流式可用后可作为离线兜底 |
+| `meeting/diarization_overlay`（批路径） | 批量转写的分人归属回流 | **S0 起默认关闭**：仅在 `diarization_overlay_enabled=true` 且未启用分人扩展时，作为显式 legacy 诊断在会末单次调用；缓冲只保留尾部并携带会议时间线偏移，跨裁剪边界段不改写 |
 
 ## 4. 消费模式
 

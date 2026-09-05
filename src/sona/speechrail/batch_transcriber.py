@@ -26,6 +26,8 @@ from sona.speechrail.transport import SpeechRailProtocolError
 
 _DIARIZE_MODEL = "gpt-4o-transcribe-diarize"
 _WAV_HEADER_MAX_PCM_BYTES = 120_000_000  # 防止超大 WAV 头溢出（约 62 分钟 16kHz PCM）
+# 非流式 diarize 请求的实际 PCM 长度上限；overlay 在调用前据此前置校验，失败可见。
+MAX_DIARIZE_PCM_BYTES = _WAV_HEADER_MAX_PCM_BYTES
 
 
 @dataclass(frozen=True, slots=True)

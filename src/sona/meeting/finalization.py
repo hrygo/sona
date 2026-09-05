@@ -145,27 +145,37 @@ class MeetingFinalizer:
             await self._gateway.abort_capture()
 
     async def _apply_diarization_overlay(self, meeting_id: UUID) -> None:
-        # 流式 confirmed 段说话人恒为 speaker:0；此处经非流式 diarize 按时间重叠
-        # 修正其 speaker_key。分人是增强项，任何失败都不得中断会议封存。
+        # legacy 诊断：流式 confirmed 段说话人恒为 speaker:0；此处经非流式 diarize
+        # 按时间重叠修正其 speaker_key。只修改被缓冲音频完整覆盖的 segment；
+        # 分人是增强项，任何失败都不得中断会议封存。
         overlay = self._diarization_overlay
         if overlay is None:
             return
         try:
-            spans = await overlay.finish()
+            result = await overlay.finish()
         except Exception:
             logger.warning("MeetingFinalizer: diarization overlay 失败，跳过分人", exc_info=True)
             return
-        if not spans:
+        if not result.spans:
             return
+        covered_start = result.covered_start_ms
+        covered_end = result.covered_end_ms
         try:
             document = await self._transcripts.get_transcript(meeting_id)
         except Exception:
             logger.warning("MeetingFinalizer: 读取全量转录失败，跳过分人", exc_info=True)
             return
         segments = document.segments
-        if not segments:
+        if not segments or covered_start is None or covered_end is None:
             return
-        mapping = assign_speakers_by_overlap(segments, spans)
+        covered = [
+            segment
+            for segment in segments
+            if segment.start_ms >= covered_start and segment.end_ms <= covered_end
+        ]
+        if not covered:
+            return
+        mapping = assign_speakers_by_overlap(covered, result.spans)
         if not mapping:
             return
         corrected = tuple(

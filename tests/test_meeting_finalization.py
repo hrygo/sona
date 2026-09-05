@@ -13,7 +13,10 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from sona.meeting.diarization_overlay import MeetingDiarizationOverlay
+from sona.meeting.diarization_overlay import (
+    MeetingDiarizationOverlay,
+    OverlayFlushResult,
+)
 from sona.meeting.finalization import MeetingFinalizer
 from sona.meeting.models import (
     MeetingRecord,
@@ -637,3 +640,85 @@ async def test_finalize_overlay_failure_does_not_abort_capture() -> None:
     assert result.record.status is MeetingStatus.COMPLETED
     gateway.abort_capture.assert_not_awaited()
 
+
+
+# ---------------------------------------------------------------------------
+# S0: overlay 诊断仅 legacy + capture 已关闭后单次调用；裁剪边界不得改写历史
+# ---------------------------------------------------------------------------
+
+
+class SpyOverlay:
+    """记录 finish 调用次数与调用时机的 spy（默认无 span）。"""
+
+    def __init__(self, order: list[str] | None = None) -> None:
+        self.finish_calls = 0
+        self._order = order
+
+    async def finish(self) -> OverlayFlushResult:
+        self.finish_calls += 1
+        if self._order is not None:
+            self._order.append("overlay_finish")
+        return OverlayFlushResult()
+
+
+class _TimedFakeTranscriber:
+    """在缓冲内相对时间返回固定 span 的假 batch transcriber。"""
+
+    def __init__(self, start_ms: int, end_ms: int) -> None:
+        self._start_ms = start_ms
+        self._end_ms = end_ms
+
+    async def transcribe_diarize(self, pcm: bytes) -> object:
+        return _DiarizeResult(
+            segments=(
+                _DiarizeSegment("hello", self._start_ms, self._end_ms, "spk_01"),
+            )
+        )
+
+
+async def test_finalize_overlay_runs_once_after_capture_closed() -> None:
+    order: list[str] = []
+
+    async def finish_capture(*, timeout_secs: float) -> TranscriptWindow:
+        order.append("finish_capture")
+        return TranscriptWindow(source_epoch=1)
+
+    gateway = AsyncMock(finish_capture=finish_capture)
+    overlay = SpyOverlay(order)
+    finalizer, _, _ = _finalizer(gateway=gateway, overlay=overlay)
+
+    await finalizer.finalize(uuid4())
+
+    # 只在 capture 关闭后调用一次：不允许录制中或重复触发 batch 分人。
+    assert overlay.finish_calls == 1
+    assert order == ["finish_capture", "overlay_finish"]
+
+
+async def test_overlay_trim_boundary_cannot_touch_unbuffered_history() -> None:
+    # 45 分钟会议、overlay 只保留最后 30 分钟：缓冲内相对 1~2 秒的 span
+    # 属于会议第 901~902 秒；会议第 1 秒的历史段绝不能被改写。
+    early_id = uuid4()
+    early = _capped_segment(early_id, 0, 1000)
+    in_window_id = uuid4()
+    in_window = _capped_segment(in_window_id, 901_000, 902_000)
+
+    overlay = MeetingDiarizationOverlay(
+        transcriber=_TimedFakeTranscriber(1000, 2000),
+        group_id="hash",
+        max_buffer_seconds=1800,
+    )
+    overlay.start(group_id="hash")
+    for _ in range(45):
+        overlay.push_pcm(b"\x00\x00" * 16_000 * 60)
+
+    last_window = TranscriptWindow(source_epoch=2, segments=(in_window,))
+    gateway = AsyncMock(finish_capture=AsyncMock(return_value=last_window))
+    store = CallLogStore()
+    store.persisted_segments.extend([early, in_window])
+    finalizer, _, _ = _finalizer(store=store, gateway=gateway, overlay=overlay)
+
+    await finalizer.finalize(uuid4())
+
+    stored = {seg.id: seg for seg in store.persisted_segments}
+    assert stored[early_id].speaker_key == "group:hash:speaker:0"
+    assert stored[in_window_id].speaker_key == "group:hash:speaker:spk_01"

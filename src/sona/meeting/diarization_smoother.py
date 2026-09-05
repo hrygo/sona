@@ -16,9 +16,21 @@ from sona.meeting.models import NormalizedSegment, TranscriptWindow
 # 匹配是否含有实质内容（汉字、字母、数字）
 _MEANINGFUL_CHAR_RE = re.compile(r"[\u4e00-\u9fa5a-zA-Z0-9]")
 
+# 无归属保留 key：legacy ``speaker:0`` 与新协议保留 key ``unknown``。
+_UNKNOWN_SPEAKER_SUFFIXES = (":speaker:0",)
+
 
 def _has_meaningful_text(text: str) -> bool:
     return bool(_MEANINGFUL_CHAR_RE.search(text))
+
+
+def _is_unknown_speaker(speaker_key: str) -> bool:
+    """判断是否为"未确定归属"的保留 key（unknown / speaker:0）。
+
+    unknown 不生成真人卡片：不得把 unknown 折叠进邻近真人，也不得把真人
+    身份抹成 unknown。
+    """
+    return speaker_key == "unknown" or speaker_key.endswith(_UNKNOWN_SPEAKER_SUFFIXES)
 
 
 def _join_text(text1: str, text2: str) -> str:
@@ -100,21 +112,28 @@ class DiarizationSmoother:
         if not filtered:
             return []
 
-        # 步骤 2：说话人闪烁纠偏（单片段 A-B-A 及双片段 A-B-B-A 短时突变）
+        # 步骤 2：说话人闪烁纠偏（单片段 A-B-A 及双片段 A-B-B-A 短时突变）。
+        # 只对**无实质内容**且非 unknown 的短片段凭时长纠偏：真实短插话保留
+        # source speaker 与文字，unknown 不折叠进真人也不抹掉真人身份。
         n = len(filtered)
         speaker_keys = [seg.speaker_key for seg in filtered]
+
+        def _rewritable(index: int, target: str) -> bool:
+            seg = filtered[index]
+            duration = seg.end_ms - seg.start_ms
+            return (
+                duration <= max(min_duration_ms, 500)
+                and not _has_meaningful_text(seg.text)
+                and not _is_unknown_speaker(speaker_keys[index])
+                and not _is_unknown_speaker(target)
+            )
 
         # 2a. 单片段 A-B-A 纠偏
         for i in range(1, n - 1):
             prev_spk = speaker_keys[i - 1]
             curr_spk = speaker_keys[i]
             next_spk = speaker_keys[i + 1]
-            curr_dur = filtered[i].end_ms - filtered[i].start_ms
-            if (
-                prev_spk == next_spk
-                and curr_spk != prev_spk
-                and curr_dur <= max(min_duration_ms, 500)
-            ):
+            if prev_spk == next_spk and curr_spk != prev_spk and _rewritable(i, prev_spk):
                 speaker_keys[i] = prev_spk
 
         # 2b. 双片段 A-B-B-A 纠偏
@@ -129,6 +148,8 @@ class DiarizationSmoother:
                 and b1_spk == b2_spk
                 and b1_spk != prev_spk
                 and b_total_dur <= max(min_duration_ms, 600)
+                and _rewritable(i, prev_spk)
+                and _rewritable(i + 1, prev_spk)
             ):
                 speaker_keys[i] = prev_spk
                 speaker_keys[i + 1] = prev_spk
