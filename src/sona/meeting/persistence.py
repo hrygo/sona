@@ -11,8 +11,14 @@ import logging
 from typing import Any, Protocol
 from uuid import UUID
 
-from .models import MeetingRecord, MeetingStatus, TranscriptReconcileResult, TranscriptWindow
+from .models import (
+    MeetingRecord,
+    MeetingStatus,
+    TranscriptReconcileResult,
+    TranscriptWindow,
+)
 from .ports import RecoveryReplayRepository, TranscriptStore
+from .speaker_attribution import CompletedItem, SpeakerPatchEvent, SpeakerPatchResult
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +114,72 @@ class TranscriptPersistence:
         self._last_window_signatures[meeting_id] = signature
         self._degraded = False
         return result
+
+    async def append_item(
+        self, meeting_id: UUID, item: CompletedItem
+    ) -> TranscriptReconcileResult | None:
+        """追加固定正文单元；repository 失败降级写 journal（completed 先于 patch）。"""
+        try:
+            await asyncio.shield(self.replay_pending(meeting_id))
+            return await asyncio.shield(
+                self._transcripts.append_completed_item(meeting_id, item)
+            )
+        except Exception as exc:
+            self._degraded = True
+            logger.warning(
+                "TranscriptPersistence: completed 追加失败，已降级至 RecoveryJournal"
+                " (meeting_id=%s): %s",
+                meeting_id,
+                exc,
+            )
+            if self._journal is None:
+                raise
+            try:
+                await asyncio.shield(
+                    self._journal.append(
+                        meeting_id, "append_completed_item", {"item": item.model_dump(mode="json")}
+                    )
+                )
+            except Exception:
+                logger.exception(
+                    "TranscriptPersistence: journal 写入失败 (meeting_id=%s)", meeting_id
+                )
+                raise
+            return None
+
+    async def apply_patches(
+        self, meeting_id: UUID, event: SpeakerPatchEvent
+    ) -> SpeakerPatchResult | None:
+        """speaker-only 修订；journal 顺序保证未持久 completed 先于 patch 回放。"""
+        try:
+            await asyncio.shield(self.replay_pending(meeting_id))
+            return await asyncio.shield(
+                self._transcripts.apply_speaker_patches(meeting_id, event)
+            )
+        except Exception as exc:
+            self._degraded = True
+            logger.warning(
+                "TranscriptPersistence: speaker patch 失败，已降级至 RecoveryJournal"
+                " (meeting_id=%s): %s",
+                meeting_id,
+                exc,
+            )
+            if self._journal is None:
+                raise
+            try:
+                await asyncio.shield(
+                    self._journal.append(
+                        meeting_id,
+                        "apply_speaker_patches",
+                        {"event": event.model_dump(mode="json")},
+                    )
+                )
+            except Exception:
+                logger.exception(
+                    "TranscriptPersistence: journal 写入失败 (meeting_id=%s)", meeting_id
+                )
+                raise
+            return None
 
     async def replay_pending(self, meeting_id: UUID) -> int:
         journal = self._journal

@@ -412,3 +412,149 @@ async def test_replay_reports_unlink_error_and_keeps_file(tmp_path: Path, monkey
         await journal.replay(FakeRecoveryRepository())
 
     assert path.exists()
+
+
+# ---------------------------------------------------------------------------
+# S2: speaker attribution journal 白名单操作
+# ---------------------------------------------------------------------------
+
+
+class AttributionReplayRepository(FakeRecoveryRepository):
+    """额外记录三个新白名单操作的 fake repository。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.completed_items: list[object] = []
+        self.patch_events: list[object] = []
+        self.diarization_finalized: list[object] = []
+
+    async def append_completed_item(self, meeting_id, item) -> None:
+        if self.error is not None:
+            raise self.error
+        self.calls.append(("append_completed_item", (meeting_id, item)))
+        self.completed_items.append(item)
+
+    async def apply_speaker_patches(self, meeting_id, event) -> None:
+        if self.error is not None:
+            raise self.error
+        self.calls.append(("apply_speaker_patches", (meeting_id, event)))
+        self.patch_events.append(event)
+
+    async def finalize_diarization(self, meeting_id, *, status: str, reason: str | None) -> None:
+        if self.error is not None:
+            raise self.error
+        self.calls.append(("finalize_diarization", (meeting_id, status, reason)))
+        self.diarization_finalized.append((status, reason))
+
+
+def _completed_item_payload() -> dict[str, object]:
+    from sona.meeting.speaker_attribution import CompletedAttributionUnit, CompletedItem
+
+    item = CompletedItem(
+        source_session_id="sess_r",
+        source_epoch=1,
+        meeting_start_sample=0,
+        item_id="item-1",
+        event_id="evt-1",
+        sequence=1,
+        audio_start_sample=0,
+        audio_end_sample=320,
+        canonical_text="恢复",
+        units=(
+            CompletedAttributionUnit(
+                segment_uid="u1",
+                text_start=0,
+                text_end=2,
+                audio_start_sample=0,
+                audio_end_sample=320,
+                timing_quality="aligned",
+            ),
+        ),
+    )
+    return {"item": item.model_dump(mode="json")}
+
+
+def _patch_event_payload() -> dict[str, object]:
+    from sona.meeting.speaker_attribution import SpeakerPatch, SpeakerPatchEvent
+
+    event = SpeakerPatchEvent(
+        source_session_id="sess_r",
+        event_id="evt-2",
+        sequence=2,
+        stable_through_sample=320,
+        patches=(
+            SpeakerPatch(
+                segment_uid="u1",
+                revision=1,
+                status="stable",
+                source_speaker="spk_01",
+                coverage_ratio=0.9,
+                overlap_ratio=0.0,
+                candidates=(),
+            ),
+        ),
+    )
+    return {"event": event.model_dump(mode="json")}
+
+
+async def test_journal_replays_completed_then_patch_in_order(tmp_path: Path) -> None:
+    journal = RecoveryJournal(tmp_path / "recovery")
+    meeting_id = uuid4()
+    await journal.append(meeting_id, "append_completed_item", _completed_item_payload())
+    await journal.append(meeting_id, "apply_speaker_patches", _patch_event_payload())
+    repository = AttributionReplayRepository()
+
+    count = await journal.replay_meeting(repository, meeting_id)  # type: ignore[arg-type]
+
+    assert count == 2
+    operations = [name for name, _ in repository.calls]
+    assert operations.index("append_completed_item") < operations.index("apply_speaker_patches")
+    assert not (tmp_path / "recovery" / f"{meeting_id}.jsonl").exists()
+
+
+async def test_journal_replay_finalize_diarization_does_not_queue_minutes(
+    tmp_path: Path,
+) -> None:
+    journal = RecoveryJournal(tmp_path / "recovery")
+    meeting_id = uuid4()
+    await journal.append(
+        meeting_id,
+        "finalize_diarization",
+        {"status": "complete", "reason": None},
+    )
+    repository = AttributionReplayRepository()
+
+    await journal.replay_meeting(repository, meeting_id)  # type: ignore[arg-type]
+
+    assert repository.diarization_finalized == [("complete", None)]
+    assert repository.calls[-1][0] == "finalize_diarization"
+    # finalize 分人不触发纪要排队。
+    assert not any(name == "create_minutes" for name, _ in repository.calls)
+
+
+async def test_journal_replay_rejects_unknown_attribution_operation(tmp_path: Path) -> None:
+    journal = RecoveryJournal(tmp_path / "recovery")
+    meeting_id = uuid4()
+    await journal.append(meeting_id, "apply_speaker_patches", {"event": None})
+    repository = AttributionReplayRepository()
+
+    with pytest.raises(RecoveryJournalError):
+        await journal.replay_meeting(repository, meeting_id)  # type: ignore[arg-type]
+
+
+async def test_journal_replay_is_idempotent_for_attribution_operations(
+    tmp_path: Path,
+) -> None:
+    """回放重复：journal 整体重放一次即删除文件；repository 幂等靠事件唯一键。"""
+    journal = RecoveryJournal(tmp_path / "recovery")
+    meeting_id = uuid4()
+    await journal.append(meeting_id, "append_completed_item", _completed_item_payload())
+    await journal.append(meeting_id, "apply_speaker_patches", _patch_event_payload())
+    repository = AttributionReplayRepository()
+
+    first = await journal.replay_meeting(repository, meeting_id)  # type: ignore[arg-type]
+    second = await journal.replay_meeting(repository, meeting_id)  # type: ignore[arg-type]
+
+    assert first == 2
+    assert second == 0
+    assert len(repository.patch_events) == 1

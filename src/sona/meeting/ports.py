@@ -25,6 +25,7 @@ from .models import (
     TranscriptReconcileResult,
     TranscriptWindow,
 )
+from .speaker_attribution import CompletedItem, SpeakerPatchEvent, SpeakerPatchResult
 
 WindowListener = Callable[[TranscriptWindow], Awaitable[None]]
 GapListener = Callable[["CaptureGap"], Awaitable[None]]
@@ -189,10 +190,27 @@ class ClosableStore(Protocol):
     async def close(self) -> None: ...
 
 
+class SpeakerAttributionStore(Protocol):
+    """SPK-E2E-1 speaker-only 归属事务的消费面（禁止走 reconcile_window）。"""
+
+    async def append_completed_item(
+        self, meeting_id: UUID, item: CompletedItem
+    ) -> TranscriptReconcileResult | None: ...
+
+    async def apply_speaker_patches(
+        self, meeting_id: UUID, event: SpeakerPatchEvent
+    ) -> SpeakerPatchResult: ...
+
+    async def finalize_diarization(
+        self, meeting_id: UUID, *, status: str, reason: str | None = None
+    ) -> MeetingRecord: ...
+
+
 class MeetingRepository(
     MeetingStore,
     TranscriptStore,
     SpeakerStore,
+    SpeakerAttributionStore,
     MinutesStore,
     RepositoryMaintenance,
     ClosableStore,
@@ -209,6 +227,18 @@ class RecoveryReplayRepository(Protocol):
     async def reconcile_window(
         self, meeting_id: UUID, window: TranscriptWindow
     ) -> TranscriptReconcileResult: ...
+
+    async def append_completed_item(
+        self, meeting_id: UUID, item: CompletedItem
+    ) -> TranscriptReconcileResult | None: ...
+
+    async def apply_speaker_patches(
+        self, meeting_id: UUID, event: SpeakerPatchEvent
+    ) -> SpeakerPatchResult: ...
+
+    async def finalize_diarization(
+        self, meeting_id: UUID, *, status: str, reason: str | None = None
+    ) -> MeetingRecord: ...
 
     async def set_status(
         self, meeting_id: UUID, status: MeetingStatus, *, reason: str | None = None
@@ -249,6 +279,7 @@ __all__ = [
     "MinutesStore",
     "RecoveryReplayRepository",
     "RepositoryMaintenance",
+    "SpeakerAttributionStore",
     "SpeakerStore",
     "SummaryWorkloadControl",
     "TranscriptStore",

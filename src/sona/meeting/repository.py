@@ -24,6 +24,7 @@ from sona.meeting.minutes_rendering import render_minutes_markdown
 
 from .migrations import validate_schema_name
 from .models import (
+    DiarizationStatus,
     MeetingPage,
     MeetingRecord,
     MeetingStatus,
@@ -38,11 +39,23 @@ from .models import (
     TranscriptWindow,
 )
 from .ports import MeetingRepository as MeetingRepository
+from .speaker_attribution import (
+    SPEAKER_KEY_UNKNOWN,
+    CompletedItem,
+    SpeakerPatchEvent,
+    SpeakerPatchResult,
+    canonical_payload_hash,
+    patch_target_errors,
+    resolve_patch_application,
+    segment_identity,
+    speaker_source_key,
+)
 from .speaker_labels import speaker_display_label
 
 _MEETING_COLUMNS = """
     id, title, status, language, audio_source, started_at, ended_at,
-    transcript_revision, content_revision, interruption_reason, metadata,
+    transcript_revision, content_revision, interruption_reason,
+    diarization_status, diarization_reason, metadata,
     created_at, updated_at
 """
 _MINUTES_COLUMNS = """
@@ -141,9 +154,11 @@ def _meeting_from_row(row: Sequence[Any]) -> MeetingRecord:
         transcript_revision=int(row[7]),
         content_revision=int(row[8]),
         interruption_reason=cast(str | None, row[9]),
-        metadata=dict(cast(Mapping[str, Any], row[10] or {})),
-        created_at=cast(datetime, row[11]),
-        updated_at=cast(datetime, row[12]),
+        diarization_status=DiarizationStatus(str(row[10])),
+        diarization_reason=cast(str | None, row[11]),
+        metadata=dict(cast(Mapping[str, Any], row[12] or {})),
+        created_at=cast(datetime, row[13]),
+        updated_at=cast(datetime, row[14]),
     )
 
 
@@ -493,6 +508,554 @@ class PostgresMeetingRepository:
                 segments=segments,
             )
 
+
+    # ------------------------------------------------------------------
+    # SPK-E2E-1 speaker-only 归属事务（不重用 reconcile_window 的后缀替换）
+    # ------------------------------------------------------------------
+
+    async def append_completed_item(
+        self, meeting_id: UUID, item: CompletedItem
+    ) -> TranscriptReconcileResult | None:
+        """追加一次 commit 的固定正文单元；重复 event 幂等返回 None。
+
+        正文、时间、身份在落库后不可变；speaker-only 修订走
+        :meth:`apply_speaker_patches`，禁止用后缀替换实现归属更新。
+        """
+        payload_hash = canonical_payload_hash({"item": item.model_dump(mode="json")})
+        async with self._connection() as connection:  # noqa: SIM117
+            async with connection.transaction():
+                meeting = await self._lock_meeting(connection, meeting_id)
+                if meeting is None:
+                    raise MeetingNotFoundError("会议不存在")
+                if meeting.status not in {MeetingStatus.RECORDING, MeetingStatus.FINALIZING}:
+                    raise MeetingConflictError("会议已不再接受转录")
+                credential = await self._source_event_credential(
+                    connection, meeting_id, item.source_session_id, item.event_id
+                )
+                if credential is not None:
+                    if credential != payload_hash:
+                        raise MeetingConflictError("同 source event 内容冲突")
+                    return None
+
+                await self._register_transcription_source(
+                    connection, meeting_id, item
+                )
+                rows = await self._insert_completed_segments(connection, meeting_id, item)
+                if not rows:
+                    # 空 transcript 的 completed 也推进水位与版本事实。
+                    rows = []
+                transcript_revision = meeting.transcript_revision + 1
+                content_revision = meeting.content_revision + 1
+                await connection.execute(
+                    f"""
+                    UPDATE {self._schema}.meetings
+                    SET transcript_revision = %s, content_revision = %s, updated_at = %s
+                    WHERE id = %s
+                    """,
+                    (transcript_revision, content_revision, _utc_now(), meeting_id),
+                )
+                await self._insert_event(
+                    connection,
+                    meeting_id,
+                    "completed_item_appended",
+                    {
+                        "session_id": item.source_session_id,
+                        "item_id": item.item_id,
+                        "sequence": item.sequence,
+                        "segment_count": len(rows),
+                    },
+                )
+                await connection.execute(
+                    f"""
+                    INSERT INTO {self._schema}.meeting_source_events
+                        (meeting_id, session_id, event_id, event_kind, canonical_payload_hash)
+                    VALUES (%s, %s, %s, 'completed', %s)
+                    """,
+                    (meeting_id, item.source_session_id, item.event_id, payload_hash),
+                )
+                segments = tuple(
+                    NormalizedSegment(
+                        id=row_id,
+                        order=order,
+                        source_epoch=item.source_epoch,
+                        speaker_key=speaker_key,
+                        start_ms=start_ms,
+                        end_ms=end_ms,
+                        text=text,
+                    )
+                    for row_id, order, speaker_key, start_ms, end_ms, text in rows
+                )
+                replace_from_ms = min(
+                    (segment.start_ms for segment in segments), default=0
+                )
+                return TranscriptReconcileResult(
+                    meeting_id=meeting_id,
+                    transcript_revision=transcript_revision,
+                    content_revision=content_revision,
+                    replace_from_ms=replace_from_ms,
+                    segments=segments,
+                )
+
+    async def _register_transcription_source(
+        self, connection: Any, meeting_id: UUID, item: CompletedItem
+    ) -> None:
+        """登记/推进 source epoch 时钟；一个 session 只能绑定一个 epoch。"""
+        cursor = await connection.execute(
+            f"""
+            SELECT source_epoch FROM {self._schema}.meeting_transcription_sources
+            WHERE meeting_id = %s AND session_id = %s
+            """,
+            (meeting_id, item.source_session_id),
+        )
+        existing = await cursor.fetchone()
+        if existing is not None and int(existing[0]) != item.source_epoch:
+            raise MeetingConflictError("source session 已绑定其他 epoch")
+        committed_meeting_sample = item.meeting_start_sample + item.audio_end_sample
+        await connection.execute(
+            f"""
+            INSERT INTO {self._schema}.meeting_transcription_sources
+                (meeting_id, source_epoch, session_id, meeting_start_sample,
+                 last_committed_meeting_sample)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (meeting_id, source_epoch) DO UPDATE SET
+                last_committed_meeting_sample = GREATEST(
+                    {self._schema}.meeting_transcription_sources.last_committed_meeting_sample,
+                    EXCLUDED.last_committed_meeting_sample
+                ),
+                updated_at = now()
+            """,
+            (
+                meeting_id,
+                item.source_epoch,
+                item.source_session_id,
+                item.meeting_start_sample,
+                committed_meeting_sample,
+            ),
+        )
+
+    async def _insert_completed_segments(
+        self, connection: Any, meeting_id: UUID, item: CompletedItem
+    ) -> list[tuple[UUID, int, str, int, int, str]]:
+        """把 completed 的归属单元逐个落为不可变正文段（speaker 初始 unknown）。"""
+        cursor = await connection.execute(
+            f"""
+            SELECT coalesce(max(segment_order) + 1, 0)
+            FROM {self._schema}.transcript_segments
+            WHERE meeting_id = %s
+            """,
+            (meeting_id,),
+        )
+        row = await cursor.fetchone()
+        next_order = int(row[0]) if row and row[0] is not None else 0
+        inserted: list[tuple[UUID, int, str, int, int, str]] = []
+        for unit in item.units:
+            text = item.canonical_text[unit.text_start : unit.text_end]
+            if not text.strip():
+                continue
+            start_ms = (item.meeting_start_sample + unit.audio_start_sample) // 16
+            end_ms = (item.meeting_start_sample + unit.audio_end_sample) // 16
+            segment_id = segment_identity(
+                meeting_id, item.source_session_id, unit.segment_uid
+            )
+            await connection.execute(
+                f"""
+                INSERT INTO {self._schema}.transcript_segments
+                    (id, meeting_id, segment_order, source_epoch, speaker_key,
+                     start_ms, end_ms, text, source_session_id, source_segment_uid,
+                     source_item_id, speaker_status, timing_quality)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (id) DO NOTHING
+                """,
+                (
+                    segment_id,
+                    meeting_id,
+                    next_order,
+                    item.source_epoch,
+                    SPEAKER_KEY_UNKNOWN,
+                    start_ms,
+                    end_ms,
+                    text,
+                    item.source_session_id,
+                    unit.segment_uid,
+                    item.item_id,
+                    SPEAKER_KEY_UNKNOWN,
+                    unit.timing_quality,
+                ),
+            )
+            next_order += 1
+            inserted.append(
+                (segment_id, next_order - 1, SPEAKER_KEY_UNKNOWN, start_ms, end_ms, text)
+            )
+        return inserted
+
+    async def apply_speaker_patches(
+        self, meeting_id: UUID, event: SpeakerPatchEvent
+    ) -> SpeakerPatchResult:
+        """speaker-only 幂等修订事务：整批校验、人工优先、一次版本。"""
+        payload_hash = canonical_payload_hash({"event": event.model_dump(mode="json")})
+        async with self._connection() as connection:  # noqa: SIM117
+            async with connection.transaction():
+                meeting = await self._lock_meeting(connection, meeting_id)
+                if meeting is None:
+                    raise MeetingNotFoundError("会议不存在")
+                if meeting.status not in {MeetingStatus.RECORDING, MeetingStatus.FINALIZING}:
+                    raise MeetingConflictError("会议已不再接受归属修订")
+                credential = await self._source_event_credential(
+                    connection, meeting_id, event.source_session_id, event.event_id
+                )
+                if credential is not None:
+                    if credential != payload_hash:
+                        raise MeetingConflictError("同 source event 内容冲突")
+                    return SpeakerPatchResult(
+                        meeting_id=meeting_id,
+                        transcript_revision=meeting.transcript_revision,
+                        content_revision=meeting.content_revision,
+                        diarization_status=meeting.diarization_status.value,
+                    )
+
+                source_cursor = await connection.execute(
+                    f"""
+                    SELECT 1 FROM {self._schema}.meeting_transcription_sources
+                    WHERE meeting_id = %s AND session_id = %s
+                    """,
+                    (meeting_id, event.source_session_id),
+                )
+                if await source_cursor.fetchone() is None:
+                    raise MeetingConflictError("未知 source session，整批拒绝")
+
+                target_rows = await self._load_patch_targets(
+                    connection, meeting_id, event
+                )
+                targets = {
+                    row[0]: (row[1], row[2]) for row in target_rows
+                }
+                errors = patch_target_errors(event, targets)
+                if errors:
+                    raise MeetingConflictError(f"归属修订目标校验失败: {errors[0]}")
+
+                changed: list[UUID] = []
+                for patch in event.patches:
+                    target = next(
+                        row for row in target_rows if row[0] == patch.segment_uid
+                    )
+                    override_key = target[3]
+                    old_key = target[5]
+                    segment_id = target[6]
+                    model_key = (
+                        await self._ensure_speaker_source(
+                            connection,
+                            meeting_id,
+                            event.source_session_id,
+                            patch.source_speaker,
+                            event.group_generation,
+                        )
+                        if patch.source_speaker is not None
+                        else None
+                    )
+                    speaker_key, model_speaker_key, _override = resolve_patch_application(
+                        override_key=override_key,
+                        model_key=model_key,
+                        status=patch.status,
+                    )
+                    frozen = patch.status == "stable"
+                    await connection.execute(
+                        f"""
+                        UPDATE {self._schema}.transcript_segments
+                        SET speaker_key = %s,
+                            model_speaker_key = %s,
+                            speaker_revision = %s,
+                            speaker_status = %s,
+                            speaker_frozen = %s,
+                            coverage_ratio = %s,
+                            overlap_ratio = %s,
+                            speaker_candidates = %s,
+                            updated_at = %s
+                        WHERE id = %s
+                        """,
+                        (
+                            speaker_key,
+                            model_speaker_key,
+                            patch.revision,
+                            patch.status,
+                            frozen,
+                            patch.coverage_ratio,
+                            patch.overlap_ratio,
+                            Jsonb(
+                                [
+                                    {"speaker": c.source_speaker, "support_ratio": c.support_ratio}
+                                    for c in patch.candidates
+                                ]
+                            ),
+                            _utc_now(),
+                            segment_id,
+                        ),
+                    )
+                    if speaker_key != old_key:
+                        changed.append(segment_id)
+
+                await connection.execute(
+                    f"""
+                    UPDATE {self._schema}.meeting_transcription_sources
+                    SET stable_through_sample = GREATEST(stable_through_sample, %s),
+                        last_update_sequence = GREATEST(last_update_sequence, %s),
+                        group_generation = coalesce(%s, group_generation),
+                        updated_at = now()
+                    WHERE meeting_id = %s AND session_id = %s
+                    """,
+                    (
+                        event.stable_through_sample,
+                        event.sequence,
+                        event.group_generation,
+                        meeting_id,
+                        event.source_session_id,
+                    ),
+                )
+
+                current_status = meeting.diarization_status
+                if changed:
+                    transcript_revision = meeting.transcript_revision + 1
+                    content_revision = meeting.content_revision + 1
+                    next_status: DiarizationStatus = (
+                        DiarizationStatus.ACTIVE
+                        if current_status is DiarizationStatus.LEGACY
+                        else current_status
+                    )
+                    await connection.execute(
+                        f"""
+                        UPDATE {self._schema}.meetings
+                        SET transcript_revision = %s, content_revision = %s,
+                            diarization_status = %s, updated_at = %s
+                        WHERE id = %s
+                        """,
+                        (
+                            transcript_revision,
+                            content_revision,
+                            next_status.value,
+                            _utc_now(),
+                            meeting_id,
+                        ),
+                    )
+                    await self._insert_event(
+                        connection,
+                        meeting_id,
+                        "speaker_patched",
+                        {
+                            "session_id": event.source_session_id,
+                            "event_id": event.event_id,
+                            "sequence": event.sequence,
+                            "changed_count": len(changed),
+                            "transcript_revision": transcript_revision,
+                            "content_revision": content_revision,
+                        },
+                    )
+                else:
+                    transcript_revision = meeting.transcript_revision
+                    content_revision = meeting.content_revision
+                    next_status = current_status
+                await connection.execute(
+                    f"""
+                    INSERT INTO {self._schema}.meeting_source_events
+                        (meeting_id, session_id, event_id, event_kind, canonical_payload_hash)
+                    VALUES (%s, %s, %s, 'patch', %s)
+                    """,
+                    (meeting_id, event.source_session_id, event.event_id, payload_hash),
+                )
+                return SpeakerPatchResult(
+                    meeting_id=meeting_id,
+                    changed_segment_ids=tuple(changed),
+                    transcript_revision=transcript_revision,
+                    content_revision=content_revision,
+                    diarization_status=next_status.value,
+                )
+
+    async def _source_event_credential(
+        self, connection: Any, meeting_id: UUID, session_id: str, event_id: str
+    ) -> str | None:
+        cursor = await connection.execute(
+            f"""
+            SELECT canonical_payload_hash FROM {self._schema}.meeting_source_events
+            WHERE meeting_id = %s AND session_id = %s AND event_id = %s
+            """,
+            (meeting_id, session_id, event_id),
+        )
+        row = await cursor.fetchone()
+        return str(row[0]) if row is not None else None
+
+    async def _load_patch_targets(
+        self, connection: Any, meeting_id: UUID, event: SpeakerPatchEvent
+    ) -> list[tuple[str, int, bool, str | None, str | None, str, UUID]]:
+        uids = [patch.segment_uid for patch in event.patches]
+        if not uids:
+            return []
+        cursor = await connection.execute(
+            f"""
+            SELECT source_segment_uid, speaker_revision, speaker_frozen,
+                   speaker_override_key, model_speaker_key, speaker_key, id
+            FROM {self._schema}.transcript_segments
+            WHERE meeting_id = %s AND source_session_id = %s
+              AND source_segment_uid = ANY(%s)
+            """,
+            (meeting_id, event.source_session_id, uids),
+        )
+        rows = await cursor.fetchall()
+        return [
+            (
+                str(row[0]),
+                int(row[1]),
+                bool(row[2]),
+                cast(str | None, row[3]),
+                cast(str | None, row[4]),
+                str(row[5]),
+                cast(UUID, row[6]),
+            )
+            for row in rows
+        ]
+
+    async def _ensure_speaker_source(
+        self,
+        connection: Any,
+        meeting_id: UUID,
+        session_id: str,
+        source_speaker: str,
+        group_generation: str | None,
+    ) -> str:
+        """解析/登记 (session, 匿名标签) → 会议内不透明应用身份。"""
+        application_key = speaker_source_key(meeting_id, session_id, source_speaker)
+        await connection.execute(
+            f"""
+            INSERT INTO {self._schema}.meeting_speaker_sources
+                (meeting_id, session_id, source_speaker, group_generation,
+                 application_speaker_key)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (meeting_id, session_id, source_speaker) DO UPDATE SET
+                updated_at = now()
+            """,
+            (meeting_id, session_id, source_speaker, group_generation, application_key),
+        )
+        return application_key
+
+    async def set_speaker_override(
+        self, meeting_id: UUID, segment_id: UUID, override_key: str
+    ) -> None:
+        """人工改归属：写 override 并立即生效；后续自动修订只更新模型证据。"""
+        override_key = override_key.strip()
+        if not override_key or len(override_key) > 200:
+            raise ValueError("override speaker key 无效")
+        async with self._connection() as connection:  # noqa: SIM117
+            async with connection.transaction():
+                meeting = await self._lock_meeting(connection, meeting_id)
+                if meeting is None:
+                    raise MeetingNotFoundError("会议不存在")
+                cursor = await connection.execute(
+                    f"""
+                    UPDATE {self._schema}.transcript_segments
+                    SET speaker_override_key = %s, speaker_key = %s, updated_at = %s
+                    WHERE meeting_id = %s AND id = %s
+                    RETURNING id
+                    """,
+                    (override_key, override_key, _utc_now(), meeting_id, segment_id),
+                )
+                if await cursor.fetchone() is None:
+                    raise MeetingNotFoundError("归属目标 segment 不存在")
+                await self._bump_revisions_for_manual_change(
+                    connection, meeting_id, meeting, "speaker_override_set",
+                    {"segment_id": str(segment_id), "override_key": override_key},
+                )
+
+    async def clear_speaker_override(self, meeting_id: UUID, segment_id: UUID) -> None:
+        """撤销人工归属：显式清空 override，恢复使用最新模型值。"""
+        async with self._connection() as connection:  # noqa: SIM117
+            async with connection.transaction():
+                meeting = await self._lock_meeting(connection, meeting_id)
+                if meeting is None:
+                    raise MeetingNotFoundError("会议不存在")
+                cursor = await connection.execute(
+                    f"""
+                    UPDATE {self._schema}.transcript_segments
+                    SET speaker_override_key = NULL,
+                        speaker_key = coalesce(model_speaker_key, %s),
+                        updated_at = %s
+                    WHERE meeting_id = %s AND id = %s
+                    RETURNING id
+                    """,
+                    (SPEAKER_KEY_UNKNOWN, _utc_now(), meeting_id, segment_id),
+                )
+                if await cursor.fetchone() is None:
+                    raise MeetingNotFoundError("归属目标 segment 不存在")
+                await self._bump_revisions_for_manual_change(
+                    connection, meeting_id, meeting, "speaker_override_cleared",
+                    {"segment_id": str(segment_id)},
+                )
+
+    async def _bump_revisions_for_manual_change(
+        self,
+        connection: Any,
+        meeting_id: UUID,
+        meeting: MeetingRecord,
+        event_type: str,
+        payload: dict[str, Any],
+    ) -> None:
+        """人工更正递增版本；纪要 worker 据此把旧结果标 stale。"""
+        transcript_revision = meeting.transcript_revision + 1
+        content_revision = meeting.content_revision + 1
+        await connection.execute(
+            f"""
+            UPDATE {self._schema}.meetings
+            SET transcript_revision = %s, content_revision = %s, updated_at = %s
+            WHERE id = %s
+            """,
+            (transcript_revision, content_revision, _utc_now(), meeting_id),
+        )
+        await self._insert_event(connection, meeting_id, event_type, payload)
+
+    async def finalize_diarization(
+        self,
+        meeting_id: UUID,
+        *,
+        status: str,
+        reason: str | None = None,
+    ) -> MeetingRecord:
+        """记录分人终态（complete/degraded）；不改变会议持久状态。"""
+        if status not in {"complete", "degraded"}:
+            raise ValueError("diarization 终态必须是 complete 或 degraded")
+        if reason is not None:
+            reason = reason.strip() or None
+            if reason is not None and (
+                len(reason) > 128 or any(ord(char) < 32 for char in reason)
+            ):
+                raise ValueError("diarization 原因无效")
+        async with self._connection() as connection:  # noqa: SIM117
+            async with connection.transaction():
+                meeting = await self._lock_meeting(connection, meeting_id)
+                if meeting is None:
+                    raise MeetingNotFoundError("会议不存在")
+                target = (
+                    DiarizationStatus.COMPLETE
+                    if status == "complete"
+                    else DiarizationStatus.DEGRADED
+                )
+                if meeting.diarization_status is target and meeting.diarization_reason == reason:
+                    return meeting
+                cursor = await connection.execute(
+                    f"""
+                    UPDATE {self._schema}.meetings
+                    SET diarization_status = %s, diarization_reason = %s, updated_at = %s
+                    WHERE id = %s
+                    RETURNING {_MEETING_COLUMNS}
+                    """,
+                    (target.value, reason, _utc_now(), meeting_id),
+                )
+                row = await cursor.fetchone()
+                if row is None:
+                    raise RepositoryUnavailableError("diarization 终态写入后无法读取会议")
+                await self._insert_event(
+                    connection,
+                    meeting_id,
+                    "diarization_finalized",
+                    {"status": status, "reason": reason},
+                )
+                return _meeting_from_row(row)
+
     async def finalize_transcript(
         self,
         meeting_id: UUID,
@@ -757,18 +1320,40 @@ class PostgresMeetingRepository:
                 raise MeetingNotFoundError("会议不存在")
 
             now = _utc_now()
+            affected = [key for key, dst in remapping.items() if key != dst]
+            if affected:
+                # 按原快照一次计算每段目标 key：A↔B 交换不得用循环 UPDATE
+                # 逐键重写（那会让两组坍缩成同一个值）。
+                snapshot_cursor = await connection.execute(
+                    f"""
+                    SELECT id, speaker_key FROM {self._schema}.transcript_segments
+                    WHERE meeting_id = %s AND speaker_key = ANY(%s)
+                    """,
+                    (meeting_id, affected),
+                )
+                snapshot = await snapshot_cursor.fetchall()
+                updates = [
+                    (remapping[str(row[1])], row[0])
+                    for row in snapshot
+                    if remapping.get(str(row[1]), str(row[1])) != str(row[1])
+                ]
+                if updates:
+                    await connection.execute(
+                        f"""
+                        UPDATE {self._schema}.transcript_segments AS segments
+                        SET speaker_key = v.key, updated_at = %s
+                        FROM unnest(%s::uuid[], %s::text[]) AS v(id, key)
+                        WHERE segments.id = v.id
+                        """,
+                        (
+                            now,
+                            [row[1] for row in updates],
+                            [row[0] for row in updates],
+                        ),
+                    )
             for src_spk, dst_spk in remapping.items():
                 if src_spk == dst_spk:
                     continue
-                # 更新 segments 表中的说话人
-                await connection.execute(
-                    f"""
-                    UPDATE {self._schema}.transcript_segments
-                    SET speaker_key = %s
-                    WHERE meeting_id = %s AND speaker_key = %s
-                    """,
-                    (dst_spk, meeting_id, src_spk),
-                )
                 # 检查源说话人是否有自定义名称
                 src_cursor = await connection.execute(
                     f"""
@@ -792,14 +1377,22 @@ class PostgresMeetingRepository:
                             """,
                             (src_display, now, meeting_id, dst_spk),
                         )
-                # 删除已被合并的旧说话人记录
-                await connection.execute(
+                # 只删除已无任何 segment 引用的旧说话人记录（swap 目标除外）。
+                orphan_cursor = await connection.execute(
                     f"""
-                    DELETE FROM {self._schema}.meeting_speakers
-                    WHERE meeting_id = %s AND speaker_key = %s
+                    SELECT 1 FROM {self._schema}.transcript_segments
+                    WHERE meeting_id = %s AND speaker_key = %s LIMIT 1
                     """,
                     (meeting_id, src_spk),
                 )
+                if await orphan_cursor.fetchone() is None:
+                    await connection.execute(
+                        f"""
+                        DELETE FROM {self._schema}.meeting_speakers
+                        WHERE meeting_id = %s AND speaker_key = %s
+                        """,
+                        (meeting_id, src_spk),
+                    )
 
             content_revision = meeting.content_revision + 1
             transcript_revision = meeting.transcript_revision + 1

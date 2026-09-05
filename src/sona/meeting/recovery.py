@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .models import MeetingStatus, TranscriptWindow
 from .ports import RecoveryReplayRepository
+from .speaker_attribution import CompletedItem, SpeakerPatchEvent
 
 logger = logging.getLogger(__name__)
 
@@ -210,13 +211,13 @@ class RecoveryJournal:
             return
         if envelope.operation == "set_status":
             try:
-                status = MeetingStatus(str(payload.get("status")))
+                target_status = MeetingStatus(str(payload.get("status")))
             except ValueError as exc:
                 raise RecoveryJournalError("set_status status 无效") from exc
             reason = payload.get("reason")
             if reason is not None and not isinstance(reason, str):
                 raise RecoveryJournalError("set_status reason 无效")
-            await repository.set_status(envelope.meeting_id, status, reason=reason)
+            await repository.set_status(envelope.meeting_id, target_status, reason=reason)
             return
         if envelope.operation == "finalize_transcript":
             await repository.finalize_transcript(envelope.meeting_id)
@@ -226,6 +227,39 @@ class RecoveryJournal:
             if key is not None and not isinstance(key, str):
                 raise RecoveryJournalError("create_minutes idempotency_key 无效")
             await repository.create_minutes(envelope.meeting_id, idempotency_key=key)
+            return
+        if envelope.operation == "append_completed_item":
+            item_payload = payload.get("item")
+            if not isinstance(item_payload, dict):
+                raise RecoveryJournalError("append_completed_item payload 无效")
+            try:
+                item = CompletedItem.model_validate(item_payload)
+            except ValueError as exc:
+                raise RecoveryJournalError("append_completed_item payload 无效") from exc
+            await repository.append_completed_item(envelope.meeting_id, item)
+            return
+        if envelope.operation == "apply_speaker_patches":
+            event_payload = payload.get("event")
+            if not isinstance(event_payload, dict):
+                raise RecoveryJournalError("apply_speaker_patches payload 无效")
+            try:
+                event = SpeakerPatchEvent.model_validate(event_payload)
+            except ValueError as exc:
+                raise RecoveryJournalError("apply_speaker_patches payload 无效") from exc
+            await repository.apply_speaker_patches(envelope.meeting_id, event)
+            return
+        if envelope.operation == "finalize_diarization":
+            status = payload.get("status")
+            if status not in {"complete", "degraded"}:
+                raise RecoveryJournalError("finalize_diarization status 无效")
+            reason = payload.get("reason")
+            if reason is not None and not isinstance(reason, str):
+                raise RecoveryJournalError("finalize_diarization reason 无效")
+            await repository.finalize_diarization(
+                envelope.meeting_id,
+                status=str(status),
+                reason=reason if isinstance(reason, str) else None,
+            )
             return
         raise RecoveryJournalError(f"不支持的 recovery operation: {envelope.operation}")
 

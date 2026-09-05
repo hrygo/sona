@@ -35,6 +35,7 @@ from sona.meeting.ports import (
     MinutesStore,
     RecoveryReplayRepository,
     RepositoryMaintenance,
+    SpeakerAttributionStore,
     SpeakerStore,
     TranscriptStore,
 )
@@ -221,6 +222,17 @@ class FakeReplayRepository:
         self.calls.append("get_meeting")
         return None
 
+    async def append_completed_item(self, meeting_id: UUID, item: object) -> None:
+        self.calls.append("append_completed_item")
+
+    async def apply_speaker_patches(self, meeting_id: UUID, event: object) -> None:
+        self.calls.append("apply_speaker_patches")
+
+    async def finalize_diarization(
+        self, meeting_id: UUID, *, status: str, reason: str | None = None
+    ) -> None:
+        self.calls.append("finalize_diarization")
+
     async def reconcile_window(
         self, meeting_id: UUID, window: TranscriptWindow
     ) -> TranscriptReconcileResult:
@@ -301,6 +313,9 @@ async def test_recovery_replay_repository_only_combines_replay_methods() -> None
         "set_status",
         "finalize_transcript",
         "create_minutes",
+        "append_completed_item",
+        "apply_speaker_patches",
+        "finalize_diarization",
     }
     assert _protocol_members(RecoveryReplayRepository) == expected
     # 窄 replay 端口不包含 list/update/delete/claim/complete
@@ -319,6 +334,7 @@ def test_repository_aggregate_covers_narrow_ports() -> None:
         _protocol_members(MeetingStore)
         | _protocol_members(TranscriptStore)
         | _protocol_members(SpeakerStore)
+        | _protocol_members(SpeakerAttributionStore)
         | _protocol_members(MinutesStore)
         | _protocol_members(RepositoryMaintenance)
         | _protocol_members(ClosableStore)
