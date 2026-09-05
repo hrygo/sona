@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-__all__ = ["ASRSegment", "ASRWindow"]
+__all__ = ["ASRAttributionUnitSpan", "ASRCompletedItem", "ASRSegment", "ASRWindow"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +48,31 @@ class ASRSegment:
 
 
 @dataclass(frozen=True, slots=True)
+class ASRAttributionUnitSpan:
+    """扩展模式 completed 内的一个归属单元（session 样本域）。"""
+
+    segment_uid: str
+    text_start: int
+    text_end: int
+    audio_start_sample: int
+    audio_end_sample: int
+    timing_quality: str
+
+
+@dataclass(frozen=True, slots=True)
+class ASRCompletedItem:
+    """扩展模式一次 commit 的固定正文事实（未经会议时钟换算）。"""
+
+    item_id: str
+    event_id: str
+    sequence: int
+    audio_start_sample: int
+    audio_end_sample: int
+    canonical_text: str
+    units: tuple[ASRAttributionUnitSpan, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class ASRWindow:
     """ASR 端口当前 confirmed 窗口与易失 partial 文本。"""
 
@@ -58,6 +83,9 @@ class ASRWindow:
     speaker_remap: tuple[tuple[str, str], ...] = ()
     # SPK-E2E-1 扩展模式：产生本窗口的 SpeechRail session id（重放/身份用）。
     source_session_id: str | None = None
+    completed_items: tuple[ASRCompletedItem, ...] = ()
+    # 本窗口 source epoch 的会议时间起点（毫秒）；completed 换算 meeting 样本用。
+    offset_ms: int = 0
 
     def __post_init__(self) -> None:
         if self.source_epoch < 0:

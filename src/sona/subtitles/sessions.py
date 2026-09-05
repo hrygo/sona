@@ -31,6 +31,7 @@ PayloadSink = Callable[[dict[str, object]], Awaitable[None]]
 CapturePayloadSink = Callable[[dict[str, object], bool], Awaitable[None]]
 WindowListener = Callable[[TranscriptWindow], Awaitable[None]]
 GapListener = Callable[["CaptureGap"], Awaitable[None]]
+DiarizationListener = Callable[[object], Awaitable[None]]
 
 # 兼容别名：同一对象定义只保留在 meeting/ports.py。
 CapturePreparation = CaptureLease
@@ -685,6 +686,12 @@ class MeetingCaptureSession:
         self._last_window: TranscriptWindow | None = None
         self._event_listeners: list[WindowListener] = []
         self._gap_listeners: list[GapListener] = []
+        # SPK-E2E-1：分人扩展事件监听器（patch 持久化由应用层注册）；
+        # EOF 屏障由应用层注入：等 watermark→记录终态→才允许 clear。
+        self._diarization_listeners: list[DiarizationListener] = []
+        self.diarization_barrier: (
+            Callable[[StreamingTranscriber, float], Awaitable[None]] | None
+        ) = None
 
     @property
     def owner(self) -> str | None:
@@ -725,6 +732,10 @@ class MeetingCaptureSession:
     def add_gap_listener(self, listener: GapListener) -> None:
         if listener not in self._gap_listeners:
             self._gap_listeners.append(listener)
+
+    def add_diarization_listener(self, listener: DiarizationListener) -> None:
+        if listener not in self._diarization_listeners:
+            self._diarization_listeners.append(listener)
 
     def remove_gap_listener(self, listener: GapListener) -> None:
         with contextlib.suppress(ValueError):
@@ -824,6 +835,12 @@ class MeetingCaptureSession:
                 self._active.clear()
                 final_window = await stream.finish()
                 self._last_window = self._to_transcript_window(final_window)
+                release = getattr(stream, "release_clear", None)
+                if release is not None and self.diarization_barrier is not None:
+                    # 扩展模式：stream.finish 只等到 Rail finalized；必须先等
+                    # 应用层把对应归属修订持久化（屏障），再发送 clear。
+                    await self.diarization_barrier(stream, deadline)
+                    await release(timeout_secs=max(0.0, deadline - loop.time()))
             elapsed_ms = (loop.time() - start_time) * 1000
             logger.info("会议 ASR 优雅冲刷完成，耗时 %.1f ms", elapsed_ms)
         except TimeoutError as exc:
@@ -1047,6 +1064,14 @@ class MeetingCaptureSession:
         self._on_last_event()
         if event.kind == "ready":
             self._ready.set()
+            return
+        if event.kind == "diarization":
+            payload: object = dict(event.metadata)
+            for diarization_listener in tuple(self._diarization_listeners):
+                try:
+                    await diarization_listener(payload)
+                except Exception:
+                    logger.exception("MeetingCaptureSession: 分人事件监听器失败")
             return
         if event.kind == "error":
             self._on_last_error(event.error_message)

@@ -25,6 +25,7 @@ from sona.subtitles.clients import ClientSender, SubtitleClientHub
 from sona.subtitles.sessions import (
     STABLE_CONNECTION_RESET_AFTER_SECS,
     CapturePreparation,
+    DiarizationListener,
     FinalizationTimeout,
     FinalizationTimeoutError,
     MeetingCaptureSession,
@@ -216,6 +217,16 @@ class SubtitleProxy:
 
     def add_gap_listener(self, listener: GapListener) -> None:
         self._capture_session.add_gap_listener(listener)
+
+    def add_diarization_listener(self, listener: DiarizationListener) -> None:
+        """注册 SPK-E2E-1 分人扩展事件监听器（应用层 patch 持久化）。"""
+        self._capture_session.add_diarization_listener(listener)
+
+    def set_diarization_barrier(
+        self, barrier: Callable[[StreamingTranscriber, float], Awaitable[None]] | None
+    ) -> None:
+        """注册扩展模式 EOF 屏障（等 watermark→记录终态→才允许 clear）。"""
+        self._capture_session.diarization_barrier = barrier
 
     def remove_gap_listener(self, listener: GapListener) -> None:
         self._capture_session.remove_gap_listener(listener)

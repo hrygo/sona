@@ -20,6 +20,10 @@ export type StorageHealth = "ok" | "degraded" | "unavailable";
 
 export type ExportFormat = "md" | "txt" | "srt" | "json";
 
+/** SPK-E2E-1 归属状态（speaker_details=1 协商后才出现） */
+export type SpeakerStatus = "unknown" | "tentative" | "stable";
+export type TimingQuality = "aligned" | "unavailable";
+
 export interface TranscriptSegment {
   readonly id: string;
   readonly order: number;
@@ -31,6 +35,10 @@ export interface TranscriptSegment {
   readonly translation?: string | null;
   readonly detected_language?: string;
   readonly source_epoch?: number;
+  readonly speaker_status?: SpeakerStatus;
+  readonly timing_quality?: TimingQuality;
+  readonly overlap_ratio?: number | null;
+  readonly speaker_manual?: boolean;
 }
 
 /** 前端派生阅读视图块 (§5.1, 不作为后端持久化事实) */

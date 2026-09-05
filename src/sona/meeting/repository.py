@@ -77,6 +77,13 @@ _SEGMENT_COLUMNS = """
     translation, detected_language, created_at, updated_at
 """
 
+# SPK-E2E-1 归属证据列（get_transcript 专用；reconcile 签名沿用 _SEGMENT_COLUMNS）。
+_SEGMENT_COLUMNS_DETAIL = """
+    id, segment_order, source_epoch, speaker_key, start_ms, end_ms, text,
+    translation, detected_language, speaker_status, timing_quality,
+    overlap_ratio, (speaker_override_key IS NOT NULL) AS speaker_manual
+"""
+
 logger = logging.getLogger(__name__)
 
 
@@ -582,8 +589,11 @@ class PostgresMeetingRepository:
                         start_ms=start_ms,
                         end_ms=end_ms,
                         text=text,
+                        speaker_status=SPEAKER_KEY_UNKNOWN,
+                        timing_quality=timing_quality,
                     )
-                    for row_id, order, speaker_key, start_ms, end_ms, text in rows
+                    for row_id, order, speaker_key, start_ms, end_ms, text,
+                    timing_quality in rows
                 )
                 replace_from_ms = min(
                     (segment.start_ms for segment in segments), default=0
@@ -635,7 +645,7 @@ class PostgresMeetingRepository:
 
     async def _insert_completed_segments(
         self, connection: Any, meeting_id: UUID, item: CompletedItem
-    ) -> list[tuple[UUID, int, str, int, int, str]]:
+    ) -> list[tuple[UUID, int, str, int, int, str, str]]:
         """把 completed 的归属单元逐个落为不可变正文段（speaker 初始 unknown）。"""
         cursor = await connection.execute(
             f"""
@@ -647,7 +657,7 @@ class PostgresMeetingRepository:
         )
         row = await cursor.fetchone()
         next_order = int(row[0]) if row and row[0] is not None else 0
-        inserted: list[tuple[UUID, int, str, int, int, str]] = []
+        inserted: list[tuple[UUID, int, str, int, int, str, str]] = []
         for unit in item.units:
             text = item.canonical_text[unit.text_start : unit.text_end]
             if not text.strip():
@@ -684,7 +694,15 @@ class PostgresMeetingRepository:
             )
             next_order += 1
             inserted.append(
-                (segment_id, next_order - 1, SPEAKER_KEY_UNKNOWN, start_ms, end_ms, text)
+                (
+                    segment_id,
+                    next_order - 1,
+                    SPEAKER_KEY_UNKNOWN,
+                    start_ms,
+                    end_ms,
+                    text,
+                    unit.timing_quality,
+                )
             )
         return inserted
 
@@ -860,13 +878,46 @@ class PostgresMeetingRepository:
                     """,
                     (meeting_id, event.source_session_id, event.event_id, payload_hash),
                 )
+                suffix_segments: tuple[NormalizedSegment, ...] = ()
+                if changed:
+                    suffix_segments = await self._affected_suffix(
+                        connection, meeting_id, changed
+                    )
                 return SpeakerPatchResult(
                     meeting_id=meeting_id,
                     changed_segment_ids=tuple(changed),
                     transcript_revision=transcript_revision,
                     content_revision=content_revision,
                     diarization_status=next_status.value,
+                    segments=suffix_segments,
                 )
+
+    async def _affected_suffix(
+        self, connection: Any, meeting_id: UUID, changed_ids: list[UUID]
+    ) -> tuple[NormalizedSegment, ...]:
+        """返回 end_ms >= 最小被改 start 的完整后缀（presenter replace 语义）。"""
+        start_cursor = await connection.execute(
+            f"""
+            SELECT min(start_ms) FROM {self._schema}.transcript_segments
+            WHERE meeting_id = %s AND id = ANY(%s)
+            """,
+            (meeting_id, changed_ids),
+        )
+        row = await start_cursor.fetchone()
+        min_start = int(row[0]) if row is not None and row[0] is not None else 0
+        suffix_cursor = await connection.execute(
+            f"""
+            SELECT {_SEGMENT_COLUMNS_DETAIL}
+            FROM {self._schema}.transcript_segments
+            WHERE meeting_id = %s AND end_ms >= %s
+            ORDER BY segment_order, start_ms, id
+            """,
+            (meeting_id, min_start),
+        )
+        return tuple(
+            _segment_from_detail_row(suffix_row)
+            for suffix_row in await suffix_cursor.fetchall()
+        )
 
     async def _source_event_credential(
         self, connection: Any, meeting_id: UUID, session_id: str, event_id: str
@@ -933,6 +984,19 @@ class PostgresMeetingRepository:
             (meeting_id, session_id, source_speaker, group_generation, application_key),
         )
         return application_key
+
+    async def get_diarization_watermark(self, meeting_id: UUID, session_id: str) -> int:
+        """返回 source 的 last_update_sequence（分人 patch 已持久化水位）。"""
+        async with self._connection() as connection:
+            cursor = await connection.execute(
+                f"""
+                SELECT last_update_sequence FROM {self._schema}.meeting_transcription_sources
+                WHERE meeting_id = %s AND session_id = %s
+                """,
+                (meeting_id, session_id),
+            )
+            row = await cursor.fetchone()
+            return int(row[0]) if row is not None and row[0] is not None else 0
 
     async def set_speaker_override(
         self, meeting_id: UUID, segment_id: UUID, override_key: str
@@ -1128,7 +1192,7 @@ class PostgresMeetingRepository:
                 raise MeetingNotFoundError("会议不存在")
             segment_cursor = await connection.execute(
                 f"""
-                SELECT {_SEGMENT_COLUMNS}
+                SELECT {_SEGMENT_COLUMNS_DETAIL}
                 FROM {self._schema}.transcript_segments
                 WHERE meeting_id = %s
                 ORDER BY segment_order, start_ms, id
@@ -1147,6 +1211,10 @@ class PostgresMeetingRepository:
                     text=str(row[6]),
                     translation=cast(str | None, row[7]),
                     detected_language=cast(str | None, row[8]),
+                    speaker_status=cast(str | None, row[9]),
+                    timing_quality=cast(str | None, row[10]),
+                    overlap_ratio=float(row[11]),
+                    speaker_manual=bool(row[12]),
                 )
                 for row in segment_rows
             )
@@ -1799,6 +1867,25 @@ class PostgresMeetingRepository:
             """,
             (uuid4(), meeting_id, event_type, Jsonb(payload)),
         )
+
+
+def _segment_from_detail_row(row: Any) -> NormalizedSegment:
+    """_SEGMENT_COLUMNS_DETAIL 行 → NormalizedSegment（含归属证据字段）。"""
+    return NormalizedSegment(
+        id=cast(UUID, row[0]),
+        order=int(row[1]),
+        source_epoch=int(row[2]),
+        speaker_key=str(row[3]),
+        start_ms=int(row[4]),
+        end_ms=int(row[5]),
+        text=str(row[6]),
+        translation=cast(str | None, row[7]),
+        detected_language=cast(str | None, row[8]),
+        speaker_status=cast(str | None, row[9]),
+        timing_quality=cast(str | None, row[10]),
+        overlap_ratio=float(row[11]),
+        speaker_manual=bool(row[12]),
+    )
 
 
 def _render_minutes_markdown(result: MinutesResult) -> str:

@@ -10,10 +10,13 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 from uuid import UUID, uuid5
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+if TYPE_CHECKING:  # pragma: no cover - 仅供类型检查；models 反向导入 CompletedItem
+    from .models import NormalizedSegment
 
 __all__ = [
     "SPEAKER_KEY_UNKNOWN",
@@ -34,6 +37,9 @@ __all__ = [
 # 无归属保留 key：不是 UUID 身份，不得出现在实名候选列表。
 SPEAKER_KEY_UNKNOWN = "unknown"
 SPEAKER_STATUS_UNKNOWN = "unknown"
+
+# 16 kHz：1 ms = 16 samples；样本域换算保持整数精确。
+SAMPLES_PER_MS = 16
 
 _NEW_MODE_IDENTITY = "speechrail:spk-e2e-1"
 _SPEAKER_SOURCE_IDENTITY = "speechrail:spk-e2e-1:speaker-source"
@@ -150,6 +156,9 @@ class SpeakerPatchResult(BaseModel):
     transcript_revision: int = Field(ge=0)
     content_revision: int = Field(ge=0)
     diarization_status: Literal["legacy", "active", "complete", "degraded"]
+    # 受影响后缀（end_ms >= 最小被改 start 的完整段列表），供 presenter
+    # 按既有 replace_from_ms 语义输出；空表示无可广播变更。
+    segments: tuple[NormalizedSegment, ...] = ()
 
 
 def segment_identity(meeting_id: UUID, session_id: str, segment_uid: str) -> UUID:

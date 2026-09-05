@@ -4579,3 +4579,26 @@
   padding: 20px;
   overflow-y: auto;
 }
+
+/* SPK-E2E-1 归属状态徽标（speaker_details=1 协商后渲染） */
+.speaker-status-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 6px;
+  border-radius: 999px;
+  font-size: 11px;
+  line-height: 18px;
+  font-weight: 600;
+  border: 1px solid var(--border-secondary, rgba(128, 128, 128, 0.4));
+}
+
+.speaker-status-badge.is-tentative {
+  color: var(--text-secondary, #6b7280);
+  background: var(--bg-tertiary, rgba(128, 128, 128, 0.12));
+}
+
+.speaker-status-badge.is-unknown {
+  color: var(--text-secondary, #6b7280);
+  background: transparent;
+  border-style: dashed;
+}

@@ -340,6 +340,18 @@ class SpeechRailRealtimeClient:
     async def clear(self) -> None:
         await self._transport.send_event({"type": "input_audio_buffer.clear"})
 
+    async def send_diarization_finalize(self, finalization_id: str) -> None:
+        """发送 SPK-E2E-1 分人 finalize（Rail 规格 §5.4.3）。"""
+        if not finalization_id or len(finalization_id) > 128:
+            raise ValueError("finalization_id 长度必须在 1–128")
+        await self._transport.send_event(
+            {
+                "type": "speechrail.diarization.finalize",
+                "event_id": f"evt_client_{finalization_id}",
+                "finalization_id": finalization_id,
+            }
+        )
+
     async def receive(self) -> dict[str, object]:
         return await self._transport.receive()
 

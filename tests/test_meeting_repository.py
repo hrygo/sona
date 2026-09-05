@@ -419,3 +419,41 @@ async def test_apply_speaker_remapping_merges_speakers_and_updates_segments(
     assert len(merged_speakers) == 1
     assert merged_speakers[0].speaker_key == "epoch0:s0"
     assert merged_speakers[0].display_name == "张三"
+
+
+# ---------------------------------------------------------------------------
+# S2: 说话人重映射的 A↔B 交换必须按原快照计算
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_speaker_remapping_swap_preserves_both_groups(
+    repository: PostgresMeetingRepository,
+) -> None:
+    meeting = await repository.create_meeting(
+        "交换映射", language="Chinese", audio_source="microphone"
+    )
+    key_a = "group:g:speaker:spk_01"
+    key_b = "group:g:speaker:spk_02"
+    window = TranscriptWindow(
+        source_epoch=1,
+        segments=(
+            NormalizedSegment(
+                id=uuid4(), order=0, source_epoch=1, speaker_key=key_a,
+                start_ms=0, end_ms=1000, text="甲说",
+            ),
+            NormalizedSegment(
+                id=uuid4(), order=1, source_epoch=1, speaker_key=key_b,
+                start_ms=2000, end_ms=3000, text="乙说",
+            ),
+        ),
+    )
+    await repository.reconcile_window(meeting.id, window)
+
+    # A↔B 交换：不得让两组都坍缩成同一个值。
+    await repository.apply_speaker_remapping(meeting.id, {key_a: key_b, key_b: key_a})
+
+    document = await repository.get_transcript(meeting.id)
+    by_text = {segment.text: segment.speaker_key for segment in document.segments}
+    assert by_text["甲说"] == key_b
+    assert by_text["乙说"] == key_a

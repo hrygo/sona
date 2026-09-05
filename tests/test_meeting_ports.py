@@ -351,6 +351,8 @@ def test_capture_gateway_protocol_shape() -> None:
         "remove_gap_listener",
         "add_audio_listener",
         "remove_audio_listener",
+        "add_diarization_listener",
+        "set_diarization_barrier",
         "prepare_capture",
         "commit_capture",
         "abort_prepared_capture",

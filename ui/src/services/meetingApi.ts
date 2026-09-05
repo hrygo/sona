@@ -57,8 +57,12 @@ export const meetingApi = {
     return handleResponse<MeetingDetail>(res);
   },
 
-  async fetchTranscript(id: string): Promise<TranscriptResponse> {
-    const res = await fetch(apiUrl(`/api/v1/meetings/${encodeURIComponent(id)}/transcript`));
+  async fetchTranscript(id: string, speakerDetails = true): Promise<TranscriptResponse> {
+    // speaker_details=1 协商归属证据字段；服务不支持该参数时回退 legacy 字段集合。
+    const query = speakerDetails ? "?speaker_details=1" : "";
+    const res = await fetch(
+      apiUrl(`/api/v1/meetings/${encodeURIComponent(id)}/transcript${query}`),
+    );
     return handleResponse<TranscriptResponse>(res);
   },
 

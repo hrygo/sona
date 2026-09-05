@@ -12,9 +12,15 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from dataclasses import replace
 
 from sona.asr.contracts import ASRCapabilities, ASREvent, ASRSessionContext
-from sona.asr.models import ASRSegment, ASRWindow
+from sona.asr.models import (
+    ASRAttributionUnitSpan,
+    ASRCompletedItem,
+    ASRSegment,
+    ASRWindow,
+)
 from sona.speechrail.transcription_events import (
     DiarizationFinalizedEvent,
     DiarizationStatusEvent,
@@ -102,6 +108,8 @@ class SpeechRailStreamingTranscriber:
         self._diarization_broken = False
         self._diarization_degraded = False
         self._diarization_finalized: DiarizationFinalizedEvent | None = None
+        self._finalize_sent = False
+        self._finalized_ready = asyncio.Event()
 
     @property
     def uri(self) -> str:
@@ -124,6 +132,11 @@ class SpeechRailStreamingTranscriber:
             self._extensions_requested and self._client.diarization_contract is not None
         )
         self._ready = True
+
+    @property
+    def session_id(self) -> str:
+        """当前连接的 session id；未连接时为空串（分人修订依赖它）。"""
+        return self._client.session_id or ""
 
     @property
     def extensions_negotiated(self) -> bool:
@@ -221,11 +234,18 @@ class SpeechRailStreamingTranscriber:
                         # item offset。不再接收 legacy .segment（解码层拒绝）。
                         self._register_unit_uids(decoded)
                         segments = self._segments_from_units(decoded)
+                        completed = self._completed_item(
+                            decoded,
+                            event_id=str(event.get("event_id") or ""),
+                            sequence=_event_sequence(event),
+                        )
                         final_window = ASRWindow(
                             source_epoch=self._context.source_epoch,
                             partial="",
                             segments=segments,
                             source_session_id=self._client.session_id,
+                            completed_items=(completed,),
+                            offset_ms=self._context.offset_ms,
                         )
                         self._last_window = final_window
                         self._last_confirmed_window = final_window
@@ -286,7 +306,15 @@ class SpeechRailStreamingTranscriber:
                 elif isinstance(decoded, DiarizationUpdateEvent):
                     event_out = self._consume_diarization_update(decoded)
                     if event_out is not None:
-                        yield event_out
+                        yield replace(
+                            event_out,
+                            metadata={
+                                **event_out.metadata,
+                                "session_id": self._client.session_id,
+                                "event_id": str(event.get("event_id") or ""),
+                                "sequence": _event_sequence(event),
+                            },
+                        )
                 elif isinstance(decoded, DiarizationStatusEvent):
                     if not self._diarization_broken:
                         self._diarization_degraded = True
@@ -294,7 +322,14 @@ class SpeechRailStreamingTranscriber:
                 elif isinstance(decoded, DiarizationFinalizedEvent):
                     if not self._diarization_broken:
                         self._diarization_finalized = decoded
-                        yield ASREvent(kind="diarization", metadata={"event": decoded})
+                        self._finalized_ready.set()
+                        yield ASREvent(
+                            kind="diarization",
+                            metadata={
+                                "event": decoded,
+                                "session_id": self._client.session_id,
+                            },
+                        )
                 elif isinstance(decoded, SpeechRailTranscriptionError):
                     yield self._set_terminal_error(
                         "SPEECHRAIL_REQUEST_FAILED",
@@ -305,20 +340,63 @@ class SpeechRailStreamingTranscriber:
             self._events_active = False
 
     async def finish(self) -> ASRWindow:
+        """EOF 屏障：legacy=commit→clear ack；扩展=commit→finalize→等 finalized。
+
+        扩展模式的 clear 延后到 :meth:`release_clear`——必须等上层把
+        finalized 对应的归属修订持久化之后才能释放会话（Rail 规格 §5.4.7）。
+        """
         async with self._finish_lock:
             if not self._finish_requested:
                 self._finish_requested = True
                 self._final_ready.clear()
+                self._finalized_ready.clear()
             if not self._commit_sent:
                 await self._client.commit()
                 self._commit_sent = True
-            if not self._clear_sent:
+            if self._extensions_negotiated:
+                if not self._finalize_sent:
+                    await self._client.send_diarization_finalize(
+                        f"fin-{self._context.source_epoch}"
+                    )
+                    self._finalize_sent = True
+            elif not self._clear_sent:
                 await self._client.clear()
                 self._clear_sent = True
+        if self._extensions_negotiated:
+            try:
+                await asyncio.wait_for(
+                    self._finalized_ready.wait(), timeout=self._finish_timeout_secs
+                )
+            except TimeoutError:
+                raise TimeoutError(
+                    "SPEECHRAIL_FINAL_TIMEOUT: diarization finalized was not received"
+                ) from None
+            if self._terminal_error is not None:
+                code, message = self._terminal_error
+                raise RuntimeError(f"{code}: {message}")
+            return self._last_confirmed_window
         try:
             await asyncio.wait_for(self._final_ready.wait(), timeout=self._finish_timeout_secs)
         except TimeoutError:
             raise TimeoutError("SPEECHRAIL_FINAL_TIMEOUT: final result was not received") from None
+        if self._terminal_error is not None:
+            code, message = self._terminal_error
+            raise RuntimeError(f"{code}: {message}")
+        return self._last_confirmed_window
+
+    async def release_clear(self, *, timeout_secs: float | None = None) -> ASRWindow:
+        """扩展模式：分人终态已持久化后发送 clear 并等待确认；幂等。"""
+        async with self._finish_lock:
+            if not self._clear_sent:
+                await self._client.clear()
+                self._clear_sent = True
+        try:
+            await asyncio.wait_for(
+                self._final_ready.wait(),
+                timeout=timeout_secs if timeout_secs is not None else self._finish_timeout_secs,
+            )
+        except TimeoutError:
+            raise TimeoutError("SPEECHRAIL_FINAL_TIMEOUT: clear ack was not received") from None
         if self._terminal_error is not None:
             code, message = self._terminal_error
             raise RuntimeError(f"{code}: {message}")
@@ -343,6 +421,32 @@ class SpeechRailStreamingTranscriber:
         """登记 completed 交付的归属单元 UID（同连接可被后续修订引用）。"""
         for unit in completed.attribution_units:
             self._unit_updates.setdefault(unit.segment_uid, (0, (), unit.audio_end_sample))
+
+    def _completed_item(
+        self, decoded: TranscriptionCompleted, *, event_id: str, sequence: int
+    ) -> ASRCompletedItem:
+        """把扩展 completed 投影为中立 CompletedItem（session 样本域原样保留）。"""
+        assert decoded.audio_start_sample is not None
+        assert decoded.audio_end_sample is not None
+        return ASRCompletedItem(
+            item_id=decoded.item_id or "item-unknown",
+            event_id=event_id,
+            sequence=sequence,
+            audio_start_sample=decoded.audio_start_sample,
+            audio_end_sample=decoded.audio_end_sample,
+            canonical_text=decoded.transcript,
+            units=tuple(
+                ASRAttributionUnitSpan(
+                    segment_uid=unit.segment_uid,
+                    text_start=unit.text_start,
+                    text_end=unit.text_end,
+                    audio_start_sample=unit.audio_start_sample,
+                    audio_end_sample=unit.audio_end_sample,
+                    timing_quality=unit.timing_quality,
+                )
+                for unit in decoded.attribution_units
+            ),
+        )
 
     def _segments_from_units(
         self, completed: TranscriptionCompleted
@@ -501,6 +605,12 @@ def _speaker_key(context: ASRSessionContext, speaker: str) -> str:
     if context.purpose == "meeting" and context.diarization_group_id is not None:
         return f"group:{context.diarization_group_id}:speaker:{speaker}"
     return f"epoch:{context.source_epoch}:speaker:{speaker}"
+
+
+def _event_sequence(event: dict[str, object]) -> int:
+    """顶层 sequence（transport 已校验为严格递增 int）。"""
+    value = event.get("sequence")
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
 
 
 def _update_content(update: object) -> tuple[object, ...]:

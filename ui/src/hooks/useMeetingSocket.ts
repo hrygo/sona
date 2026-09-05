@@ -49,6 +49,12 @@ export function isMeetingEventRelevant(
   return false;
 }
 
+/** 新 UI 默认协商 speaker_details=1；服务端忽略该参数时回到 legacy 呈现。 */
+export function withSpeakerDetails(rawUrl: string): string {
+  if (/[?&]speaker_details=/.test(rawUrl)) return rawUrl;
+  return `${rawUrl}${rawUrl.includes("?") ? "&" : "?"}speaker_details=1`;
+}
+
 export function useMeetingSocket(url = runtimeConfig.meetingWsUrl) {
   const [connectionState, setConnectionState] = useState<ConnectionState>("connecting");
 
@@ -189,7 +195,7 @@ export function useMeetingSocket(url = runtimeConfig.meetingWsUrl) {
       }
     };
 
-    const socket = new ReconnectingSocket(url, {
+    const socket = new ReconnectingSocket(withSpeakerDetails(url), {
       onState: setConnectionState,
       onMessage: handleMessage,
     });

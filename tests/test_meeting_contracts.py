@@ -25,6 +25,11 @@ INNER_OS_FIXTURE_FILES = {
     "inner-os-insufficient.json",
     "inner-os-invalid-focus.json",
 }
+# speaker_details opt-in 变体：不属于 legacy envelope 事件集，单独校验。
+SPEAKER_DETAILS_FIXTURE_FILES = {
+    "transcript-reconciled-speaker-details.json",
+    "transcript-response-speaker-details.json",
+}
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -35,6 +40,7 @@ def _meeting_event_fixtures() -> list[Path]:
     return sorted(
         path for path in (ROOT / "fixtures").glob("*.json")
         if path.name not in INNER_OS_FIXTURE_FILES
+        and path.name not in SPEAKER_DETAILS_FIXTURE_FILES
     )
 
 
@@ -106,3 +112,81 @@ def test_event_schema_rejects_payload_from_another_event() -> None:
 
     with pytest.raises(ValidationError):
         Draft202012Validator(schema, format_checker=FormatChecker()).validate(value)
+
+
+def test_speaker_details_opt_in_schemas_and_fixtures() -> None:
+    """新字段只在 opt-in 响应中出现；legacy schema 的 additionalProperties=false 保持不变。"""
+    legacy_event_schema = _load_json(
+        ROOT / "schemas/event-transcript-reconciled.schema.json"
+    )
+    detail_event_fixture = _load_json(
+        ROOT / "fixtures/transcript-reconciled-speaker-details.json"
+    )
+
+    # legacy schema 拒绝归属证据字段
+    with pytest.raises(ValidationError):
+        Draft202012Validator(legacy_event_schema).validate(detail_event_fixture)
+
+    # opt-in 变体 schema 接受同一 fixture
+    variant_event_schema = _load_json(
+        ROOT / "schemas/event-transcript-reconciled-speaker-details.schema.json"
+    )
+    Draft202012Validator(variant_event_schema).validate(detail_event_fixture)
+
+    # response 变体
+    response_schema = _load_json(
+        ROOT / "schemas/transcript-response-speaker-details.schema.json"
+    )
+    response_fixture = _load_json(
+        ROOT / "fixtures/transcript-response-speaker-details.json"
+    )
+    Draft202012Validator(response_schema).validate(response_fixture)
+
+    # 缺少 speaker_details 常量的响应不符合 opt-in 契约
+    without_flag = {k: v for k, v in response_fixture.items() if k != "speaker_details"}
+    with pytest.raises(ValidationError):
+        Draft202012Validator(response_schema).validate(without_flag)
+
+
+def test_backend_presenter_matches_speaker_details_contract() -> None:
+    """后端 presenter 与契约 fixture 使用同一测试向量。"""
+    from sona.meeting.api import _segment_json
+    from sona.meeting.models import NormalizedSegment
+
+    segment = NormalizedSegment(
+        id=__import__("uuid").UUID("11111111-1111-4111-8111-111111111111"),
+        order=0,
+        source_epoch=1,
+        speaker_key="speechrail:spk-e2e-1:speaker-source:s1:spk_01",
+        start_ms=1000,
+        end_ms=2000,
+        text="确认发布。",
+        detected_language="zh",
+        speaker_status="stable",
+        timing_quality="aligned",
+        overlap_ratio=0.0,
+        speaker_manual=False,
+    )
+    speakers = {
+        "speechrail:spk-e2e-1:speaker-source:s1:spk_01": {
+            "speaker_key": "speechrail:spk-e2e-1:speaker-source:s1:spk_01",
+            "default_label": "说话人 1",
+            "display_name": "说话人 1",
+        }
+    }
+
+    # legacy 视图：原字段集合
+    legacy_payload = _segment_json(segment, speakers)
+    expected_legacy_keys = {
+        "id", "order", "speaker_key", "speaker_name", "start_ms", "end_ms",
+        "text", "translation", "detected_language", "source_epoch",
+    }
+    assert set(legacy_payload) == expected_legacy_keys
+
+    # opt-in 视图：与 fixture 同形
+    detail_payload = _segment_json(segment, speakers, detail=True)
+    response_fixture = _load_json(
+        ROOT / "fixtures/transcript-response-speaker-details.json"
+    )
+    fixture_segment = response_fixture["segments"][0]
+    assert detail_payload == fixture_segment

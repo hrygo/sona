@@ -13,7 +13,11 @@ from uuid import UUID
 
 from sona.meeting.diarization_overlay import MeetingDiarizationOverlay, meeting_diarization_group_id
 from sona.meeting.diarization_smoother import DiarizationSmoother
-from sona.meeting.finalization import MeetingFinalizer
+from sona.meeting.finalization import (
+    DiarizationGateState,
+    MeetingFinalizer,
+    RepositoryDiarizationGate,
+)
 from sona.meeting.models import (
     MeetingRecord,
     MeetingStatus,
@@ -29,6 +33,11 @@ from sona.meeting.ports import (
     MeetingCaptureGateway,
     MeetingRepository,
     SummaryWorkloadControl,
+)
+from sona.meeting.speaker_attribution import (
+    AttributionCandidate,
+    SpeakerPatch,
+    SpeakerPatchEvent,
 )
 from sona.meeting.speaker_labels import speaker_display_label
 
@@ -106,6 +115,7 @@ class MeetingSession:
         self._committed_preparation: MeetingPreparation | None = None
         self._listener: WindowListener | None = None
         self._persistence = TranscriptPersistence(repository, journal=recovery_journal)
+        self._diarization_gate_state = DiarizationGateState()
         self._finalizer = MeetingFinalizer(
             gateway=gateway,
             persistence=self._persistence,
@@ -114,10 +124,18 @@ class MeetingSession:
             minutes_store=repository,
             timeout_secs=finalization_timeout_secs,
             diarization_overlay=diarization_overlay,
+            diarization_gate=RepositoryDiarizationGate(
+                repository, self._diarization_gate_state
+            ),
         )
         self._audio_listener: AudioListener | None = None
         if diarization_overlay is not None:
             self._audio_listener = diarization_overlay.push_pcm
+        # SPK-E2E-1：分人扩展的 patch 持久化监听器与 EOF 屏障。
+        with contextlib.suppress(AttributeError):
+            self.gateway.add_diarization_listener(self._on_diarization_event)
+        with contextlib.suppress(AttributeError):
+            self.gateway.set_diarization_barrier(self._diarization_barrier)
         self._storage_degraded = False
         self._speaker_names: dict[str, str] = {}
 
@@ -439,12 +457,119 @@ class MeetingSession:
         except Exception:
             return self._speaker_names
 
+    async def _on_diarization_event(self, payload: Any) -> None:
+        """分人扩展事件 → SpeakerPatchEvent → speaker-only 事务（journal 兜底）。"""
+        meeting_id = self._active_meeting_id
+        if meeting_id is None or payload is None:
+            return
+        if getattr(payload, "updates", None) is None:
+            # status/finalized 由屏障消费；这里只持久化归属修订。
+            return
+        session_id = getattr(payload, "_session_id", None) or ""
+        if not session_id:
+            logger.warning("MeetingSession: 分人修订缺少 session id，跳过")
+            return
+        patches = tuple(
+            SpeakerPatch(
+                segment_uid=update.segment_uid,
+                revision=update.revision,
+                status=update.status,
+                source_speaker=update.speaker,
+                coverage_ratio=update.coverage_ratio,
+                overlap_ratio=update.overlap_ratio,
+                candidates=tuple(
+                    AttributionCandidate(
+                        source_speaker=candidate.speaker,
+                        support_ratio=candidate.support_ratio,
+                    )
+                    for candidate in update.candidates
+                ),
+            )
+            for update in payload.updates
+        )
+        event = SpeakerPatchEvent(
+            source_session_id=session_id,
+            event_id=str(getattr(payload, "_event_id", "") or ""),
+            sequence=int(getattr(payload, "_sequence", 0) or 0),
+            group_generation=getattr(payload, "group_generation", None),
+            stable_through_sample=int(getattr(payload, "stable_through_sample", 0) or 0),
+            patches=patches,
+        )
+        try:
+            patch_result = await self._persistence.apply_patches(meeting_id, event)
+        except Exception:
+            logger.exception("MeetingSession: 分人修订持久化失败 (meeting_id=%s)", meeting_id)
+            return
+        if patch_result is not None and patch_result.segments:
+            await self._emit_reconciled(
+                meeting_id,
+                transcript_revision=int(patch_result.transcript_revision),
+                content_revision=int(patch_result.content_revision),
+                replace_from_ms=min(
+                    segment.start_ms for segment in patch_result.segments
+                ),
+                segments=patch_result.segments,
+            )
+
+    async def _diarization_barrier(self, stream: Any, deadline: float) -> None:
+        """EOF 屏障：Rail finalized 后等 watermark 持久化，再记录分人终态。"""
+        meeting_id = self._active_meeting_id
+        if meeting_id is None:
+            return
+        self._diarization_gate_state.extensions_active = True
+        finalized = getattr(stream, "diarization_finalized", None)
+        if finalized is None:
+            return
+        session_id = getattr(stream, "session_id", None) or ""
+        if finalized.status == "degraded":
+            with contextlib.suppress(Exception):
+                await self.repository.finalize_diarization(
+                    meeting_id, status="degraded", reason=finalized.reason
+                )
+            return
+        loop = asyncio.get_running_loop()
+        margin_secs = 1.0
+        while loop.time() < deadline - margin_secs:
+            watermark = await self.repository.get_diarization_watermark(
+                meeting_id, session_id
+            )
+            if watermark >= finalized.last_update_sequence:
+                with contextlib.suppress(Exception):
+                    await self.repository.finalize_diarization(
+                        meeting_id, status="complete", reason=None
+                    )
+                return
+            await asyncio.sleep(0.1)
+        # watermark 超时：分人 degraded，但文字已保存。
+        with contextlib.suppress(Exception):
+            await self.repository.finalize_diarization(
+                meeting_id, status="degraded", reason="diarization_overloaded"
+            )
+
     async def _on_window(self, window: TranscriptWindow) -> None:
         meeting_id = self._active_meeting_id
         if meeting_id is None:
             return
         if self.diarization_smoother is not None:
             window = self.diarization_smoother.smooth_window(window)
+        if window.completed:
+            # 扩展模式：固定正文走 append_completed_item；禁止 reconcile 后缀替换双写。
+            for item in window.completed:
+                try:
+                    result = await self._persistence.append_item(meeting_id, item)
+                except Exception:
+                    with contextlib.suppress(Exception):
+                        await self.gateway.abort_capture()
+                    raise
+                if result is not None and result.segments:
+                    await self._emit_reconciled(
+                        meeting_id,
+                        transcript_revision=int(result.transcript_revision),
+                        content_revision=int(result.content_revision),
+                        replace_from_ms=int(result.replace_from_ms),
+                        segments=result.segments,
+                    )
+            return
         if window.partial:
             await self._emit(
                 "transcript_partial",
@@ -478,6 +603,31 @@ class MeetingSession:
                 "segments": [
                     self._segment_payload(segment, speaker_names)
                     for segment in window.segments
+                ],
+            },
+        )
+
+    async def _emit_reconciled(
+        self,
+        meeting_id: UUID,
+        *,
+        transcript_revision: int,
+        content_revision: int,
+        replace_from_ms: int,
+        segments: Any,
+    ) -> None:
+        """按既有 replace_from_ms 语义广播完整受影响后缀。"""
+        speaker_names = await self._load_speaker_names(meeting_id)
+        await self._emit(
+            "transcript_reconciled",
+            meeting_id,
+            {
+                "transcript_revision": transcript_revision,
+                "content_revision": content_revision,
+                "replace_from_ms": replace_from_ms,
+                "segments": [
+                    self._segment_payload(segment, speaker_names)
+                    for segment in segments
                 ],
             },
         )

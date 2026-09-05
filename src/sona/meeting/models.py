@@ -13,6 +13,8 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from sona.meeting.speaker_attribution import CompletedItem, SpeakerPatchResult
+
 
 def _utc_now() -> datetime:
     """返回带 UTC 时区的当前时间。"""
@@ -82,6 +84,12 @@ class NormalizedSegment(_FrozenModel):
     text: str = Field(min_length=1, max_length=100_000)
     translation: str | None = Field(default=None, max_length=100_000)
     detected_language: str | None = Field(default=None, max_length=32)
+    # SPK-E2E-1 presenter 附属信息（仅 speaker_details 协商后对外输出；
+    # legacy 流保持 None，数据库读取时填充）。
+    speaker_status: str | None = Field(default=None)
+    timing_quality: str | None = Field(default=None)
+    overlap_ratio: float | None = Field(default=None, ge=0, le=1)
+    speaker_manual: bool | None = Field(default=None)
 
     @field_validator("speaker_key", "text", "translation", "detected_language")
     @classmethod
@@ -111,6 +119,8 @@ class TranscriptWindow(_FrozenModel):
     partial_speaker_name: str | None = Field(default=None, min_length=1, max_length=200)
     segments: tuple[NormalizedSegment, ...] = ()
     speaker_remap: tuple[tuple[str, str], ...] = ()
+    # SPK-E2E-1 扩展模式：走 append_completed_item 的固定正文事实（不走 reconcile）。
+    completed: tuple[CompletedItem, ...] = ()
 
     @field_validator("partial")
     @classmethod
@@ -320,3 +330,12 @@ class APIErrorDetail(_FrozenModel):
     message: str = Field(min_length=1, max_length=2_000)
     request_id: str = Field(min_length=1, max_length=128)
     details: dict[str, Any] = Field(default_factory=dict)
+
+
+# speaker_attribution 处于依赖下层（models 反向导入其 CompletedItem），
+# SpeakerPatchResult.segments 的 NormalizedSegment 前向引用在此统一解析；
+# 包内任何子模块导入都会先执行本模块，因此 rebuild 必然先于首次使用。
+SpeakerPatchResult.model_rebuild(
+    _types_namespace={"NormalizedSegment": NormalizedSegment},
+    _parent_namespace_depth=0,
+)

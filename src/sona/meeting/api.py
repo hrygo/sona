@@ -213,12 +213,12 @@ async def _meeting_detail(repository: Any, meeting: Any) -> dict[str, Any]:
     return result
 
 
-def _segment_json(segment: Any, speakers: Any) -> dict[str, Any]:
+def _segment_json(segment: Any, speakers: Any, *, detail: bool = False) -> dict[str, Any]:
     key = str(_attr(segment, "speaker_key", ""))
     speaker_map = _speaker_map(speakers)
     speaker = speaker_map.get(key, {})
     fallback_name = speaker_display_label(key)
-    return {
+    payload = {
         "id": _uuid(_attr(segment, "id")),
         "order": int(_attr(segment, "order", 0) or 0),
         "speaker_key": key,
@@ -232,16 +232,29 @@ def _segment_json(segment: Any, speakers: Any) -> dict[str, Any]:
         "detected_language": _attr(segment, "detected_language"),
         "source_epoch": int(_attr(segment, "source_epoch", 0) or 0),
     }
+    if detail:
+        # speaker_details=1 协商后才输出归属证据字段；legacy 响应保持原字段集合。
+        payload["speaker_status"] = str(_attr(segment, "speaker_status") or "unknown")
+        payload["timing_quality"] = str(
+            _attr(segment, "timing_quality") or "unavailable"
+        )
+        overlap = _attr(segment, "overlap_ratio")
+        payload["overlap_ratio"] = float(overlap) if overlap is not None else None
+        manual = _attr(segment, "speaker_manual")
+        payload["speaker_manual"] = bool(manual) if manual is not None else False
+    return payload
 
 
-def _transcript_json(document: Any) -> dict[str, Any]:
+def _transcript_json(document: Any, *, speaker_details: bool = False) -> dict[str, Any]:
     segments = _attr(document, "segments", ()) or ()
     speakers = _attr(document, "speakers", ()) or ()
     return {
         "meeting_id": _uuid(_attr(document, "meeting_id")),
         "transcript_revision": int(_attr(document, "transcript_revision", 0) or 0),
         "content_revision": int(_attr(document, "content_revision", 0) or 0),
-        "segments": [_segment_json(item, speakers) for item in segments],
+        "segments": [
+            _segment_json(item, speakers, detail=speaker_details) for item in segments
+        ],
     }
 
 
@@ -388,11 +401,16 @@ def create_meeting_router(
             raise _typed_error(exc) from exc
 
     @router.get("/meetings/{meeting_id}/transcript")
-    async def get_transcript(request: Request, meeting_id: UUID) -> dict[str, Any]:
+    async def get_transcript(
+        request: Request, meeting_id: UUID, speaker_details: bool = False
+    ) -> dict[str, Any]:
         repo = _repository(request, repository)
         try:
             document = await repo.get_transcript(meeting_id)
-            return _transcript_json(document)
+            payload = _transcript_json(document, speaker_details=speaker_details)
+            if speaker_details:
+                payload["speaker_details"] = True
+            return payload
         except Exception as exc:
             raise _typed_error(exc) from exc
 

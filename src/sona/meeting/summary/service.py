@@ -232,6 +232,7 @@ class MeetingSummaryService:
                 status="completed",
                 minutes=completed_minutes,
                 generation_stats=self._generation_stats(),
+                stale=await self._minutes_is_stale(meeting_id, completed_minutes),
             )
         except InvalidEvidenceError as exc:
             await self._fail(minutes_id, exc.code, str(exc))
@@ -299,6 +300,24 @@ class MeetingSummaryService:
         except Exception:
             logger.warning("会议标题事件广播失败", exc_info=True)
 
+    async def _minutes_is_stale(self, meeting_id: UUID | None, minutes: Any) -> bool:
+        """生成期间归属/命名变化递增 content_revision → 旧 revision 结果标 stale。"""
+        if meeting_id is None:
+            return False
+        get_meeting = getattr(self.repository, "get_meeting", None)
+        if get_meeting is None:
+            return False
+        try:
+            current = await get_meeting(meeting_id)
+        except Exception:
+            logger.warning("纪要 stale 检查读取会议失败", exc_info=True)
+            return False
+        if current is None:
+            return False
+        current_revision = int(_attr(current, "content_revision", 0) or 0)
+        source_revision = int(_attr(minutes, "source_content_revision", 0) or 0)
+        return current_revision > source_revision
+
     async def _emit(
         self,
         meeting_id: UUID,
@@ -310,6 +329,7 @@ class MeetingSummaryService:
         error_message: str | None = None,
         minutes: Any | None = None,
         generation_stats: list[dict[str, Any]] | None = None,
+        stale: bool = False,
     ) -> None:
         publisher = self.event_publisher
         if publisher is None:
@@ -326,6 +346,7 @@ class MeetingSummaryService:
                     "error_message": error_message,
                     "minutes": minutes,
                     "generation_stats": generation_stats,
+                    "stale": stale,
                 },
             )
         except Exception:

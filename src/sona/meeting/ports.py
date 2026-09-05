@@ -96,6 +96,14 @@ class MeetingCaptureGateway(Protocol):
 
     async def abort_capture(self) -> None: ...
 
+    def add_diarization_listener(
+        self, listener: Callable[[object], Awaitable[None]]
+    ) -> None: ...
+
+    def set_diarization_barrier(
+        self, barrier: Callable[[object, float], Awaitable[None]] | None
+    ) -> None: ...
+
 
 class MeetingStore(Protocol):
     """会议元数据 CRUD 消费面。"""
@@ -204,6 +212,10 @@ class SpeakerAttributionStore(Protocol):
     async def finalize_diarization(
         self, meeting_id: UUID, *, status: str, reason: str | None = None
     ) -> MeetingRecord: ...
+
+    async def get_diarization_watermark(
+        self, meeting_id: UUID, session_id: str
+    ) -> int: ...
 
 
 class MeetingRepository(

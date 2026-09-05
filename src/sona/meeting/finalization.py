@@ -10,6 +10,7 @@ import asyncio
 import contextlib
 import logging
 from dataclasses import dataclass
+from typing import Protocol
 from uuid import UUID
 
 from .diarization_overlay import (
@@ -17,6 +18,7 @@ from .diarization_overlay import (
     assign_speakers_by_overlap,
 )
 from .models import (
+    DiarizationStatus,
     MeetingRecord,
     MeetingStatus,
     MinutesRecord,
@@ -27,6 +29,7 @@ from .persistence import TranscriptPersistence
 from .ports import (
     CaptureFinalizationTimeoutError,
     MeetingCaptureGateway,
+    MeetingRepository,
     MinutesStore,
     SpeakerStore,
     TranscriptStore,
@@ -52,6 +55,62 @@ def _with_speaker(segment: NormalizedSegment, speaker_key: str) -> NormalizedSeg
     )
 
 
+class DiarizationFinalizationGate(Protocol):
+    """分人终态持久化门：封存与纪要创建前必须通过。"""
+
+    async def wait_persisted(self, meeting_id: UUID, *, timeout_secs: float) -> str:
+        """返回 legacy | complete | degraded | timeout。"""
+        ...
+
+
+class DiarizationGateState:
+    """每个会议的分人扩展活动标志（barrier 运行时置位）。"""
+
+    def __init__(self) -> None:
+        self.extensions_active = False
+
+    def reset(self) -> None:
+        self.extensions_active = False
+
+
+class RepositoryDiarizationGate:
+    """基于 repository 分人终态的轮询门；超时记录 degraded，不假 complete。"""
+
+    def __init__(
+        self,
+        repository: MeetingRepository,
+        state: DiarizationGateState,
+        *,
+        poll_interval_secs: float = 0.1,
+    ) -> None:
+        self._repository = repository
+        self._state = state
+        self._poll_interval_secs = poll_interval_secs
+
+    async def wait_persisted(self, meeting_id: UUID, *, timeout_secs: float) -> str:
+        if not self._state.extensions_active:
+            # 本会议未使用扩展流：legacy 模式沿用 clear barrier。
+            return "legacy"
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(0.0, timeout_secs)
+        while True:
+            meeting = await self._repository.get_meeting(meeting_id)
+            status = getattr(meeting, "diarization_status", None)
+            if status is DiarizationStatus.COMPLETE:
+                return "complete"
+            if status is DiarizationStatus.DEGRADED:
+                return "degraded"
+            if loop.time() >= deadline:
+                with contextlib.suppress(Exception):
+                    await self._repository.finalize_diarization(
+                        meeting_id,
+                        status="degraded",
+                        reason="finalization_timeout",
+                    )
+                return "timeout"
+            await asyncio.sleep(self._poll_interval_secs)
+
+
 @dataclass(frozen=True, slots=True)
 class MeetingFinalizationResult:
     """finalize 的稳定产出；不携带 cleanup/listener/event publisher。"""
@@ -75,6 +134,7 @@ class MeetingFinalizer:
         minutes_store: MinutesStore,
         timeout_secs: float,
         diarization_overlay: MeetingDiarizationOverlay | None = None,
+        diarization_gate: DiarizationFinalizationGate | None = None,
     ) -> None:
         self._gateway = gateway
         self._persistence = persistence
@@ -83,6 +143,7 @@ class MeetingFinalizer:
         self._minutes_store = minutes_store
         self._timeout_secs = timeout_secs
         self._diarization_overlay = diarization_overlay
+        self._diarization_gate = diarization_gate
         self._capture_closed = False
         self._finalized_record: MeetingRecord | None = None
 
@@ -114,6 +175,11 @@ class MeetingFinalizer:
             if final_window is not None and final_window.speaker_remap:
                 await self._speakers.apply_speaker_remapping(
                     meeting_id, dict(final_window.speaker_remap)
+                )
+            if not timed_out and self._diarization_gate is not None:
+                # 扩展模式：分人终态持久化之前，会议不能 completed、纪要不能排队。
+                await self._diarization_gate.wait_persisted(
+                    meeting_id, timeout_secs=self._timeout_secs
                 )
             record = await self._persistence.finalize(
                 meeting_id,

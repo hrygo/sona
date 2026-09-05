@@ -7,6 +7,11 @@ from uuid import NAMESPACE_URL, uuid5
 
 from sona.asr.models import ASRSegment, ASRWindow
 from sona.meeting.models import NormalizedSegment, TranscriptWindow
+from sona.meeting.speaker_attribution import (
+    SAMPLES_PER_MS,
+    CompletedAttributionUnit,
+    CompletedItem,
+)
 
 __all__ = ["meeting_sample", "to_transcript_window"]
 
@@ -41,6 +46,36 @@ def to_transcript_window(window: ASRWindow) -> TranscriptWindow:
         partial_speaker_key=window.partial_speaker_key,
         segments=tuple(_to_normalized_segment(window, segment) for segment in window.segments),
         speaker_remap=window.speaker_remap,
+        completed=tuple(_to_completed_item(item, window) for item in window.completed_items),
+    )
+
+
+def _to_completed_item(item: object, window: ASRWindow) -> CompletedItem:
+    """把扩展模式的 completed（session 样本域）转换为 repository 输入。"""
+    from sona.asr.models import ASRCompletedItem
+
+    assert isinstance(item, ASRCompletedItem)
+    return CompletedItem(
+        source_session_id=window.source_session_id or f"epoch:{window.source_epoch}",
+        source_epoch=window.source_epoch,
+        meeting_start_sample=window.offset_ms * SAMPLES_PER_MS,
+        item_id=item.item_id,
+        event_id=item.event_id,
+        sequence=item.sequence,
+        audio_start_sample=item.audio_start_sample,
+        audio_end_sample=item.audio_end_sample,
+        canonical_text=item.canonical_text,
+        units=tuple(
+            CompletedAttributionUnit(
+                segment_uid=unit.segment_uid,
+                text_start=unit.text_start,
+                text_end=unit.text_end,
+                audio_start_sample=unit.audio_start_sample,
+                audio_end_sample=unit.audio_end_sample,
+                timing_quality=unit.timing_quality,  # type: ignore[arg-type]
+            )
+            for unit in item.units
+        ),
     )
 
 

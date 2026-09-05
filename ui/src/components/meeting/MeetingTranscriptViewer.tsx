@@ -22,6 +22,33 @@ const SPEAKER_COLORS = [
   "#8b5cf6", // purple
 ];
 
+/**
+ * 归属状态徽标：speaker_details=1 协商后才有 speaker_status。
+ * 人工更正优先——已 override 的段不再展示模型状态。
+ */
+function speakerStatusBadge(seg: TranscriptSegment): {
+  readonly label: string;
+  readonly className: string;
+  readonly title: string;
+} | null {
+  if (seg.speaker_manual) return null;
+  if (seg.speaker_status === "tentative") {
+    return {
+      label: "待定",
+      className: "speaker-status-badge is-tentative",
+      title: "说话人归属待定，可能随分人修订变化",
+    };
+  }
+  if (seg.speaker_status === "unknown") {
+    return {
+      label: "未知",
+      className: "speaker-status-badge is-unknown",
+      title: "尚未识别说话人",
+    };
+  }
+  return null;
+}
+
 function highlightMatch(text: string, query: string) {
   if (!query.trim()) return text;
   const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -320,6 +347,14 @@ export function MeetingTranscriptViewer({
                       👤
                     </span>
                     <span className="speaker-name-text">{seg.speaker_name}</span>
+                    {(() => {
+                      const badge = speakerStatusBadge(seg);
+                      return badge ? (
+                        <span className={badge.className} title={badge.title}>
+                          {badge.label}
+                        </span>
+                      ) : null;
+                    })()}
                     <span className="speaker-edit-badge" title="可重命名">✎</span>
                   </button>
                   <div className="segment-actions-group">

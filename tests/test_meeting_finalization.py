@@ -17,8 +17,14 @@ from sona.meeting.diarization_overlay import (
     MeetingDiarizationOverlay,
     OverlayFlushResult,
 )
-from sona.meeting.finalization import MeetingFinalizer
+from sona.meeting.finalization import (
+    DiarizationGateState,
+    MeetingFinalizationResult,
+    MeetingFinalizer,
+    RepositoryDiarizationGate,
+)
 from sona.meeting.models import (
+    DiarizationStatus,
     MeetingRecord,
     MeetingStatus,
     MinutesRecord,
@@ -722,3 +728,295 @@ async def test_overlay_trim_boundary_cannot_touch_unbuffered_history() -> None:
     stored = {seg.id: seg for seg in store.persisted_segments}
     assert stored[early_id].speaker_key == "group:hash:speaker:0"
     assert stored[in_window_id].speaker_key == "group:hash:speaker:spk_01"
+
+
+# ---------------------------------------------------------------------------
+# S3: EOF 屏障 —— Rail finalized 后 patch 未持久化前，会议不能 completed、
+# 纪要不能 create。真实 MeetingFinalizer + 真实 RepositoryDiarizationGate，
+# 注入可阻塞 gateway/repository fake。
+# ---------------------------------------------------------------------------
+
+
+class _GateStore:
+    """MeetingFinalizer 与 RepositoryDiarizationGate 所需的最小 fake。"""
+
+    def __init__(self) -> None:
+        self.order: list[str] = []
+        self.record = _record()
+        self.watermark = 0
+
+    # -- 分人终态（repository 门依赖） --
+
+    async def get_meeting(self, meeting_id: UUID) -> MeetingRecord | None:
+        if meeting_id != self.record.id:
+            return None
+        return self.record
+
+    async def finalize_diarization(
+        self, meeting_id: UUID, *, status: str, reason: str | None
+    ) -> MeetingRecord:
+        self.order.append(f"finalize_diarization:{status}")
+        self.record = self.record.model_copy(
+            update={
+                "diarization_status": DiarizationStatus(status),
+                "diarization_reason": reason,
+            }
+        )
+        return self.record
+
+    async def get_diarization_watermark(self, meeting_id: UUID, session_id: str) -> int:
+        return self.watermark
+
+    # -- transcript / speaker / minutes store --
+
+    async def reconcile_window(
+        self, meeting_id: UUID, window: TranscriptWindow
+    ) -> TranscriptReconcileResult:
+        self.order.append("reconcile_window")
+        return TranscriptReconcileResult(
+            meeting_id=meeting_id,
+            transcript_revision=1,
+            content_revision=1,
+            replace_from_ms=0,
+            segments=window.segments,
+        )
+
+    async def get_transcript(self, meeting_id: UUID) -> TranscriptDocument:
+        return TranscriptDocument(
+            meeting_id=meeting_id, transcript_revision=1, content_revision=1, segments=()
+        )
+
+    async def apply_speaker_remapping(
+        self, meeting_id: UUID, remapping: dict[str, str]
+    ) -> MeetingRecord:
+        self.order.append("apply_speaker_remapping")
+        return self.record
+
+    async def finalize_transcript(
+        self,
+        meeting_id: UUID,
+        *,
+        final_status: MeetingStatus = MeetingStatus.COMPLETED,
+        reason: str | None = None,
+    ) -> MeetingRecord:
+        self.order.append("finalize_transcript")
+        self.record = self.record.model_copy(
+            update={"status": final_status, "interruption_reason": reason}
+        )
+        return self.record
+
+    async def create_minutes(
+        self, meeting_id: UUID, *, idempotency_key: str | None
+    ) -> MinutesRecord:
+        self.order.append("create_minutes")
+        return _minutes(meeting_id)
+
+    async def set_status(
+        self, meeting_id: UUID, status: MeetingStatus, *, reason: str | None = None
+    ) -> MeetingRecord:
+        raise AssertionError("persistence 不调用 set_status")
+
+
+class _BarrierGateway:
+    """可阻塞 capture gateway fake：finish_capture 内执行扩展模式 EOF 屏障。
+
+    行为镜像 session._diarization_barrier：Rail finalized 到达后等待
+    watermark 持久化，再记录 complete/degraded；mode 控制注入的故障形态。
+    """
+
+    def __init__(
+        self,
+        store: _GateStore,
+        state: object,
+        meeting_id: UUID,
+    ) -> None:
+        self._store = store
+        self._state = state
+        self._meeting_id = meeting_id
+        self.mode = "wait_for_watermark"
+        self.last_update_sequence = 0
+        self.aborted = 0
+
+    async def finish_capture(self, *, timeout_secs: float) -> TranscriptWindow:
+        if self.mode == "asr_timeout":
+            raise CaptureFinalizationTimeoutError(TranscriptWindow(source_epoch=1))
+        if self.mode == "no_extensions":
+            return TranscriptWindow(source_epoch=1, segments=())
+        if self.mode == "barrier_skip_record":
+            # 屏障等到了 watermark 但没有记录分人终态（屏障自身故障形态）：
+            # gate 必须独立兜底，不得把未记录 complete 的会议当 complete 封存。
+            self._state.extensions_active = True
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + timeout_secs
+            while loop.time() < deadline - 0.05:
+                if (
+                    await self._store.get_diarization_watermark(
+                        self._meeting_id, "session-1"
+                    )
+                    >= self.last_update_sequence
+                ):
+                    return TranscriptWindow(source_epoch=1, segments=())
+                await asyncio.sleep(0.01)
+            return TranscriptWindow(source_epoch=1, segments=())
+        self._state.extensions_active = True
+        if self.mode == "degraded_immediate":
+            await self._store.finalize_diarization(
+                self._meeting_id, status="degraded", reason="rail_degraded"
+            )
+            return TranscriptWindow(source_epoch=1, segments=())
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_secs
+        margin_secs = 0.05
+        while loop.time() < deadline - margin_secs:
+            watermark = await self._store.get_diarization_watermark(
+                self._meeting_id, "session-1"
+            )
+            if watermark >= self.last_update_sequence:
+                await self._store.finalize_diarization(
+                    self._meeting_id, status="complete", reason=None
+                )
+                return TranscriptWindow(source_epoch=1, segments=())
+            await asyncio.sleep(0.01)
+        await self._store.finalize_diarization(
+            self._meeting_id, status="degraded", reason="diarization_overloaded"
+        )
+        return TranscriptWindow(source_epoch=1, segments=())
+
+    async def abort_capture(self) -> None:
+        self.aborted += 1
+
+
+class FinalizerBarrierCase:
+    """计划要求的 finalizer_case：真实 MeetingFinalizer + 可阻塞 fake。"""
+
+    def __init__(self, *, timeout_secs: float = 5.0) -> None:
+        self.store = _GateStore()
+        self.meeting_id = self.store.record.id
+        self.state = DiarizationGateState()
+        gate = RepositoryDiarizationGate(
+            self.store, self.state, poll_interval_secs=0.01  # type: ignore[arg-type]
+        )
+        persistence = TranscriptPersistence(
+            self.store, journal=None, replay_repository=self.store
+        )
+        self.gateway = _BarrierGateway(self.store, self.state, self.meeting_id)
+        self.finalizer = MeetingFinalizer(
+            gateway=self.gateway,  # type: ignore[arg-type]
+            persistence=persistence,
+            speakers=self.store,  # type: ignore[arg-type]
+            transcripts=self.store,  # type: ignore[arg-type]
+            minutes_store=self.store,  # type: ignore[arg-type]
+            timeout_secs=timeout_secs,
+            diarization_gate=gate,
+        )
+        self.finalize_task: asyncio.Task[MeetingFinalizationResult] | None = None
+        self.result: MeetingFinalizationResult | None = None
+
+    async def receive_finalized(self, last_update_sequence: int) -> None:
+        self.gateway.last_update_sequence = last_update_sequence
+        self.finalize_task = asyncio.create_task(self.finalizer.finalize(self.meeting_id))
+        # 让 finalize 进入 gateway 屏障阻塞点
+        await asyncio.sleep(0.05)
+
+    async def persist_through(self, sequence: int) -> None:
+        self.store.watermark = sequence
+
+    async def complete(self) -> None:
+        assert self.finalize_task is not None
+        self.result = await self.finalize_task
+
+    @property
+    def minutes_created(self) -> int:
+        return 1 if "create_minutes" in self.store.order else 0
+
+
+async def test_summary_waits_for_persisted_diarization() -> None:
+    case = FinalizerBarrierCase()
+
+    await case.receive_finalized(last_update_sequence=13)
+    assert case.minutes_created == 0
+    assert "finalize_transcript" not in case.store.order
+
+    await case.persist_through(sequence=13)
+    await case.complete()
+
+    assert case.minutes_created == 1
+    assert case.result is not None
+    assert case.result.record.status is MeetingStatus.COMPLETED
+    assert case.result.record.diarization_status is DiarizationStatus.COMPLETE
+    assert case.gateway.aborted == 0
+
+
+async def test_degraded_finalized_completes_with_degraded_diarization() -> None:
+    """Rail finalized(degraded)：分人降级但正文封存，会议 COMPLETED。"""
+    case = FinalizerBarrierCase()
+    case.gateway.mode = "degraded_immediate"
+
+    await case.receive_finalized(last_update_sequence=13)
+    await case.complete()
+
+    assert case.result is not None
+    assert case.result.record.status is MeetingStatus.COMPLETED
+    assert case.result.record.diarization_status is DiarizationStatus.DEGRADED
+    assert case.result.record.diarization_reason == "rail_degraded"
+    assert case.minutes_created == 1
+
+
+async def test_watermark_timeout_degrades_but_completes() -> None:
+    """watermark 一直未持久化：仅分人 degraded，会议仍 COMPLETED（不假 complete）。"""
+    case = FinalizerBarrierCase(timeout_secs=0.4)
+
+    await case.receive_finalized(last_update_sequence=13)
+    await case.complete()
+
+    assert case.result is not None
+    assert case.result.record.status is MeetingStatus.COMPLETED
+    assert case.result.record.diarization_status is DiarizationStatus.DEGRADED
+    assert case.result.record.diarization_reason == "diarization_overloaded"
+    assert "finalize_diarization:complete" not in case.store.order
+    assert case.minutes_created == 1
+
+
+async def test_asr_timeout_skips_gate_and_marks_interrupted() -> None:
+    """ASR 尾部超时：gate 跳过，沿用 interrupted/finalization_timeout。"""
+    case = FinalizerBarrierCase(timeout_secs=0.4)
+    case.gateway.mode = "asr_timeout"
+
+    await case.receive_finalized(last_update_sequence=13)
+    await case.complete()
+
+    assert case.result is not None
+    assert case.result.timed_out is True
+    assert case.result.record.status is MeetingStatus.INTERRUPTED
+    assert case.result.record.interruption_reason == "finalization_timeout"
+    assert "finalize_diarization:complete" not in case.store.order
+
+
+async def test_gate_records_degraded_when_barrier_failed_to_record() -> None:
+    """屏障未记录终态：gate 独立超时并记录 degraded，会议不假 complete。"""
+    case = FinalizerBarrierCase(timeout_secs=0.4)
+    case.gateway.mode = "barrier_skip_record"
+
+    await case.receive_finalized(last_update_sequence=13)
+    await case.complete()
+
+    assert case.result is not None
+    assert case.result.record.status is MeetingStatus.COMPLETED
+    assert case.result.record.diarization_status is DiarizationStatus.DEGRADED
+    assert "finalize_diarization:complete" not in case.store.order
+    assert case.minutes_created == 1
+
+
+async def test_gate_lets_legacy_meetings_through() -> None:
+    """未协商扩展的会议：gate 直接放行，diarization_status 保持 legacy。"""
+    case = FinalizerBarrierCase()
+    case.gateway.mode = "no_extensions"
+
+    case.finalize_task = asyncio.create_task(case.finalizer.finalize(case.meeting_id))
+    await case.complete()
+
+    assert case.result is not None
+    assert case.result.record.status is MeetingStatus.COMPLETED
+    assert case.result.record.diarization_status is DiarizationStatus.LEGACY
+    assert case.minutes_created == 1
+    assert case.state.extensions_active is False

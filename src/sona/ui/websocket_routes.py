@@ -86,7 +86,9 @@ def create_websocket_router(context: UIAppContext) -> APIRouter:
             return
         broadcaster = context.meeting_events
         await websocket.accept()
-        client = broadcaster.add_client()
+        client = broadcaster.add_client(
+            speaker_details=websocket.query_params.get("speaker_details") in {"1", "true"}
+        )
         sender = asyncio.create_task(
             _forward_meeting_events(websocket, client),
             name="meeting-events-send",

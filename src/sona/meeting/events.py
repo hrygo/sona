@@ -65,12 +65,57 @@ def make_event(event_type: str, meeting_id: str | UUID, payload: Any) -> dict[st
     }
 
 
+SEGMENT_DETAIL_FIELDS = (
+    "speaker_status",
+    "timing_quality",
+    "overlap_ratio",
+    "speaker_manual",
+)
+
+
+def _event_has_speaker_details(event: Mapping[str, Any]) -> bool:
+    payload = event.get("payload")
+    if not isinstance(payload, Mapping):
+        return False
+    segments = payload.get("segments")
+    if not isinstance(segments, list):
+        return False
+    return any(
+        isinstance(segment, Mapping)
+        and any(field in segment for field in SEGMENT_DETAIL_FIELDS)
+        for segment in segments
+    )
+
+
+def _legacy_event_view(event: Mapping[str, Any]) -> dict[str, Any]:
+    """生成剥离归属证据字段的事件副本；不修改共享原事件。"""
+    view = dict(event)
+    payload = event.get("payload")
+    if isinstance(payload, Mapping):
+        stripped_payload = dict(payload)
+        segments = payload.get("segments")
+        if isinstance(segments, list):
+            stripped_payload["segments"] = [
+                {
+                    key: value
+                    for key, value in segment.items()
+                    if key not in SEGMENT_DETAIL_FIELDS
+                }
+                if isinstance(segment, Mapping)
+                else segment
+                for segment in segments
+            ]
+        view["payload"] = stripped_payload
+    return view
+
+
 class MeetingEventClient:
     """单个会议事件订阅者的有界队列。"""
 
-    def __init__(self, queue_size: int = 64) -> None:
+    def __init__(self, queue_size: int = 64, *, speaker_details: bool = False) -> None:
         self.queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=max(1, queue_size))
         self.closed = False
+        self.speaker_details = speaker_details
 
     async def receive(self) -> dict[str, Any]:
         if self.closed and self.queue.empty():
@@ -110,21 +155,26 @@ class MeetingEventBroadcaster:
     def client_count(self) -> int:
         return len(self._clients)
 
-    def add_test_client(self, *, queue_size: int | None = None) -> MeetingEventClient:
+    def add_test_client(
+        self, *, queue_size: int | None = None, speaker_details: bool = False
+    ) -> MeetingEventClient:
         """供 API/事件单元测试使用的内存订阅者。"""
 
-        return self.add_client(queue_size=queue_size)
+        return self.add_client(queue_size=queue_size, speaker_details=speaker_details)
 
     def add_client(
         self,
         sender: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
         *,
         queue_size: int | None = None,
+        speaker_details: bool = False,
     ) -> MeetingEventClient:
         # sender 参数保留给旧的广播适配器；HTTP WS 使用 receive()，避免
         # 广播任务被慢 socket 反压。
         del sender
-        client = MeetingEventClient(queue_size or self.queue_size)
+        client = MeetingEventClient(
+            queue_size or self.queue_size, speaker_details=speaker_details
+        )
         self._clients.add(client)
         return client
 
@@ -194,6 +244,9 @@ class MeetingEventBroadcaster:
             )
 
     def _enqueue(self, client: MeetingEventClient, event: dict[str, Any], *, durable: bool) -> None:
+        if not client.speaker_details and _event_has_speaker_details(event):
+            # 未协商 speaker_details 的客户端只接收 legacy 字段集合。
+            event = _legacy_event_view(event)
         try:
             client.queue.put_nowait(event)
             return
