@@ -204,3 +204,46 @@ def test_diarization_smoother_cross_epoch_merging() -> None:
     assert smoothed.segments[0].start_ms == 0
     assert smoothed.segments[0].end_ms == 2000
 
+
+def test_diarization_smoother_preserves_completed_items() -> None:
+    from sona.meeting.speaker_attribution import CompletedAttributionUnit, CompletedItem
+
+    smoother = DiarizationSmoother(min_duration_ms=350)
+    # seg1: 100ms 杂音，平滑时被过滤，触发 smoothed_segments != window.segments
+    seg1 = _make_segment(0, "speaker:s0", 0, 100, "......")
+    seg2 = _make_segment(1, "speaker:s0", 200, 1000, "有效句子。")
+
+    completed_item = CompletedItem(
+        source_session_id="sess_test",
+        source_epoch=1,
+        meeting_start_sample=0,
+        item_id="item_1",
+        event_id="evt_1",
+        sequence=1,
+        audio_start_sample=0,
+        audio_end_sample=16000,
+        canonical_text="有效句子。",
+        units=(
+            CompletedAttributionUnit(
+                segment_uid="uid_1",
+                text_start=0,
+                text_end=5,
+                audio_start_sample=0,
+                audio_end_sample=16000,
+                timing_quality="aligned",
+            ),
+        ),
+    )
+
+    window = TranscriptWindow(
+        source_epoch=1,
+        segments=(seg1, seg2),
+        completed=(completed_item,),
+    )
+
+    smoothed = smoother.smooth_window(window)
+    assert len(smoothed.segments) == 1
+    assert smoothed.segments[0].text == "有效句子。"
+    assert len(smoothed.completed) == 1
+    assert smoothed.completed[0].item_id == "item_1"
+

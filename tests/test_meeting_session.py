@@ -128,6 +128,17 @@ class FakeRepository:
             ),
         )
 
+    async def finalize_diarization(
+        self, meeting_id: UUID, *, status: str, reason: str | None = None
+    ) -> MeetingRecord:
+        self.calls.append(f"finalize_diarization:{status}:{reason}")
+        return self.record
+
+    async def get_diarization_watermark(
+        self, meeting_id: UUID, source_session_id: str
+    ) -> int:
+        return 100
+
 
 class FakeGateway:
     def __init__(self) -> None:
@@ -1445,3 +1456,43 @@ async def test_on_diarization_event_dispatches_speaker_patch(
 
     # 验证广播了 transcript_reconciled 事件
     assert any(e[0] == "transcript_reconciled" for e in events)
+
+
+async def test_diarization_barrier_leaves_extensions_inactive_for_legacy_stream(
+    repository: FakeRepository, gateway: FakeGateway
+) -> None:
+    session = MeetingSession(repository, gateway)
+    await _start_session(session)
+
+    # 模拟纯 legacy stream：未协商扩展，无 diarization_finalized
+    legacy_stream = SimpleNamespace(
+        extensions_negotiated=False,
+        diarization_finalized=None,
+        session_id="legacy_sess",
+    )
+    now = asyncio.get_running_loop().time()
+    await session._diarization_barrier(legacy_stream, deadline=now + 10.0)
+
+    # 关键断言：legacy stream 绝对不能激活 extensions_active，否则 finalizer 会等待 30 秒超时！
+    assert session._diarization_gate_state.extensions_active is False
+
+
+async def test_on_diarization_event_handles_degraded_status(
+    repository: FakeRepository, gateway: FakeGateway
+) -> None:
+    from sona.speechrail.transcription_events import DiarizationStatusEvent
+
+    session = MeetingSession(repository, gateway)
+    await _start_session(session)
+
+    status_event = DiarizationStatusEvent(
+        status="degraded",
+        reason="overloaded",
+        since_sample=16000,
+    )
+    payload = {"event": status_event}
+
+    await session._on_diarization_event(payload)
+
+    # 关键断言：degraded 状态事件应立即记录到 repository
+    assert any("finalize_diarization:degraded:overloaded" in call for call in repository.calls)

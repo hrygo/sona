@@ -503,7 +503,14 @@ class MeetingSession:
 
         updates = getattr(event_obj, "updates", None)
         if updates is None:
-            # status/finalized 由屏障消费；这里只持久化归属修订。
+            # status 事件直接记录降级终态；finalized 由 EOF 屏障消费
+            status = getattr(event_obj, "status", None)
+            if status == "degraded":
+                reason = getattr(event_obj, "reason", None)
+                with contextlib.suppress(Exception):
+                    await self.repository.finalize_diarization(
+                        meeting_id, status="degraded", reason=reason
+                    )
             return
         if not session_id:
             logger.warning("MeetingSession: 分人修订缺少 session id，跳过")
@@ -516,7 +523,7 @@ class MeetingSession:
                 segment_uid=update.segment_uid,
                 revision=update.revision,
                 status=update.status,
-                source_speaker=update.speaker,
+                source_speaker=update.speaker if update.status != "unknown" else None,
                 coverage_ratio=update.coverage_ratio,
                 overlap_ratio=update.overlap_ratio,
                 candidates=tuple(
@@ -558,9 +565,14 @@ class MeetingSession:
         meeting_id = self._active_meeting_id
         if meeting_id is None:
             return
-        self._diarization_gate_state.extensions_active = True
+        extensions_negotiated = bool(getattr(stream, "extensions_negotiated", False))
         finalized = getattr(stream, "diarization_finalized", None)
+        if not extensions_negotiated and finalized is None:
+            # 未协商扩展流且未收到 finalized：保持 legacy 模式，不激活屏障等待
+            return
+        self._diarization_gate_state.extensions_active = True
         if finalized is None:
+            # 协商了扩展但未收到 finalized（服务端中断或未发送）：交由 gate 兜底超时降级
             return
         session_id = getattr(stream, "session_id", None) or ""
         if finalized.status == "degraded":
@@ -585,7 +597,7 @@ class MeetingSession:
         # watermark 超时：分人 degraded，但文字已保存。
         with contextlib.suppress(Exception):
             await self.repository.finalize_diarization(
-                meeting_id, status="degraded", reason="diarization_overloaded"
+                meeting_id, status="degraded", reason="finalization_timeout"
             )
 
     async def _on_window(self, window: TranscriptWindow) -> None:
@@ -611,6 +623,18 @@ class MeetingSession:
                         replace_from_ms=int(result.replace_from_ms),
                         segments=result.segments,
                     )
+            if window.partial:
+                await self._emit(
+                    "transcript_partial",
+                    meeting_id,
+                    {
+                        "text": window.partial,
+                        "speaker_key": window.partial_speaker_key,
+                        "speaker_name": self._partial_speaker_name(
+                            window, self._speaker_names
+                        ),
+                    },
+                )
             return
         if window.partial:
             await self._emit(

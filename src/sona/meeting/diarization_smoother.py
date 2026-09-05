@@ -87,6 +87,7 @@ class DiarizationSmoother:
             partial_speaker_name=window.partial_speaker_name,
             segments=smoothed_segments,
             speaker_remap=window.speaker_remap,
+            completed=window.completed,
         )
 
     @classmethod
