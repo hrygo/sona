@@ -462,13 +462,55 @@ class MeetingSession:
         meeting_id = self._active_meeting_id
         if meeting_id is None or payload is None:
             return
-        if getattr(payload, "updates", None) is None:
+
+        if isinstance(payload, dict):
+            event_obj = payload.get("event", payload)
+            session_id = str(
+                payload.get("session_id")
+                or getattr(event_obj, "_session_id", "")
+                or getattr(event_obj, "session_id", "")
+                or ""
+            )
+            event_id = str(
+                payload.get("event_id")
+                or getattr(event_obj, "_event_id", "")
+                or getattr(event_obj, "event_id", "")
+                or ""
+            )
+            sequence = int(
+                payload.get("sequence")
+                or getattr(event_obj, "_sequence", 0)
+                or getattr(event_obj, "sequence", 0)
+                or 0
+            )
+        else:
+            event_obj = payload
+            session_id = str(
+                getattr(payload, "_session_id", None)
+                or getattr(payload, "session_id", "")
+                or ""
+            )
+            event_id = str(
+                getattr(payload, "_event_id", None)
+                or getattr(payload, "event_id", "")
+                or ""
+            )
+            sequence = int(
+                getattr(payload, "_sequence", 0)
+                or getattr(payload, "sequence", 0)
+                or 0
+            )
+
+        updates = getattr(event_obj, "updates", None)
+        if updates is None:
             # status/finalized 由屏障消费；这里只持久化归属修订。
             return
-        session_id = getattr(payload, "_session_id", None) or ""
         if not session_id:
             logger.warning("MeetingSession: 分人修订缺少 session id，跳过")
             return
+        if not event_id:
+            event_id = f"evt_patch_{sequence}"
+
         patches = tuple(
             SpeakerPatch(
                 segment_uid=update.segment_uid,
@@ -485,14 +527,14 @@ class MeetingSession:
                     for candidate in update.candidates
                 ),
             )
-            for update in payload.updates
+            for update in updates
         )
         event = SpeakerPatchEvent(
             source_session_id=session_id,
-            event_id=str(getattr(payload, "_event_id", "") or ""),
-            sequence=int(getattr(payload, "_sequence", 0) or 0),
-            group_generation=getattr(payload, "group_generation", None),
-            stable_through_sample=int(getattr(payload, "stable_through_sample", 0) or 0),
+            event_id=event_id,
+            sequence=sequence,
+            group_generation=getattr(event_obj, "group_generation", None),
+            stable_through_sample=int(getattr(event_obj, "stable_through_sample", 0) or 0),
             patches=patches,
         )
         try:

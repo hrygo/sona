@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, Mock
 from uuid import UUID
 
@@ -23,6 +24,12 @@ from sona.meeting.session import (
     MeetingSession,
     MeetingStorageUnavailableError,
 )
+from sona.meeting.speaker_attribution import SpeakerPatchResult
+from sona.speechrail.transcription_events import (
+    DiarizationCandidate,
+    DiarizationUpdate,
+    DiarizationUpdateEvent,
+)
 
 
 class FakeRepository:
@@ -36,6 +43,7 @@ class FakeRepository:
         self.finalize_error: Exception | None = None
         self.minutes_error: Exception | None = None
         self.stale_count = 0
+        self.last_patch_event: Any = None
 
     async def check_writable(self) -> bool:
         return self.writable
@@ -98,6 +106,27 @@ class FakeRepository:
 
     async def recover_stale(self) -> int:
         return self.stale_count
+
+    async def apply_speaker_patches(self, meeting_id: UUID, event: Any) -> Any:
+        self.calls.append("apply_speaker_patches")
+        self.last_patch_event = event
+        speaker = event.patches[0].source_speaker if event.patches else "unknown"
+        return SpeakerPatchResult(
+            meeting_id=meeting_id,
+            transcript_revision=2,
+            content_revision=2,
+            diarization_status="active",
+            segments=(
+                NormalizedSegment(
+                    order=0,
+                    source_epoch=1,
+                    speaker_key=speaker or "unknown",
+                    start_ms=0,
+                    end_ms=1000,
+                    text="测试正文",
+                ),
+            ),
+        )
 
 
 class FakeGateway:
@@ -1367,3 +1396,52 @@ async def test_start_storage_error_uses_stable_exception(
         await MeetingSession(repository, gateway).prepare_start("周会")
 
     assert error.value.code == "storage_unavailable"
+
+
+async def test_on_diarization_event_dispatches_speaker_patch(
+    repository: FakeRepository, gateway: FakeGateway
+) -> None:
+    events: list[tuple[str, UUID, dict[str, object]]] = []
+
+    async def publish(event_type: str, meeting_id: UUID, payload: dict[str, object]) -> None:
+        events.append((event_type, meeting_id, payload))
+
+    session = MeetingSession(repository, gateway, event_publisher=publish)
+    await _start_session(session)
+
+    diarization_event = DiarizationUpdateEvent(
+        group_generation="gen_1",
+        stable_through_sample=16000,
+        updates=(
+            DiarizationUpdate(
+                segment_uid="uid_1",
+                revision=1,
+                status="stable",
+                speaker="spk_01",
+                coverage_ratio=0.95,
+                overlap_ratio=0.0,
+                candidates=(DiarizationCandidate(speaker="spk_01", support_ratio=0.95),),
+            ),
+        ),
+        speaker_links=(),
+    )
+    payload = {
+        "event": diarization_event,
+        "session_id": "sess_101",
+        "event_id": "evt_202",
+        "sequence": 5,
+    }
+
+    await session._on_diarization_event(payload)
+
+    assert "apply_speaker_patches" in repository.calls
+    assert repository.last_patch_event is not None
+    assert repository.last_patch_event.source_session_id == "sess_101"
+    assert repository.last_patch_event.event_id == "evt_202"
+    assert repository.last_patch_event.sequence == 5
+    assert len(repository.last_patch_event.patches) == 1
+    assert repository.last_patch_event.patches[0].segment_uid == "uid_1"
+    assert repository.last_patch_event.patches[0].source_speaker == "spk_01"
+
+    # 验证广播了 transcript_reconciled 事件
+    assert any(e[0] == "transcript_reconciled" for e in events)
