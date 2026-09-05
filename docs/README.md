@@ -23,16 +23,16 @@ tags:
 > 💡 **语源寓意**：`Sona` 源自拉丁语 *sonāre*（意为「**发出声音、回响、共鸣**」）。  
 > 欢迎来到 **Sona** 技术文档中心。本项目是一套面向 Apple Silicon 硬件定制的全本地离线、超低延迟实时语音交互（Voice Assistant）、结构化会议助手（Meeting Assistant，含 SpeechRail diarization / PostgreSQL 持久化 / 异步 AI 纪要 / 崩溃恢复 Journal）与实时语音字幕（Live Subtitles）系统。
 
-## 当前实现基线（2026-09-01）
+## 当前实现基线（2026-09-06）
 
-> 新增待实施方案：[Sona × SpeechRail 会议讲话人分离端到端设计](architecture/speaker-diarization-e2e-design.md)（`under_review`）与[实施计划](superpowers/plans/2026-09-05-speaker-diarization-e2e.md)（`draft`）。包含 2026-09-05 源码核验、协议兼容、归属事务、长会议与回退门；新增能力尚未实现，不能作为当前运行态证明。
+> 最新交付与验收方案：[Sona × SpeechRail 会议讲话人分离端到端设计](architecture/speaker-diarization-e2e-design.md)（🟣 `implemented`）与[实施计划](superpowers/plans/2026-09-05-speaker-diarization-e2e.md)（🟣 `completed`），详见 [2026-09-06 联合验收报告](operations/speaker-diarization-e2e-acceptance-2026-09-06.md)。实现并全面验证了协议协商与扩展事件、双通道解耦、不可变正文单元、原子分人修订事务、人工更正优先保护、EOF 水位屏障与 legacy 流隔离。
 
 以下规则优先于历史方案、评测记录和早期实现说明：
 
 - ASR 与 TTS 的模型、profile、进程和健康状态均由独立 SpeechRail 服务管理，默认地址为 `127.0.0.1:8201`。
 - `sona` 只通过 SpeechRail **OpenAI Realtime (`/v1/realtime`) / REST** 客户端消费能力：字幕与会议使用 ASR OpenAI Realtime，语音助手使用 SpeechRail STT/TTS 与 LM Studio；仓库内不再运行本地 ASR/TTS worker、WhisperLiveKit 或旧 TTS bridge。
 - `scripts/run-all.sh` 只启动 `sona-ui`；SpeechRail 必须单独启动并准备所需 snapshot/profile。Realtime 当前为不可透明恢复的会话，断线后由应用创建新会话并执行 source epoch/窗口对账。
-- 会议分人使用 SpeechRail diarization 的匿名 speaker group，应用侧仅负责平滑、会议作用域 remap 和持久化映射；本仓库不再运行本地 CAM++/AHC 声纹运行时。
+- 会议分人使用 SpeechRail diarization 的持续分人扩展（Sortformer），应用侧负责时序平滑、不可变正文入库、原子原位 patch 修订与人工更正保护；本仓库不再运行本地 CAM++/AHC 声纹运行时。
 - “当前已实现”与“外部 SpeechRail 部署/模型的真实端到端验收”分开记录；未完成外部服务验收的内容不得写成已验证基线。
 
 ---
@@ -139,6 +139,7 @@ graph TD
 | 文档名称 | 状态 | 类型 | 版本 | 核心内容与设计要点 |
 |---|---|---|---|---|
 | [系统总体架构与详细设计方案](architecture/系统总体架构与详细设计方案.md) | 🟢 `active` | `architecture` | `v2.2` | **权威总体架构**：SpeechRail ASR/TTS 拓扑、分层架构、交互/字幕/会议/控制端到端时序与详细设计规范 |
+| [Sona × SpeechRail 会议讲话人分离端到端设计](architecture/speaker-diarization-e2e-design.md) | 🟣 `implemented` | `technical_spec` | `v1.1.0` | **SPK-E2E-1 端到端设计**：双通道解耦、不可变正文入库、原子分人修订、人工更正最高优先级保护与 EOF 水位屏障 |
 | [Sona 核心架构重构方案与实施路径](architecture/Sona-核心架构重构方案与实施路径.md) | 🟢 `active` | `architecture` | `v1.0.0` | **架构重构规范**：核心架构治理、纪要解耦、包治理与三阶段渐进式重构实施路线图 |
 | [全链路语音交互与会议助手-技术方案与实施方案](architecture/全链路语音交互与会议助手-技术方案与实施方案.md) | 🟢 `active` | `architecture` | `v1.0.0` | **完整技术方案与实施路径**：SpeechRail 边界、断句/分人/对账、前沿调研、ROI 与阶段落地 |
 | [实时语音交互与字幕-方案与最佳实践](architecture/实时语音交互与字幕-方案与最佳实践.md) | 🟢 `active` | `architecture` | `v2.1` | SpeechRail OpenAI Realtime `/v1/realtime` 语音交互与字幕技术方案、单 PCM owner 仲裁契约及验收边界 |
@@ -170,6 +171,7 @@ graph TD
 | [会议助手前后端分离工作交接清单](operations/会议助手前后端分离工作交接清单.md) | 🟡 `completed` | `guide` | `v1.1` | C0/B1/D1/F1/Q1 五类工作包交接资料、SpeechRail 依赖边界、验收物与交接清单 |
 | [前后端接线验证记录 (2026-08-26)](operations/前后端接线验证记录-2026-08-26.md) | 🟡 `completed` | `test_record` | `v1.0` | 会议助手前后端分离接线联调验证记录、测试结果矩阵与验收结论 |
 | [会议助手前后端分离联调记录模板](operations/联调记录模板.md) | ⚪ `template` | `template` | `v1.0` | 每次契约/后端/前端版本发布前执行联调验收的标准记录模板 |
+| [SPK-E2E-1 端到端联合验收报告 (2026-09-06)](operations/speaker-diarization-e2e-acceptance-2026-09-06.md) | 🟡 `completed` | `test_record` | `v1.1.0` | **SPK-E2E-1 联合验收报告**：1096 门禁全绿、83.23% 分支覆盖率、真实握手联调与 5 处关键缺陷修复记录 |
 | [SpeechRail-OpenAI标准协议功能需求交割单](operations/SpeechRail-OpenAI标准协议功能需求交割单.md) | ✅ `completed` | `technical_spec` | `v1.0` | **sona → SpeechRail 交割单**：OpenAI 兼容实时协议已覆盖流式 ASR 分人/TTS/取消/EOF，`/v2/realtime` 已移除 |
 | [语音交互打断后推理挂起故障排查与修复方案](operations/语音交互打断后推理挂起故障排查与修复方案.md) | 🟣 `implemented` | `postmortem` | `v1.1` | SpeechRail 迁移前发生的 Barge-in 故障记录；EchoState、取消与状态机修复仍适用于当前链路 |
 | [语音助手 TTS 爆音排查与验收手册](operations/语音助手-TTS-爆音排查与验收.md) | 🟢 `active` | `manual` | `v1.0` | 语音助手 CoreAudio overload 与长播报爆音排查、设备原生采样率/40ms 显式缓冲验收规范与回退机制 |

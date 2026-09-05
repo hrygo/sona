@@ -26,11 +26,11 @@ tags: [speechrail, diarization, e2e, acceptance, spk-e2e-1]
 
 | 维度 | SpeechRail | Sona |
 |---|---|---|
-| **代码分支 / 提交** | `master` @ `d9798cd` | `main` @ `18fb2a3` + 本轮 S4 联合验收提交 |
+| **代码分支 / 提交** | `master` @ `d9798cd` | `main` (SPK-E2E-1 联合验收与缺陷修复) |
 | **运行时引擎** | Python 3.12.14, uv, FastAPI | Python 3.12.14, uv, React 19, TypeScript, PostgreSQL |
-| **协议扩展能力** | `speechrail:diarization_extensions:v1` | `speechrail:diarization_extensions:v1` (opt-in) |
+| **协议扩展能力** | `speechrail.diarization.v1` | `speechrail.diarization.v1` (opt-in) |
 | **测试数据库** | N/A (确定性 fake / 隔离回归) | PostgreSQL `knowledge` 临时 schema（`vr_test_e2e_*`，测试完毕级联清理） |
-| **测试套件覆盖** | 52 passed, ruff & mypy 100% | 1092 passed (含全量集成测试), 分支覆盖率 83.14%, mypy 0 issues |
+| **测试套件覆盖** | 1101 passed, 分支覆盖率 83.50%, mypy 0 issues | 1096 passed (含全量集成测试), 分支覆盖率 83.23%, mypy 0 issues |
 
 ---
 
@@ -46,17 +46,20 @@ tags: [speechrail, diarization, e2e, acceptance, spk-e2e-1]
 | **E2E-4** | 瞬态 DB 故障与 Recovery Journal 恢复 | `test_diarization_e2e_transient_db_failure_and_journal_recovery` | 1. 模拟数据库连接瞬态中断，持久化层安全捕获并降级，将 patch 写入 journal 文件。<br>2. Journal 文件目录权限严格为 `0700`，文件权限为 `0600`。<br>3. 数据库连接恢复后调用 `RecoveryJournal.replay`，成功落库并自动清理 journal 文件，转录事实零丢失。 | **PASSED** |
 | **E2E-5** | Finalize 屏障与幂等性 | `test_diarization_e2e_finalize_barrier_and_idempotency` | 1. `RepositoryDiarizationGate` 等待分人持久化水位。<br>2. 水位达到时会议状态标记为 `complete`。<br>3. 重复调用 finalize 具有严格幂等性，不破坏会议终态。 | **PASSED** |
 | **E2E-6** | Finalize 超时优雅降级 | `test_diarization_e2e_finalize_timeout_degrades_gracefully` | 1. 模拟网络抖动或分人延迟，超过 watermark 等待超时上限。<br>2. 系统安全标记分人状态为 `degraded`（原因 `finalization_timeout`），主会议转录正文完整封存，不引发服务崩溃。 | **PASSED** |
-| **E2E-7** | 新旧 Rail × 新旧 Sona 四组合兼容矩阵 | `test_diarization_e2e_four_combinations_matrix` | 1. **New Rail + New Sona**: 双方成功协商 `speechrail:diarization_extensions:v1`，校验 `diarization_contract` 参数（16kHz, session_samples, 4 说话人）。<br>2. **New Rail + Legacy Sona**: Sona 不发 extensions，安全降级走 legacy 协议。<br>3. **Legacy Rail + New Sona**: Rail 缺少 capability，Sona 安全回退走 legacy 协议。<br>4. **Legacy Rail + Legacy Sona**: 纯旧协议平稳工作。 | **PASSED** |
+| **E2E-7** | 新旧 Rail × 新旧 Sona 四组合兼容矩阵 | `test_diarization_e2e_four_combinations_matrix` | 1. **New Rail + New Sona**: 双方成功协商 `speechrail.diarization.v1`，校验 `diarization_contract` 参数（16kHz, session_samples, 4 说话人）。<br>2. **New Rail + Legacy Sona**: Sona 不发 extensions，安全降级走 legacy 协议。<br>3. **Legacy Rail + New Sona**: Rail 缺少 capability，Sona 安全回退走 legacy 协议。<br>4. **Legacy Rail + Legacy Sona**: 纯旧协议平稳工作。 | **PASSED** |
 
 ---
 
 ## 3. 合约规范与静态验证
 
-### 3.1 合约校验与 Fixtures
+### 3.1 审查期缺陷发现与根因修复
 
-运行 `scripts/validate-meeting-contract.py`：
-- 校验通过 21 组 JSON fixtures 与 25 组 JSON Schema。
-- 覆盖标准会议详情、历史列表、说话人重命名、AI 纪要与 `speaker_details=1` opt-in 契约。
+在端到端审查与联调过程中，定位并消除了 5 处关键缺陷：
+1. **`MeetingSession._on_diarization_event` 字典解包缺失**：上游派发 dict 载荷（`{"event": ...}`），原代码直接 `getattr(payload)` 导致分人 patch 丢失。修复为契约多态解包。
+2. **`MeetingSession._diarization_barrier` Legacy 流悬挂**：非扩展流结束时，屏障过早设置 `extensions_active=True`，导致后续 `wait_persisted` 误判为扩展流并死等 30s 超时降级。修复为仅在扩展已协商或收到 finalized 时激活，并在超时时标记 `finalization_timeout`。
+3. **`DiarizationSmoother.smooth_window` 丢弃 `completed` 单元**：平滑重建 `TranscriptWindow` 时遗漏 `completed` 字段，导致包含分段纠偏的窗口丢失全部已确认正文。修复为显式保留 `completed=window.completed`。
+4. **`MeetingSession._on_diarization_event` 忽略 degraded 状态事件**：收到 SpeechRail 降级事件（`status="degraded"`）时未通知仓储，导致等待屏障悬挂。修复为即时触发 `repository.finalize_diarization(reason="degraded")`。
+5. **`MeetingSession._on_window` 丢失并发 partial 广播**：在确认 `window.completed` 单元时忽略了同窗口并存的 `window.partial` 广播，导致前端在句末阶段残留脏状态。修复为补全 partial 广播。
 
 ### 3.2 双仓代码质量门禁
 
@@ -64,7 +67,7 @@ tags: [speechrail, diarization, e2e, acceptance, spk-e2e-1]
 ```bash
 # 1. 后端单元与集成测试（需本地 PostgreSQL 运行）
 SONA_TEST_DATABASE_URL=postgresql:///knowledge uv run pytest tests/
-# 结果：1092 passed, 4 warnings in 22.32s; 分支覆盖率: 83.14% (>= 80% 门禁达成)
+# 结果：1096 passed, 4 warnings in 23.0s; 分支覆盖率: 83.23% (>= 80% 门禁达成)
 
 # 2. Python Strict 类型检查
 uv run mypy src/
@@ -83,12 +86,14 @@ cd ui && npm run build
 
 #### SpeechRail 门禁汇总
 ```bash
-uv run --extra dev pytest tests/test_diarization_extensions.py tests/test_realtime.py -v
-# 结果：52 passed in 1.48s
+uv run --extra dev pytest
+# 结果：1101 passed, 83.50% 分支覆盖率
 uv run --extra dev ruff check src tests
 # 结果：All checks passed!
 uv run --extra dev mypy src
-# 结果：Success: no issues found in 27 source files
+# 结果：Success: no issues found in 76 source files
+npx @redocly/cli lint contracts/openapi.yaml
+# 结果：Woohoo! Your API description is valid.
 ```
 
 ---

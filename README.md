@@ -18,7 +18,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green.svg?style=flat" alt="License"/></a>
   <a href="https://github.com/astral-sh/ruff"><img src="https://img.shields.io/badge/Code%20Style-Ruff-black?style=flat&logo=ruff&logoColor=white" alt="Code Style: Ruff"/></a>
   <a href="https://mypy.readthedocs.io/"><img src="https://img.shields.io/badge/Type%20Checked-Mypy%20Strict-blue?style=flat" alt="Mypy Strict"/></a>
-  <a href="tests/"><img src="https://img.shields.io/badge/Coverage-83.8%25-brightgreen.svg?style=flat" alt="Coverage"/></a>
+  <a href="tests/"><img src="https://img.shields.io/badge/Coverage-83.2%25-brightgreen.svg?style=flat" alt="Coverage"/></a>
   <a href="ui/"><img src="https://img.shields.io/badge/Frontend-React%2019%20%7C%20Vite%207-61DAFB?style=flat&logo=react&logoColor=white" alt="Frontend"/></a>
   <a href="CONTRIBUTING.md"><img src="https://img.shields.io/badge/PRs-Welcome-brightgreen.svg?style=flat" alt="PRs Welcome"/></a>
 </p>
@@ -51,9 +51,10 @@
 - **长会话上下文智能滚动压缩 (ADR-003)**：基于 LM Studio 原生 Token 计数平滑压缩历史对话，在保证关键事实记忆的同时实现无感长聊。
 
 ### 🎙️ 智能会议助手 (Meeting Assistant)
-- **实时说话人分离与动态重命名**：无缝对接 SpeechRail diarization profile（Sortformer），会议期间实时呈现匿名发言人标签；支持会后/会中随时重命名发言人。
-- **PostgreSQL ACID 可靠持久化**：全量确认转录记录与元数据入库存储，**绝不在数据库或磁盘落地原始音频**，充分保护隐私；内置 `0700/0600` 权限的崩溃恢复 Journal。
-- **异步 AI 结构化纪要**：会议结束自动执行 EOF 优雅冲刷，后台调度本地 LLM 异步生成包含「议题大纲、核心讨论、关键决策、待办事项 (Action Items)」的高质量纪要。
+- **SPK-E2E-1 持续说话人分离双通道**：无缝对接 SpeechRail diarization profile（Sortformer），流式转录文本通道（不可变正文）与说话人归属通道（原子 Patch 修订）解耦并行；支持会后/会中随时自定义重命名发言人。
+- **人工更正绝对优先 (Override Precedence)**：用户会中或会后手动指定的发言人享有最高法律效力，绝不被后续任何自动分人 patch、平滑合并或 EOF 冲刷覆盖。
+- **PostgreSQL ACID 可靠持久化与水位屏障**：全量确认转录记录与元数据入库存储，**绝不在数据库或磁盘落地原始音频**，充分保护隐私；内置 `0700/0600` 权限的崩溃恢复 Journal 与 EOF 水位对齐屏障。
+- **异步 AI 结构化纪要**：会议结束自动执行 EOF 优雅冲刷与分人终态对齐，后台调度本地 LLM 异步生成包含「议题大纲、核心讨论、关键决策、待办事项 (Action Items)」的高质量纪要。
 - **一键导出**：支持一键导出结构化 Markdown 会议纪要与带说话人时间戳的精确 SRT 字幕文件。
 
 ### 🧠 会中内心 OS 伴侣 (Inner OS)
@@ -86,24 +87,35 @@ graph TD
     subgraph "🤖 语音交互域 (sona.interaction)"
         INTERACTION --> L1["L1 声学防回声 (EchoSuppression)"]
         L1 --> STT["SpeechRail Realtime STT"]
-        STT --> L2["L2 文本自激过滤 (SelfEchoFilter)"]
+        L1 --> L2["L2 文本自激过滤 (SelfEchoFilter)"]
+        STT --> L2
         L2 --> LLM_INT["LM Studio (/api/v1/chat, reasoning: off)"]
         LLM_INT --> TTS["SpeechRail Realtime TTS (24kHz)"]
         TTS --> SPK["🔊 扬声器 / 耳机输出"]
     end
 
     subgraph "📝 流式字幕域 (sona.subtitles)"
-        SUBTITLES --> SR_ASR1["SpeechRail Realtime ASR"]
+        SUBTITLES --> SR_ASR1["SpeechRail Realtime ASR (/v1/realtime)"]
         SR_ASR1 --> SRT_ARCH["SRT 历史归档与快照重放"]
         SRT_ARCH --> WS_SUB["WebSocket 客户端广播池"]
     end
 
-    subgraph "🎙️ 会议核心域 (sona.meeting)"
+    subgraph "🎙️ 会议核心域 (sona.meeting - SPK-E2E-1)"
         MEETING --> SR_ASR2["SpeechRail Realtime ASR + Diarization"]
-        MEETING --> RECONCILE["窗口对账与快照消重 (Accumulator)"]
-        RECONCILE --> PG[("🐘 PostgreSQL (ACID 元数据 / 确认转录)")]
-        PG --> SUMMARY["异步 AI 会议纪要 (Summary Pipeline)"]
-        MEETING -.短暂故障.-> JOURNAL["崩溃恢复 Journal (0700/0600)"]
+
+        SR_ASR2 -->|文本流: transcript.done| RECONCILE["不可变正文入库<br/>(append_completed_item)"]
+        SR_ASR2 -->|分人流: speaker_map/segment| SMOOTHER["时序平滑与滤波<br/>(DiarizationSmoother)"]
+        SMOOTHER --> PATCH["原子分人原位修订<br/>(apply_speaker_patches)"]
+
+        RECONCILE --> PG[("🐘 PostgreSQL ACID<br/>(不可变正文 / 分人元数据 / 水位)")]
+        PATCH -->|人工更正优先防覆盖| PG
+
+        MEETING -->|EOF commit| GATE{"EOF 水位等待屏障<br/>(RepositoryDiarizationGate)"}
+        SR_ASR2 -->|diarization.finalized| GATE
+        GATE --> FINAL["封存终态会议"]
+        FINAL --> SUMMARY["异步 AI 会议纪要 (Summary Pipeline)"]
+
+        MEETING -.短暂写入故障.-> JOURNAL["崩溃恢复 Journal (0700/0600)"]
         MEETING --> INNER_OS["🧠 内心 OS 伴侣 (Inner OS Drawer)"]
     end
 ```
@@ -112,13 +124,20 @@ graph TD
 
 ```text
 src/sona/
-├── asr/                 # 【领域层】ASR 领域契约、窗口模型与结果呈现 (contracts, models, presenters)
+├── asr/                 # 【领域层】ASR 领域契约、窗口模型与结果呈现 (contracts, models, profiles, presenters)
 ├── subtitles/           # 【领域层】实时字幕与流式转录核心业务 (proxy, archive, sessions, clients)
-├── meeting/             # 【领域层】会议状态机、窗口对账、PostgreSQL 持久化、内心 OS
-│   ├── summary/         #   └── 模块化 AI 纪要流水线 (errors, prompt_builder, chunker, gateway, service)
+├── meeting/             # 【领域层】会议核心状态机、双通道转录解耦、PostgreSQL 持久化
+│   ├── session.py       #   ├── 会议会话生命周期、双通道事件编排与 EOF 屏障
+│   ├── repository.py    #   ├── PostgreSQL ACID 仓储 (不可变正文、原子分人补丁、更正保护)
+│   ├── speaker_attribution.py # 说话人对账与归属状态追踪
+│   ├── diarization_smoother.py # 说话人时序平滑器与短片段杂音滤波
+│   ├── finalization.py  #   ├── EOF 冲刷与分人持久化水位等待门控
+│   ├── summary/         #   ├── 模块化 AI 纪要流水线 (errors, prompt_builder, chunker, gateway, service)
+│   ├── inner_os/        #   ├── 会中内心 OS 伴侣服务与意图研判
+│   ├── recovery.py      #   ├── 崩溃恢复 Journal 写入与回放
 │   └── runtime_mode.py  #   └── 运行时模式协调器 (RuntimeModeCoordinator)
 ├── config/              # 【配置层】高内聚领域强类型配置 (audio, interaction, subtitles, meeting, ui, lm_studio)
-├── speechrail/          # 【基础设施层】SpeechRail 公共协议客户端与适配器 (transcriber, stt_processor, tts, transport)
+├── speechrail/          # 【基础设施层】SpeechRail 公共协议客户端与分人扩展适配器 (transcriber, events, stt, tts, transport)
 ├── interaction/         # 【应用层】语音助手 Pipecat 管道、双层防回声、上下文滚动压缩与执行器
 ├── audio/               # 【基础设施层】AudioHub 麦克风独占采集、有界 Sink 扇出与硬件设备探测
 └── ui/                  # 【接入层】Sona Web 控制台、模式协调器绑定、FastAPI 路由与控制 WebSocket
@@ -209,8 +228,8 @@ Sona 提供了现代化响应式设计、支持深浅双色无障碍高对比度
 
 ### 2. 🎙️ 会议助手工作区 (`⌘ + 2`)
 - **一键录制**：点击「开始会议」，系统无缝暂停语音助手链路，独占麦克风进行流式转录。
-- **发言人实时识别**：动态呈现匿名发言人（如 `Speaker 1`、`Speaker 2`），支持在面板中点击发言人直接自定义姓名。
-- **EOF 优雅冲刷**：点击「结束会议」，系统发送 commit EOF 信号，等待最后一片音频转录闭合后再封存数据。
+- **发言人实时识别与人工更正**：动态呈现匿名发言人（如 `Speaker 1`、`Speaker 2`），支持在面板中直接自定义重命名或原位更正；人工更正具备最高法律效力，绝不被后续自动算法覆盖。
+- **EOF 优雅冲刷与水位屏障**：点击「结束会议」，系统发送 commit EOF 信号，等待 SpeechRail 分人终态（`finalized`）与数据库持久化水位完全对齐后再行封存，确保长会议不丢字、分人完整。
 - **Markdown 纪要生成**：后台自动执行分块摘要与全篇归纳，自动提炼出「会议议题、讨论核心、达成决议、待办清单」。
 
 ### 3. 🧠 会中内心 OS (`⌘ + K`)
@@ -244,17 +263,24 @@ Sona 提供了现代化响应式设计、支持深浅双色无障碍高对比度
 | **网络绑定** | `SONA_BIND_HOST` | `127.0.0.1` | 服务绑定模式：`127.0.0.1` (仅本机) / `lan` (局域网) / `0.0.0.0` |
 | **Web 界面** | `SONA_UI_PORT` | `8100` | Sona Web 控制台监听端口 |
 | **SpeechRail** | `SONA_SUBTITLE_SPEECHRAIL_URL` | `ws://127.0.0.1:8201/v1/realtime` | 字幕与会议 ASR 使用的 WebSocket 地址 |
+| | `SONA_SUBTITLE_SPEECHRAIL_API_KEY` | 空 | SpeechRail 鉴权密钥 (仅通过 WebSocket Authorization 发送) |
 | | `SONA_INTERACTION_SPEECHRAIL_REALTIME_URL` | `ws://127.0.0.1:8201/v1/realtime` | 语音助手 ASR/TTS 使用的 WebSocket 地址 |
 | | `SONA_INTERACTION_TTS_VOICE` | `default` | 默认合成音色预设 (`default` / `warm` / `bright` / `calm`) |
-| | `SONA_INTERACTION_SPEECHRAIL_API_KEY` | 空 | SpeechRail 鉴权密钥 (如有) |
+| | `SONA_INTERACTION_SPEECHRAIL_API_KEY` | 空 | 语音助手 SpeechRail 鉴权密钥 (如有) |
 | **LM Studio** | `SONA_INTERACTION_LLM_BASE_URL` | `http://localhost:1234/v1` | 交互助手 LLM 服务根地址（可配置） |
 | | `SONA_INTERACTION_LLM_API_KEY` | `lm-studio` | 交互助手 LLM 授权密钥（可配置） |
 | | `SONA_INTERACTION_LLM_MODEL` | `local/kat-coder-2.5` | 交互助手模型 ID（可配置） |
 | | `SONA_LM_STUDIO_BASE_URL` | `http://localhost:1234/v1` | 纪要 / 标题 / 内心 OS 共享 LM Studio 服务根地址（缺省回落 `SONA_INTERACTION_LLM_BASE_URL`） |
 | | `SONA_LM_STUDIO_API_KEY` | `lm-studio` | 共享 LM Studio 授权密钥（缺省回落 `SONA_INTERACTION_LLM_API_KEY`） |
 | | `SONA_MEETING_SUMMARY_MODEL` | `local/kat-coder-2.5` | 会议纪要、标题与内心 OS 模型 ID（可配置） |
-| **会议持久化** | `SONA_MEETING_DATABASE_URL` | `postgresql://sona_app@/knowledge`| PostgreSQL 数据库连接 DSN |
-| | `SONA_MEETING_SCHEMA` | `sona` | 会议表所在 Schema |
+| **会议与分人** | `SONA_MEETING_DATABASE_URL` | `postgresql://sona_app@/knowledge`| PostgreSQL 数据库连接 DSN |
+| | `SONA_MEETING_SCHEMA` | `sona` | 会议表所在独立 Schema |
+| | `SONA_MEETING_DIARIZATION_EXTENSIONS_ENABLED` | `false` | 是否协商持续分人扩展 (`speechrail.diarization.v1`) |
+| | `SONA_MEETING_DIARIZATION_SMOOTHING_ENABLED` | `true` | 是否启用会议说话人时序平滑与短片段杂音滤波 |
+| | `SONA_MEETING_DIARIZATION_MIN_DURATION_MS` | `350` | 短片段滤波最小有效时长（毫秒） |
+| | `SONA_MEETING_DIARIZATION_HANGOVER_GAP_MS` | `800` | 同一说话人相邻段落合并最大时间间隙（毫秒） |
+| | `SONA_MEETING_DIARIZATION_OVERLAY_ENABLED` | `false` | 诊断离线 overlay 开关 (默认关闭；扩展协商时隔离) |
+| | `SONA_MEETING_INNER_OS_ENABLED` | `false` | 是否启用会议内心 OS 伴侣 |
 | **音频与双工** | `SONA_INTERACTION_DUPLEX_MODE` | `speaker_focus` | 默认双工模式 (`speaker_focus` 外放保护 / `headphone_duplex` 耳机双工) |
 | | `SONA_INTERACTION_INPUT_DEVICE_NAME` | 空 (系统默认) | 指定麦克风物理硬件名称或名称片段 |
 
@@ -265,16 +291,16 @@ Sona 提供了现代化响应式设计、支持深浅双色无障碍高对比度
 Sona 坚持高标准的自动化工程测试规范，提交代码或发布前，**必须保证以下五重质量门禁全部通过**：
 
 ```bash
-# 1. 运行全量后端单元测试与集成测试 (硬性覆盖率门禁: fail_under >= 80%)
+# 1. 运行全量后端单元测试与集成测试 (硬性门禁: fail_under >= 80%，当前实测 83.23%，1096 passed)
 SONA_TEST_DATABASE_URL=postgresql:///knowledge uv run pytest tests/
 
-# 2. Python Strict 模式静态类型检查 (100 个核心模块 0 错误)
+# 2. Python Strict 模式静态类型检查 (108 个核心模块 0 错误)
 uv run mypy src/
 
 # 3. Python 代码风格与 Lint 检查
 uv run ruff check src/ tests/
 
-# 4. 前端单元与组件渲染测试
+# 4. 前端单元与组件渲染测试 (当前实测 293 passed)
 cd ui && npm test -- --run
 
 # 5. 前端 TypeScript 类型检查与生产构建
@@ -320,12 +346,14 @@ uv run sona-interact
 深入阅读完整的技术方案、时序图与架构设计决策：
 
 - 🧭 [**Sona 文档中心总览**](docs/README.md)
+- 🌟 [**Sona × SpeechRail 会议讲话人分离端到端设计 (SPK-E2E-1)**](docs/architecture/speaker-diarization-e2e-design.md)
+- 📋 [**SPK-E2E-1 端到端联合验收报告 (2026-09-06)**](docs/operations/speaker-diarization-e2e-acceptance-2026-09-06.md)
+- ⚡ [**Sona 会议讲话人分离端到端实施计划 (S0–S4)**](docs/superpowers/plans/2026-09-05-speaker-diarization-e2e.md)
 - 🏗️ [**系统总体架构与详细设计方案**](docs/architecture/系统总体架构与详细设计方案.md)
 - 📐 [**Sona 核心架构重构方案与实施路径**](docs/architecture/Sona-核心架构重构方案与实施路径.md)
 - 📖 [实时语音交互与字幕-方案与最佳实践](docs/architecture/实时语音交互与字幕-方案与最佳实践.md)
 - 📖 [声学防回声与全双工交互设计方案](docs/architecture/声学防回声与全双工交互设计方案.md)
 - 📖 [会议助手后端运行与前后端联调手册](docs/manuals/会议助手后端运行与前后端联调.md)
-- 📖 [SpeechRail Realtime v2 语音转文字对接手册](docs/manuals/SpeechRail-Realtime-v2-语音转文字开发对接手册.md)
 - 📝 [架构决策记录 (ADR-001 ~ ADR-012)](docs/decisions/)
 - 🤝 [**贡献指南 (Contributing Guide)**](CONTRIBUTING.md)
 
