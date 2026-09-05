@@ -39,9 +39,12 @@ import {
   TELEMETRY_HELP_STEPS,
   type VoiceCatalogItem,
   VOICE_CONFIGS,
+  resolveVoiceMode,
+  VOICE_MODE_META,
 } from "./assistantPresentation";
 import { PersonaDialog } from "./PersonaDialog";
 import { VoiceDesignModal } from "./VoiceDesignModal";
+import { VoiceStudioModal } from "./VoiceStudioModal";
 import { showToast } from "./Toast";
 import { apiUrl } from "../config/runtimeConfig";
 import {
@@ -203,6 +206,7 @@ export default function AssistantPanel({
   const [availableVoices, setAvailableVoices] = useState<readonly VoiceCatalogItem[]>(DEFAULT_SYSTEM_VOICES);
   const [isPreviewPlaying, setIsPreviewPlaying] = useState(false);
   const [showVoiceDesignModal, setShowVoiceDesignModal] = useState(false);
+  const [showVoiceStudioModal, setShowVoiceStudioModal] = useState(false);
   const currentVoiceItem = availableVoices.find((v) => v.id === voice);
 
   // 打断插话动效监听
@@ -420,6 +424,7 @@ export default function AssistantPanel({
         return exists ? prev : [...prev, newVoice];
       });
       setShowVoiceDesignModal(false);
+      setShowVoiceStudioModal(false);
       void handleVoiceChange(newVoice.id);
     },
     [handleVoiceChange],
@@ -833,15 +838,11 @@ export default function AssistantPanel({
                 播报音色
               </label>
               <div className="sidebar-field-badges-wrap">
-                {VOICE_CONFIGS[voice] ? (
-                  <span className="sidebar-field-badge">
-                    {VOICE_CONFIGS[voice].tag}
+                {currentVoiceItem && (
+                  <span className={`sidebar-field-badge sidebar-field-badge-${resolveVoiceMode(currentVoiceItem)}`}>
+                    {VOICE_MODE_META[resolveVoiceMode(currentVoiceItem)].badge}
                   </span>
-                ) : currentVoiceItem ? (
-                  <span className="sidebar-field-badge sidebar-field-badge-custom">
-                    {currentVoiceItem.is_system ? "预置" : "自建"}
-                  </span>
-                ) : null}
+                )}
               </div>
             </div>
             <div className="voice-input-group">
@@ -853,7 +854,7 @@ export default function AssistantPanel({
                   onChange={(e) => void handleVoiceChange(e.target.value)}
                   disabled={!commandSocket.ready}
                 >
-                  <optgroup label="🌟 系统预置音色">
+                  <optgroup label="🌟 官方预置音色">
                     {availableVoices
                       .filter((v) => v.is_system)
                       .map((v) => {
@@ -865,13 +866,24 @@ export default function AssistantPanel({
                         );
                       })}
                   </optgroup>
-                  {availableVoices.some((v) => !v.is_system) && (
-                    <optgroup label="✨ 自定义设计音色">
+                  {availableVoices.some((v) => !v.is_system && resolveVoiceMode(v) === "clone") && (
+                    <optgroup label="🎙️ 声音克隆分身">
                       {availableVoices
-                        .filter((v) => !v.is_system)
+                        .filter((v) => !v.is_system && resolveVoiceMode(v) === "clone")
                         .map((v) => (
                           <option key={v.id} value={v.id}>
-                            {v.name}
+                            🎙️ {v.name}
+                          </option>
+                        ))}
+                    </optgroup>
+                  )}
+                  {availableVoices.some((v) => !v.is_system && resolveVoiceMode(v) !== "clone") && (
+                    <optgroup label="✨ 灵感设计音色">
+                      {availableVoices
+                        .filter((v) => !v.is_system && resolveVoiceMode(v) !== "clone")
+                        .map((v) => (
+                          <option key={v.id} value={v.id}>
+                            ✨ {v.name}
                           </option>
                         ))}
                     </optgroup>
@@ -890,11 +902,11 @@ export default function AssistantPanel({
               </button>
               <button
                 type="button"
-                className="btn-voice-design-trigger"
-                onClick={() => setShowVoiceDesignModal(true)}
-                title="自然语言设计专属音色"
+                className="btn-voice-design-trigger btn-voice-studio-btn"
+                onClick={() => setShowVoiceStudioModal(true)}
+                title="打开声音工坊：管理、克隆与设计音色"
               >
-                <span>✨ 定制</span>
+                <span>🎙️ 工坊</span>
               </button>
               {currentVoiceItem && !currentVoiceItem.is_system && (
                 <button
@@ -1245,6 +1257,27 @@ export default function AssistantPanel({
         <VoiceDesignModal
           onCancel={() => setShowVoiceDesignModal(false)}
           onCreated={handleVoiceCreated}
+        />
+      )}
+
+      {showVoiceStudioModal && (
+        <VoiceStudioModal
+          currentVoiceId={voice}
+          availableVoices={availableVoices}
+          onSelectVoice={(vid) => void handleVoiceChange(vid)}
+          onVoiceCreated={handleVoiceCreated}
+          onVoiceDeleted={(vid) => void handleDeleteVoice(vid)}
+          onClose={() => setShowVoiceStudioModal(false)}
+          onStartRecordingVoice={() => {
+            if (!micMuted && commandSocket.ready) {
+              void commandSocket.sendCommand({ cmd: "set_mic_muted", muted: true });
+            }
+          }}
+          onStopRecordingVoice={() => {
+            if (!micMuted && commandSocket.ready) {
+              void commandSocket.sendCommand({ cmd: "set_mic_muted", muted: false });
+            }
+          }}
         />
       )}
     </div>

@@ -4,9 +4,9 @@ description: "全本地实时语音交互、会议助手与实时字幕系统的
 status: active
 type: guide
 category: architecture
-version: "v2.2.0"
+version: "v2.2.1"
 date: 2026-09-01
-last_updated: 2026-09-02
+last_updated: 2026-09-05
 author: "Sona Core Team"
 owners:
   - "sona-core"
@@ -24,6 +24,8 @@ tags:
 > 欢迎来到 **Sona** 技术文档中心。本项目是一套面向 Apple Silicon 硬件定制的全本地离线、超低延迟实时语音交互（Voice Assistant）、结构化会议助手（Meeting Assistant，含 SpeechRail diarization / PostgreSQL 持久化 / 异步 AI 纪要 / 崩溃恢复 Journal）与实时语音字幕（Live Subtitles）系统。
 
 ## 当前实现基线（2026-09-01）
+
+> 新增待实施方案：[Sona × SpeechRail 会议讲话人分离端到端设计](architecture/speaker-diarization-e2e-design.md)（`under_review`）与[实施计划](superpowers/plans/2026-09-05-speaker-diarization-e2e.md)（`draft`）。包含 2026-09-05 源码核验、协议兼容、归属事务、长会议与回退门；新增能力尚未实现，不能作为当前运行态证明。
 
 以下规则优先于历史方案、评测记录和早期实现说明：
 

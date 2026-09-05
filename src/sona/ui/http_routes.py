@@ -251,6 +251,132 @@ def create_http_router(context: UIAppContext) -> APIRouter:
             logger.warning("Sona: SpeechRail /v1/voices 请求失败: %s", exc)
             raise HTTPException(status_code=502, detail="SpeechRail 音色列表不可用") from exc
 
+    @router.get("/v1/voices/clone/prompts")
+    async def clone_prompts() -> dict[str, Any]:
+        """获取音色克隆精选引导文案库（优先代理 SpeechRail，降级使用 Sona 精选库）。"""
+        default_prompts = [
+            {
+                "id": "poetry_tang",
+                "category": "classic",
+                "title": "📜 盛唐气象 · 经典诗韵",
+                "script": (
+                    "白日依山尽，黄河入海流。欲穷千里目，更上一层楼。"
+                    "春江潮水连海平，海上明月共潮生。"
+                ),
+                "tips": "字正腔圆，声调平稳从容，注意句尾自然停顿。",
+            },
+            {
+                "id": "prose_technology",
+                "category": "tech",
+                "title": "⚡ 科技浪潮 · 现代叙述",
+                "script": (
+                    "人工智能正在深刻改变我们的交互方式，让每一次人机对话都充满温度与智慧。"
+                    "保持探索的热情，方能见证未来的无限可能。"
+                ),
+                "tips": "语速适中，吐字清脆明快，保持自然表达状态。",
+            },
+            {
+                "id": "daily_dialogue",
+                "category": "life",
+                "title": "☕ 晨光午后 · 日常伴随",
+                "script": (
+                    "清晨的阳光透过窗棂洒在桌前，微风拂过绿植，带来清新怡人的气息。"
+                    "今天也是从容充实的一天，随时为你提供帮助。"
+                ),
+                "tips": "语调温和亲切，如同与身旁好友促膝交谈。",
+            },
+            {
+                "id": "philosophical_exploration",
+                "category": "deep",
+                "title": "🌌 星辰大海 · 哲思沉稳",
+                "script": (
+                    "浩瀚星空无垠深邃，人类对真理的探索永不止步。"
+                    "唯有在宁静中沉淀思考，方能听见内心深处最真实的声音。"
+                ),
+                "tips": "低沉醇厚，字句饱满有力，略带思考的韵味。",
+            },
+        ]
+        settings = context.settings
+        url = _speechrail_rest_path(
+            settings.interaction.speechrail_tts_rest_url, "/voices/clone/prompts"
+        )
+        try:
+            async with local_async_client(timeout=3.0) as client:
+                resp = await client.get(
+                    url,
+                    headers=_speechrail_auth_headers(
+                        settings.interaction.speechrail_api_key
+                    ),
+                )
+                if resp.status_code == 200:
+                    return dict(resp.json())
+        except Exception:
+            pass
+        return {"object": "list", "data": default_prompts}
+
+    @router.post("/v1/voices/clone")
+    async def clone_voice(request: Request) -> Response:
+        """代理 SpeechRail 录音克隆音色（上传参考音频与引导文本）。"""
+        settings = context.settings
+        url = _speechrail_rest_path(
+            settings.interaction.speechrail_tts_rest_url, "/voices/clone"
+        )
+        try:
+            form = await request.form()
+            upload_file = form.get("audio")
+            ref_text = form.get("ref_text")
+            name = form.get("name")
+            voice_id = form.get("id")
+
+            if not upload_file or not hasattr(upload_file, "read"):
+                raise HTTPException(status_code=400, detail="缺少录音音频文件 (audio)")
+            if not ref_text or not str(ref_text).strip():
+                raise HTTPException(status_code=400, detail="缺少朗读参考文本 (ref_text)")
+            if not name or not str(name).strip():
+                raise HTTPException(status_code=400, detail="缺少音色名称 (name)")
+
+            audio_content = bytearray()
+            max_limit = 15 * 1024 * 1024  # 15MB
+            while chunk := await upload_file.read(64 * 1024):
+                audio_content.extend(chunk)
+                if len(audio_content) > max_limit:
+                    raise HTTPException(status_code=413, detail="录音音频过大（上限 15MB）")
+
+            if len(audio_content) < 1024:
+                raise HTTPException(status_code=400, detail="录音音频内容过小或为空")
+
+            filename = getattr(upload_file, "filename", "recording.wav") or "recording.wav"
+            content_type = getattr(upload_file, "content_type", "audio/wav") or "audio/wav"
+
+            data_fields: dict[str, str] = {
+                "name": str(name).strip(),
+                "ref_text": str(ref_text).strip(),
+            }
+            if voice_id and str(voice_id).strip():
+                data_fields["id"] = str(voice_id).strip()
+
+            auth_headers = _speechrail_auth_headers(settings.interaction.speechrail_api_key)
+            async with local_async_client(timeout=settings.ui.api_timeout) as client:
+                resp = await client.post(
+                    url,
+                    data=data_fields,
+                    files={"audio": (filename, bytes(audio_content), content_type)},
+                    headers=auth_headers,
+                )
+                return Response(
+                    content=resp.content,
+                    status_code=resp.status_code,
+                    media_type=resp.headers.get("content-type", "application/json"),
+                )
+        except HTTPException:
+            raise
+        except httpx.HTTPError as exc:
+            logger.warning("Sona: SpeechRail POST /v1/voices/clone 请求失败: %s", exc)
+            raise HTTPException(status_code=502, detail="SpeechRail 音色克隆服务响应异常") from exc
+        except Exception as exc:
+            logger.error("Sona: 处理音色克隆上传异常: %s", exc)
+            raise HTTPException(status_code=500, detail="处理音色克隆上传失败") from exc
+
     @router.post("/v1/voices")
     async def create_voice(request: Request) -> Response:
         """代理 SpeechRail 创建自定义音色。"""

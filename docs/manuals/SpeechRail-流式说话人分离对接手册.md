@@ -2,11 +2,13 @@
 title: "SpeechRail 流式说话人分离对接手册"
 status: active
 audience: "sona 工程团队（会议实时字幕与纪要消费方）"
-version: "1.0.0"
-date: 2026-09-04
+version: "1.0.1"
+date: 2026-09-05
 ---
 
 # 🎙️ SpeechRail 流式说话人分离对接手册
+
+> **2026-09-05 基线更正：** 本文下述内容记录 1.6.6 的流式接线里程碑，不证明跨 commit/重连编号稳定、讲话人修订已闭环或真实会议质量已验收。“无需改动”“会话内稳定”和额外延迟估计均不能作为验收结论。当前源码的时间戳来自二次解码，Sona 默认 batch overlay 仍存在，严格 decoder 也不接受未协商的新事件。后续实施以[端到端设计](../architecture/speaker-diarization-e2e-design.md)的事实核验和[逐任务计划](../superpowers/plans/2026-09-05-speaker-diarization-e2e.md)为准；现有公共 API 仍以 SpeechRail 当前契约为准，新设计的扩展尚未上线。
 
 > 本手册说明 SpeechRail `/v1/realtime` 流式说话人分离从「永不生效」到「端到端可用」
 > 的变更（SpeechRail ADR-0010，版本 1.6.6 起），以及 sona 侧消费方式。
