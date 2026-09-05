@@ -1,19 +1,19 @@
 ---
 title: "Sona × SpeechRail 会议讲话人分离端到端设计"
 description: "会议采集、时钟、归属修订、人工映射、持久化、封存与纪要的可执行设计"
-status: under_review
+status: implemented
 type: technical_spec
 category: meeting
-version: "1.0.0"
+version: "1.1.0"
 date: 2026-09-05
-last_updated: 2026-09-05
+last_updated: 2026-09-06
 owners: [sona-core]
 tags: [speechrail, diarization, meeting]
 ---
 
 # Sona × SpeechRail 会议讲话人分离端到端设计
 
-> 设计编号 `SPK-E2E-1`，状态为待实施。本文新增的数据字段、配置开关和事件不是当前能力；文档落盘不代表运行态操作或数据库迁移已获授权。
+> 设计编号 `SPK-E2E-1`，状态为已实施并验收通过。详见 [2026-09-06 联合验收报告](../operations/speaker-diarization-e2e-acceptance-2026-09-06.md)。
 
 配套：[Sona 实施计划](../superpowers/plans/2026-09-05-speaker-diarization-e2e.md)。公共 SpeechRail 协议统一由 `SpeechRail/docs/architecture/speaker-diarization-e2e-design.md` 第 5 节定义；同级检出时打开 [SpeechRail 设计](../../../SpeechRail/docs/architecture/speaker-diarization-e2e-design.md)。实施时将其转成两仓各自的机器可读契约，禁止客户端自行补造服务端不存在的事件。
 

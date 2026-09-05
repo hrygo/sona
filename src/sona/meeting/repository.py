@@ -983,6 +983,44 @@ class PostgresMeetingRepository:
             """,
             (meeting_id, session_id, source_speaker, group_generation, application_key),
         )
+
+        epoch_cursor = await connection.execute(
+            f"""
+            SELECT source_epoch FROM {self._schema}.meeting_transcription_sources
+            WHERE meeting_id = %s AND session_id = %s
+            """,
+            (meeting_id, session_id),
+        )
+        epoch_row = await epoch_cursor.fetchone()
+        source_epoch = int(epoch_row[0]) if epoch_row and epoch_row[0] is not None else 0
+
+        default_label = speaker_display_label(application_key, source_speaker)
+        await connection.execute(
+            f"""
+            INSERT INTO {self._schema}.meeting_speakers
+                (meeting_id, speaker_key, source_epoch, raw_speaker, default_label, display_name)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            ON CONFLICT (meeting_id, speaker_key) DO UPDATE SET
+                source_epoch = EXCLUDED.source_epoch,
+                raw_speaker = EXCLUDED.raw_speaker,
+                default_label = EXCLUDED.default_label,
+                display_name = CASE
+                    WHEN {self._schema}.meeting_speakers.display_name
+                         != {self._schema}.meeting_speakers.default_label
+                    THEN {self._schema}.meeting_speakers.display_name
+                    ELSE EXCLUDED.display_name
+                END,
+                updated_at = now()
+            """,
+            (
+                meeting_id,
+                application_key,
+                source_epoch,
+                source_speaker,
+                default_label,
+                default_label,
+            ),
+        )
         return application_key
 
     async def get_diarization_watermark(self, meeting_id: UUID, session_id: str) -> int:
