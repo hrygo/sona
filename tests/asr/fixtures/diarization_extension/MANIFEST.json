@@ -1,0 +1,13 @@
+{
+  "spec_id": "SPK-E2E-1",
+  "source": "SpeechRail/docs/architecture/speaker-diarization-e2e-design.md §5 (2026-09-05, version 1.0.0)",
+  "note": "Rail R2 golden fixtures 尚未冻结；本目录为按规格第 5 节示例建立的可校验副本。Rail R2 落盘后必须以 contracts/realtime-openai.md 与其 fixtures 重新核对，字段名禁止为通过测试而改造。",
+  "sha256": {
+    "completed.attribution_units.json": "965cd1afdf2180688bc16c7cb28e51832d7faeaca8822f73b65014747c5e685f",
+    "diarization.finalized.json": "81fe376d57ebd778017414be312f1eeebab6d718069a62605590631f840f9238",
+    "diarization.status.degraded.json": "59dd6892145004864cf623722fcc33f77bd170a8695976edeab3bb8390fa9f03",
+    "diarization.update.json": "2d7dca02e37e7446cbcab2170abc79655626ee130da6fcdf40b36ccbd3418974",
+    "session.update.extensions.json": "2145b2e25e99cd31b1728e83831f2a0729167c0d36762c88d4fe2150f25a7928",
+    "session.updated.contract.json": "cf4faf5e8f58dfa59551d5cd11afaf8cb47bebafcdb33b0fa046b2a7fefd81ec"
+  }
+}

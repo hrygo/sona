@@ -9,7 +9,7 @@ from typing import Literal, Protocol
 
 from sona.asr.models import ASRWindow
 
-ASREventKind = Literal["ready", "snapshot", "final", "error"]
+ASREventKind = Literal["ready", "snapshot", "final", "error", "diarization"]
 ASRPurpose = Literal["subtitles", "meeting"]
 
 
@@ -71,6 +71,12 @@ class ASREvent:
             raise ValueError(f"{self.kind} event requires window")
         if self.kind in {"ready", "error"} and self.window is not None:
             raise ValueError(f"{self.kind} event cannot carry window")
+        if self.kind == "diarization":
+            # 分人扩展事件经 metadata 传递，不携带窗口。
+            if self.window is not None:
+                raise ValueError("diarization event cannot carry window")
+            if "event" not in self.metadata:
+                raise ValueError("diarization event requires metadata['event']")
 
         code = (self.error_code or "").strip()
         message = (self.error_message or "").strip()

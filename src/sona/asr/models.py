@@ -23,6 +23,9 @@ class ASRSegment:
     text: str
     translation: str | None = None
     detected_language: str | None = None
+    # SPK-E2E-1 扩展模式：source session 内的不可变归属单元标识与时间质量。
+    source_uid: str | None = None
+    timing_quality: str | None = None
 
     def __post_init__(self) -> None:
         if self.order < 0:
@@ -37,6 +40,11 @@ class ASRSegment:
             raise ValueError("speaker_key 不能为空")
         if not self.text.strip():
             raise ValueError("text 不能为空")
+        if self.timing_quality is not None and self.timing_quality not in (
+            "aligned",
+            "unavailable",
+        ):
+            raise ValueError("timing_quality 只允许 aligned/unavailable")
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +56,8 @@ class ASRWindow:
     partial_speaker_key: str | None = None
     segments: tuple[ASRSegment, ...] = ()
     speaker_remap: tuple[tuple[str, str], ...] = ()
+    # SPK-E2E-1 扩展模式：产生本窗口的 SpeechRail session id（重放/身份用）。
+    source_session_id: str | None = None
 
     def __post_init__(self) -> None:
         if self.source_epoch < 0:

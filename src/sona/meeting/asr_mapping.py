@@ -8,15 +8,32 @@ from uuid import NAMESPACE_URL, uuid5
 from sona.asr.models import ASRSegment, ASRWindow
 from sona.meeting.models import NormalizedSegment, TranscriptWindow
 
-__all__ = ["to_transcript_window"]
+__all__ = ["meeting_sample", "to_transcript_window"]
+
+# SPK-E2E-1 扩展模式的稳定身份种子前缀（source session + segment UID）。
+_NEW_MODE_IDENTITY_PREFIX = "speechrail:spk-e2e-1"
+
+# 16 kHz：1 ms = 16 samples。样本域换算保持整数精确，不逐包取整累加。
+_SAMPLES_PER_MS = 16
+
+
+def meeting_sample(epoch_start: int, rail_sample: int) -> int:
+    """把 SpeechRail session 样本域时间换算为会议时间线样本。
+
+    ``meeting_sample = epoch_start + rail_sample``：一个 source epoch 只加一次
+    起点，禁止在 item/VAD 层重复叠加偏移。不校验负值——调用方（适配器）负责
+    在校验样本范围后再换算。
+    """
+    return epoch_start + rail_sample
 
 
 def to_transcript_window(window: ASRWindow) -> TranscriptWindow:
     """把 ASR 中立窗口投影为会议 TranscriptWindow。
 
-    segment UUID 使用版本化种子，包含 source epoch、顺序、带会议 group
-    的 speaker key、绝对时间区间和文本。同一窗口重播保持 ID 稳定，跨会议
-    group 或不同时间的同文段不会复用 ID；历史已落库 ID 不做迁移。
+    legacy segment UUID 使用版本化种子，包含 source epoch、顺序、带会议 group
+    的 speaker key、绝对时间区间和文本；同一窗口重播保持 ID 稳定。扩展模式的
+    归属单元（带 ``source_uid``）改用 ``source session + segment UID`` 派生稳定
+    UUID——重连后的同编号 UID 不会误并身份。历史已落库 ID 不做迁移。
     """
     return TranscriptWindow(
         source_epoch=window.source_epoch,
@@ -28,8 +45,13 @@ def to_transcript_window(window: ASRWindow) -> TranscriptWindow:
 
 
 def _to_normalized_segment(window: ASRWindow, segment: ASRSegment) -> NormalizedSegment:
+    identity = (
+        _new_mode_identity(window, segment)
+        if segment.source_uid is not None
+        else _segment_identity_seed(window, segment)
+    )
     return NormalizedSegment(
-        id=uuid5(NAMESPACE_URL, _segment_identity_seed(window, segment)),
+        id=uuid5(NAMESPACE_URL, identity),
         order=segment.order,
         source_epoch=segment.source_epoch,
         speaker_key=segment.speaker_key,
@@ -39,6 +61,12 @@ def _to_normalized_segment(window: ASRWindow, segment: ASRSegment) -> Normalized
         translation=segment.translation,
         detected_language=segment.detected_language,
     )
+
+
+def _new_mode_identity(window: ASRWindow, segment: ASRSegment) -> str:
+    """扩展模式身份：source session + segment UID（meeting 作用域由库层隔离）。"""
+    session_id = window.source_session_id or f"epoch:{window.source_epoch}"
+    return f"{_NEW_MODE_IDENTITY_PREFIX}:{session_id}:{segment.source_uid}"
 
 
 def _segment_identity_seed(window: ASRWindow, segment: ASRSegment) -> str:

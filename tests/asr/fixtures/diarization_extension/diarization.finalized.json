@@ -1,0 +1,12 @@
+{
+  "type": "speechrail.diarization.finalized",
+  "event_id": "evt_example_4",
+  "session_id": "sess_example",
+  "sequence": 15,
+  "finalization_id": "fin_example_1",
+  "through_sample": 56000,
+  "stable_through_sample": 56000,
+  "status": "complete",
+  "reason": null,
+  "last_update_sequence": 13
+}

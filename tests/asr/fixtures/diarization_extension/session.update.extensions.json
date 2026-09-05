@@ -1,0 +1,14 @@
+{
+  "type": "session.update",
+  "session": {
+    "input_audio_transcription": {
+      "model": "gpt-4o-transcribe-diarize",
+      "language": "zh",
+      "diarization": {
+        "enabled": true,
+        "group_id": "0123456789abcdef0123456789abcdef",
+        "extensions": ["speechrail.diarization.v1"]
+      }
+    }
+  }
+}

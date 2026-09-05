@@ -9,6 +9,7 @@ adapters and ``speechrail.tts``.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import json
@@ -135,6 +136,11 @@ class SpeechRailOpenAITransport:
         self._sequence = sequence
         return {str(key): value for key, value in payload.items()}
 
+    @property
+    def session_id(self) -> str | None:
+        """已协商的 session id；连接关闭后回到 None。"""
+        return self._session_id
+
     async def close(self) -> None:
         if self._connection is not None:
             try:
@@ -148,11 +154,24 @@ class SpeechRailOpenAITransport:
 _ASR_ALIAS_DIARIZE = "gpt-4o-transcribe-diarize"
 _ASR_ALIAS_PLAIN = "gpt-4o-transcribe"
 
+# SPK-E2E-1 分人扩展：能力字符串与 session.updated 契约约束（Rail 规格 §5.1）。
+DIARIZATION_EXTENSION_CAPABILITY = "speechrail.diarization.v1"
+_DIARIZATION_CONTRACT_TIMEBASE = "session_samples"
+_DIARIZATION_CONTRACT_SAMPLE_RATE = 16_000
+_SESSION_UPDATED_TIMEOUT_SECS = 10.0
+
 DEFAULT_SERVER_VAD: dict[str, object] = {
     "type": "server_vad",
     "threshold": 0.5,
     "prefix_padding_ms": 300,
     "silence_duration_ms": 400,
+}
+# 扩展模式推荐的 server VAD（Rail 规格 §5.1/Sona 设计 §3：silence 600ms）。
+DEFAULT_SERVER_VAD_EXTENSIONS: dict[str, object] = {
+    "type": "server_vad",
+    "threshold": 0.5,
+    "prefix_padding_ms": 300,
+    "silence_duration_ms": 600,
 }
 MANUAL_TURN_DETECTION: dict[str, object] = {"type": "manual"}
 
@@ -180,10 +199,16 @@ class SpeechRailRealtimeClient:
             connect_timeout_secs=connect_timeout_secs,
             connection_factory=connection_factory,
         )
+        self._diarization_contract: dict[str, object] | None = None
 
     @property
     def uri(self) -> str:
         return self._transport.uri
+
+    @property
+    def session_id(self) -> str | None:
+        """当前连接的 SpeechRail session id（未连接时为 None）。"""
+        return self._transport.session_id
 
     async def connect(
         self,
@@ -193,8 +218,90 @@ class SpeechRailRealtimeClient:
         speaker_count_hint: int | None = None,
         diarization_group_id: str | None = None,
         turn_detection: Mapping[str, object] | None = None,
+        diarization_extensions: bool = False,
     ) -> None:
         await self._transport.connect()
+        negotiated_contract: dict[str, object] | None = None
+        negotiated = False
+        if diarization_extensions:
+            if speaker_count_hint is not None and not 1 <= speaker_count_hint <= 4:
+                await self._transport.close()
+                raise ValueError("SPEECHRAIL_SPEAKER_LIMIT_EXCEEDED")
+            created = await self._transport.receive()
+            capabilities = _session_capabilities(created)
+            if DIARIZATION_EXTENSION_CAPABILITY in capabilities:
+                negotiated_contract = await self._negotiate_extensions(
+                    language=language,
+                    speaker_count_hint=speaker_count_hint,
+                    diarization_group_id=diarization_group_id,
+                    turn_detection=turn_detection,
+                )
+                negotiated = True
+        if not negotiated:
+            await self._send_legacy_session_update(
+                language=language,
+                diarization=diarization,
+                speaker_count_hint=speaker_count_hint,
+                diarization_group_id=diarization_group_id,
+                turn_detection=turn_detection,
+            )
+        self._diarization_contract = negotiated_contract
+
+    @property
+    def diarization_contract(self) -> dict[str, object] | None:
+        """协商成功后的 diarization_contract；legacy 连接为 None。"""
+        return self._diarization_contract
+
+    async def _negotiate_extensions(
+        self,
+        *,
+        language: str,
+        speaker_count_hint: int | None,
+        diarization_group_id: str | None,
+        turn_detection: Mapping[str, object] | None,
+    ) -> dict[str, object]:
+        transcription: dict[str, object] = {
+            "model": _ASR_ALIAS_DIARIZE,
+            "language": language,
+        }
+        diarization_config: dict[str, object] = {
+            "enabled": True,
+            "finalize": True,
+            "extensions": [DIARIZATION_EXTENSION_CAPABILITY],
+        }
+        if speaker_count_hint is not None:
+            diarization_config["speaker_count_hint"] = speaker_count_hint
+        if diarization_group_id is not None:
+            diarization_config["group_id"] = diarization_group_id
+        transcription["diarization"] = diarization_config
+        turn_cfg = dict(turn_detection) if turn_detection is not None else {
+            "type": "manual"
+        }
+        await self._transport.send_event(
+            {
+                "type": "session.update",
+                "session": {
+                    "turn_detection": turn_cfg,
+                    "input_audio_transcription": transcription,
+                },
+            }
+        )
+        updated = await asyncio.wait_for(
+            self._transport.receive(), timeout=_SESSION_UPDATED_TIMEOUT_SECS
+        )
+        if updated.get("type") != "session.updated":
+            raise SpeechRailProtocolError("SPEECHRAIL_PROTOCOL_ERROR")
+        return _validate_diarization_contract(updated)
+
+    async def _send_legacy_session_update(
+        self,
+        *,
+        language: str,
+        diarization: bool,
+        speaker_count_hint: int | None,
+        diarization_group_id: str | None,
+        turn_detection: Mapping[str, object] | None,
+    ) -> None:
         transcription: dict[str, object] = {
             "model": _ASR_ALIAS_DIARIZE if diarization else _ASR_ALIAS_PLAIN,
             "language": language,
@@ -254,8 +361,63 @@ def decode_pcm16(value: object) -> bytes:
     return audio
 
 
+def _session_capabilities(created: dict[str, object]) -> frozenset[str]:
+    """从 session.created 提取服务能力集合（缺失视为空）。"""
+    session = created.get("session")
+    if not isinstance(session, dict):
+        return frozenset()
+    capabilities = session.get("capabilities")
+    if not isinstance(capabilities, list):
+        return frozenset()
+    return frozenset(
+        item for item in capabilities if isinstance(item, str) and item
+    )
+
+
+def _validate_diarization_contract(updated: dict[str, object]) -> dict[str, object]:
+    """校验 session.updated 回显的 diarization_contract（Rail 规格 §5.1）。
+
+    未成功回显即未启用：任何字段缺失/越界都按协议错误处理，绝不降级猜测。
+    """
+    session = updated.get("session")
+    if not isinstance(session, dict):
+        raise SpeechRailProtocolError("SPEECHRAIL_PROTOCOL_ERROR")
+    contract = session.get("diarization_contract")
+    if not isinstance(contract, dict):
+        raise SpeechRailProtocolError("SPEECHRAIL_PROTOCOL_ERROR")
+    version = contract.get("version")
+    timebase = contract.get("timebase")
+    sample_rate = contract.get("sample_rate")
+    max_speakers = contract.get("max_speakers")
+    max_item_ms = contract.get("max_item_duration_ms")
+    max_revision_ms = contract.get("max_revision_delay_ms")
+    group_generation = contract.get("group_generation")
+    if (
+        version != 1
+        or timebase != _DIARIZATION_CONTRACT_TIMEBASE
+        or sample_rate != _DIARIZATION_CONTRACT_SAMPLE_RATE
+        or isinstance(max_speakers, bool)
+        or not isinstance(max_speakers, int)
+        or max_speakers < 1
+        or isinstance(max_item_ms, bool)
+        or not isinstance(max_item_ms, int)
+        or max_item_ms <= 0
+        or isinstance(max_revision_ms, bool)
+        or not isinstance(max_revision_ms, int)
+        or max_revision_ms <= 0
+    ):
+        raise SpeechRailProtocolError("SPEECHRAIL_PROTOCOL_ERROR")
+    if group_generation is not None and (
+        not isinstance(group_generation, str) or not group_generation
+    ):
+        raise SpeechRailProtocolError("SPEECHRAIL_PROTOCOL_ERROR")
+    return dict(contract)
+
+
 __all__ = [
     "DEFAULT_SERVER_VAD",
+    "DEFAULT_SERVER_VAD_EXTENSIONS",
+    "DIARIZATION_EXTENSION_CAPABILITY",
     "MANUAL_TURN_DETECTION",
     "ConnectionFactory",
     "SpeechRailConnection",

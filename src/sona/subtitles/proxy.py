@@ -82,6 +82,7 @@ class SubtitleProxy:
         clock: Callable[[], float] = time.monotonic,
         readiness_probe: Callable[[], Awaitable[bool]] | None = None,
         stable_reset_after_secs: float | None = None,
+        diarization_extensions_enabled: bool = False,
     ) -> None:
         if not backoff_delays or any(delay <= 0 for delay in backoff_delays):
             raise ValueError("backoff_delays 必须包含正数")
@@ -89,6 +90,7 @@ class SubtitleProxy:
             raise ValueError("transcriber_factory 不能与 SpeechRail 连接工厂同时提供")
         self._settings = settings
         self._profile = settings.asr_profile
+        self._diarization_extensions_enabled = diarization_extensions_enabled
         self._transcriber_factory = transcriber_factory or self._build_speechrail_transcriber(
             speechrail_connection_factory
         )
@@ -165,6 +167,10 @@ class SubtitleProxy:
                 context=context,
                 language=self._profile.language,
                 finish_timeout_secs=self._profile.final_timeout_secs,
+                # 分人扩展只在会议目的且显式开启时协商；普通字幕永远 legacy。
+                diarization_extensions=(
+                    self._diarization_extensions_enabled and context.purpose == "meeting"
+                ),
             )
 
         return create

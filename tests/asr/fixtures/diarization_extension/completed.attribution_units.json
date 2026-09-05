@@ -1,0 +1,21 @@
+{
+  "type": "conversation.item.input_audio_transcription.completed",
+  "event_id": "evt_example_1",
+  "session_id": "sess_example",
+  "sequence": 12,
+  "item_id": "item_example_2",
+  "content_index": 0,
+  "transcript": "同意。",
+  "audio_start_sample": 48000,
+  "audio_end_sample": 56000,
+  "attribution_units": [
+    {
+      "segment_uid": "seg_example_2_0",
+      "text_start": 0,
+      "text_end": 3,
+      "audio_start_sample": 49600,
+      "audio_end_sample": 52800,
+      "timing_quality": "aligned"
+    }
+  ]
+}

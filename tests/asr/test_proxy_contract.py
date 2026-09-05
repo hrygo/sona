@@ -106,3 +106,35 @@ async def test_proxy_broadcasts_domain_snapshot_through_legacy_presenter(
     assert preparation.generation == 1
     assert contexts == [ASRSessionContext(source_epoch=1, offset_ms=0, purpose="subtitles")]
     await proxy.stop()
+
+
+def test_extensions_flag_applies_only_to_meeting_purpose() -> None:
+    """分人扩展只在会议目的且显式开启时传给 transcriber。"""
+    import pytest as _pytest
+
+    _pytest.importorskip("sona.speechrail")
+
+    from sona.asr.contracts import ASRSessionContext
+    from sona.speechrail.transcriber import SpeechRailStreamingTranscriber
+
+    proxy = SubtitleProxy(
+        SubtitleSettings(_env_file=None),
+        diarization_extensions_enabled=True,
+    )
+    factory = proxy._build_speechrail_transcriber(None)
+
+    meeting_transcriber = factory(
+        ASRSessionContext(
+            source_epoch=1, offset_ms=0, purpose="meeting", diarization_group_id="g" * 32
+        )
+    )
+    subtitle_transcriber = factory(
+        ASRSessionContext(source_epoch=1, offset_ms=0, purpose="subtitles")
+    )
+
+    assert isinstance(meeting_transcriber, SpeechRailStreamingTranscriber)
+    assert isinstance(subtitle_transcriber, SpeechRailStreamingTranscriber)
+    meeting_flag = meeting_transcriber._extensions_requested
+    subtitle_flag = subtitle_transcriber._extensions_requested
+    assert meeting_flag is True
+    assert subtitle_flag is False

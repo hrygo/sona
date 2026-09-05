@@ -1,0 +1,18 @@
+{
+  "type": "session.updated",
+  "event_id": "evt_example_su",
+  "session_id": "sess_example",
+  "sequence": 2,
+  "session": {
+    "id": "sess_example",
+    "diarization_contract": {
+      "version": 1,
+      "timebase": "session_samples",
+      "sample_rate": 16000,
+      "max_speakers": 4,
+      "max_item_duration_ms": 8000,
+      "max_revision_delay_ms": 3000,
+      "group_generation": "generation_example"
+    }
+  }
+}

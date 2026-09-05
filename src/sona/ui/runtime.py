@@ -94,6 +94,7 @@ class UIRuntime:
         self.subtitle_proxy = SubtitleProxy(
             settings.subtitles,
             readiness_probe=_speechrail_readiness_probe(settings),
+            diarization_extensions_enabled=settings.meeting.diarization_extensions_enabled,
         )
         factories = default_pipeline_factories(settings.interaction)
         if conversation_stt_factory is not None:

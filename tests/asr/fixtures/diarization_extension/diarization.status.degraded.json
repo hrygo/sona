@@ -1,0 +1,9 @@
+{
+  "type": "speechrail.diarization.status",
+  "event_id": "evt_example_3",
+  "session_id": "sess_example",
+  "sequence": 14,
+  "status": "degraded",
+  "reason": "diarization_overloaded",
+  "since_sample": 52000
+}

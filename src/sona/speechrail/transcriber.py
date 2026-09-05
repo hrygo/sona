@@ -16,6 +16,9 @@ from collections.abc import AsyncIterator
 from sona.asr.contracts import ASRCapabilities, ASREvent, ASRSessionContext
 from sona.asr.models import ASRSegment, ASRWindow
 from sona.speechrail.transcription_events import (
+    DiarizationFinalizedEvent,
+    DiarizationStatusEvent,
+    DiarizationUpdateEvent,
     Noop,
     SpeechRailTranscriptionError,
     TranscriptionCompleted,
@@ -25,6 +28,7 @@ from sona.speechrail.transcription_events import (
 )
 from sona.speechrail.transport import (
     DEFAULT_SERVER_VAD,
+    DEFAULT_SERVER_VAD_EXTENSIONS,
     ConnectionFactory,
     SpeechRailProtocolError,
     SpeechRailRealtimeClient,
@@ -33,6 +37,13 @@ from sona.speechrail.transport import (
 __all__ = ["ConnectionFactory", "SpeechRailRealtimeClient", "SpeechRailStreamingTranscriber"]
 
 _BYTES_PER_MS = 32_000 / 1_000  # 16 kHz mono s16le bytes per millisecond
+_SAMPLES_PER_MS = 16  # 16 kHz：1 ms = 16 samples（样本域换算保持整数精确）
+
+# SPK-E2E-1 扩展模式的无归属保留 key：不拼接 group+label 当持久身份。
+UNKNOWN_SPEAKER_KEY = "unknown"
+
+# 扩展模式逐连接跟踪的归属单元状态上限（协议要求的有界缓存）。
+_MAX_TRACKED_UNITS = 8_192
 
 
 class SpeechRailStreamingTranscriber:
@@ -55,6 +66,7 @@ class SpeechRailStreamingTranscriber:
         context: ASRSessionContext,
         language: str,
         finish_timeout_secs: float = 10.0,
+        diarization_extensions: bool = False,
     ) -> None:
         if finish_timeout_secs <= 0:
             raise ValueError("finish_timeout_secs must be positive")
@@ -83,6 +95,13 @@ class SpeechRailStreamingTranscriber:
         self._events_active = False
         self._terminal_error: tuple[str, str] | None = None
         self._diarization_requested = context.purpose == "meeting"
+        self._extensions_requested = bool(diarization_extensions)
+        self._extensions_negotiated = False
+        # 扩展模式协议状态：归属单元修订连续性与分人健康（停止分人保留正文）。
+        self._unit_updates: dict[str, tuple[int, tuple[object, ...], int]] = {}
+        self._diarization_broken = False
+        self._diarization_degraded = False
+        self._diarization_finalized: DiarizationFinalizedEvent | None = None
 
     @property
     def uri(self) -> str:
@@ -94,9 +113,27 @@ class SpeechRailStreamingTranscriber:
             diarization=self._diarization_requested,
             speaker_count_hint=self._context.speaker_count_hint,
             diarization_group_id=self._context.diarization_group_id,
-            turn_detection=DEFAULT_SERVER_VAD,
+            turn_detection=(
+                DEFAULT_SERVER_VAD_EXTENSIONS
+                if self._extensions_requested
+                else DEFAULT_SERVER_VAD
+            ),
+            diarization_extensions=self._extensions_requested,
+        )
+        self._extensions_negotiated = (
+            self._extensions_requested and self._client.diarization_contract is not None
         )
         self._ready = True
+
+    @property
+    def extensions_negotiated(self) -> bool:
+        """是否成功协商 SPK-E2E-1 扩展（capability 缺失时回退 legacy）。"""
+        return self._extensions_negotiated
+
+    @property
+    def diarization_finalized(self) -> DiarizationFinalizedEvent | None:
+        """最近一次接收的 ``speechrail.diarization.finalized``（S3 EOF 屏障消费）。"""
+        return self._diarization_finalized
 
     async def send_audio(self, chunk: bytes) -> None:
         await self._client.append_pcm(chunk)
@@ -113,7 +150,9 @@ class SpeechRailStreamingTranscriber:
             while True:
                 event = await self._client.receive()
                 try:
-                    decoded = decode_transcription_event(event)
+                    decoded = decode_transcription_event(
+                        event, diarization_extensions=self._extensions_negotiated
+                    )
                 except SpeechRailProtocolError:
                     yield self._set_terminal_error(*_terminal_error_for(event))
                     return
@@ -176,6 +215,32 @@ class SpeechRailStreamingTranscriber:
                         )
                         return
                 elif isinstance(decoded, TranscriptionCompleted):
+                    if self._extensions_negotiated:
+                        # 扩展模式：completed 携带 attribution_units，一个单元一个
+                        # 不可变正文段；样本区间换算会议时间，不再叠加 VAD onset/
+                        # item offset。不再接收 legacy .segment（解码层拒绝）。
+                        self._register_unit_uids(decoded)
+                        segments = self._segments_from_units(decoded)
+                        final_window = ASRWindow(
+                            source_epoch=self._context.source_epoch,
+                            partial="",
+                            segments=segments,
+                            source_session_id=self._client.session_id,
+                        )
+                        self._last_window = final_window
+                        self._last_confirmed_window = final_window
+                        if segments:
+                            self._last_confirmed_end_ms = max(
+                                segment.end_ms for segment in segments
+                            )
+                        self._partial_text = ""
+                        self._partial_item_id = decoded.item_id
+                        self._active_item_id = None
+                        self._active_item_start_ms = None
+                        self._active_item_end_ms = None
+                        self._active_item_offset_ms = None
+                        yield ASREvent(kind="final", window=final_window)
+                        continue
                     # 分人会话也可能收到无 segment 事件的 completed（服务端对短促/
                     # 单人轮次只下发 completed）。此时用兜底单 segment 保留本轮转写；
                     # EOF 空音频 completed 表示没有新增文本，不应污染已确认窗口。
@@ -218,6 +283,18 @@ class SpeechRailStreamingTranscriber:
                             segment.end_ms for segment in segments
                         )
                     yield ASREvent(kind="final", window=final_window)
+                elif isinstance(decoded, DiarizationUpdateEvent):
+                    event_out = self._consume_diarization_update(decoded)
+                    if event_out is not None:
+                        yield event_out
+                elif isinstance(decoded, DiarizationStatusEvent):
+                    if not self._diarization_broken:
+                        self._diarization_degraded = True
+                        yield ASREvent(kind="diarization", metadata={"event": decoded})
+                elif isinstance(decoded, DiarizationFinalizedEvent):
+                    if not self._diarization_broken:
+                        self._diarization_finalized = decoded
+                        yield ASREvent(kind="diarization", metadata={"event": decoded})
                 elif isinstance(decoded, SpeechRailTranscriptionError):
                     yield self._set_terminal_error(
                         "SPEECHRAIL_REQUEST_FAILED",
@@ -257,6 +334,80 @@ class SpeechRailStreamingTranscriber:
         self._terminal_error = (code, message)
         self._final_ready.set()
         return ASREvent(kind="error", error_code=code, error_message=message)
+
+    # ------------------------------------------------------------------
+    # SPK-E2E-1 扩展模式
+    # ------------------------------------------------------------------
+
+    def _register_unit_uids(self, completed: TranscriptionCompleted) -> None:
+        """登记 completed 交付的归属单元 UID（同连接可被后续修订引用）。"""
+        for unit in completed.attribution_units:
+            self._unit_updates.setdefault(unit.segment_uid, (0, (), unit.audio_end_sample))
+
+    def _segments_from_units(
+        self, completed: TranscriptionCompleted
+    ) -> tuple[ASRSegment, ...]:
+        """把 completed 的归属单元投影为不可变正文段（speaker 初始 unknown）。"""
+        transcript = completed.transcript
+        segments: list[ASRSegment] = []
+        for unit in completed.attribution_units:
+            text = transcript[unit.text_start : unit.text_end]
+            if not text.strip():
+                # 空白单元不产生正文段（说话人修订也无正文可归属）。
+                continue
+            segments.append(
+                ASRSegment(
+                    order=0,
+                    source_epoch=self._context.source_epoch,
+                    speaker_key=UNKNOWN_SPEAKER_KEY,
+                    start_ms=self._context.offset_ms + unit.audio_start_sample // _SAMPLES_PER_MS,
+                    end_ms=self._context.offset_ms + unit.audio_end_sample // _SAMPLES_PER_MS,
+                    text=text,
+                    source_uid=unit.segment_uid,
+                    timing_quality=unit.timing_quality,
+                )
+            )
+        return tuple(segments)
+
+    def _consume_diarization_update(self, event: DiarizationUpdateEvent) -> ASREvent | None:
+        """校验并转发归属修订；协议违例停止分人但保留正文。"""
+        if self._diarization_broken:
+            return None
+        # 稳定水位之前的单元已冻结：丢弃跟踪状态（有界缓存，Rail 不会再修订）。
+        for uid in [
+            uid
+            for uid, (_, _, unit_end) in self._unit_updates.items()
+            if unit_end < event.stable_through_sample
+        ]:
+            del self._unit_updates[uid]
+        emitted = False
+        for update in event.updates:
+            tracked = self._unit_updates.get(update.segment_uid)
+            if tracked is None:
+                # 更新未知 UID：协议错误——停止分人，保留正文。
+                self._diarization_broken = True
+                return None
+            last_revision, last_content, unit_end = tracked
+            content = _update_content(update)
+            if update.revision < last_revision:
+                # revision 倒退忽略。
+                continue
+            if update.revision == last_revision:
+                if content != last_content:
+                    # 同 revision 不同内容：协议冲突。
+                    self._diarization_broken = True
+                    return None
+                # 同 revision 同内容：幂等确认。
+                continue
+            if update.revision != last_revision + 1:
+                # 跳号：协议错误。
+                self._diarization_broken = True
+                return None
+            self._unit_updates[update.segment_uid] = (update.revision, content, unit_end)
+            emitted = True
+        if not emitted:
+            return None
+        return ASREvent(kind="diarization", metadata={"event": event})
 
     def _segment_offset_ms(self, item_id: str | None) -> int:
         """Return the current SpeechRail item start on the session timeline.
@@ -352,15 +503,48 @@ def _speaker_key(context: ASRSessionContext, speaker: str) -> str:
     return f"epoch:{context.source_epoch}:speaker:{speaker}"
 
 
+def _update_content(update: object) -> tuple[object, ...]:
+    """一个归属修订的内容指纹（同 revision 幂等/冲突判定用）。"""
+    status = getattr(update, "status", None)
+    speaker = getattr(update, "speaker", None)
+    coverage = getattr(update, "coverage_ratio", None)
+    overlap = getattr(update, "overlap_ratio", None)
+    candidates = tuple(
+        (candidate.speaker, candidate.support_ratio)
+        for candidate in getattr(update, "candidates", ())
+    )
+    return (status, speaker, coverage, overlap, candidates)
+
+
 def _terminal_error_for(event: dict[str, object]) -> tuple[str, str]:
     event_type = event.get("type")
     if event_type == "conversation.item.input_audio_transcription.delta":
         return "SPEECHRAIL_PROTOCOL_ERROR", "SpeechRail returned a transcription delta without text"
     if event_type == "conversation.item.input_audio_transcription.completed":
+        if event.get("attribution_units") is not None or "audio_start_sample" in event:
+            return (
+                "SPEECHRAIL_PROTOCOL_ERROR",
+                "SpeechRail returned an invalid attributed completed transcript",
+            )
         return "SPEECHRAIL_PROTOCOL_ERROR", "SpeechRail returned an invalid completed transcript"
     if event_type == "conversation.item.input_audio_transcription.segment":
         return (
             "SPEECHRAIL_DIARIZATION_PROTOCOL_ERROR",
             "SpeechRail returned an invalid transcription segment",
+        )
+    if event_type == "speechrail.diarization.update":
+        return (
+            "SPEECHRAIL_DIARIZATION_PROTOCOL_ERROR",
+            "SpeechRail returned an invalid diarization update",
+        )
+    if event_type == "speechrail.diarization.status":
+        return (
+            "SPEECHRAIL_DIARIZATION_PROTOCOL_ERROR",
+            "SpeechRail returned an invalid diarization status",
+        )
+    if event_type == "speechrail.diarization.finalized":
+        return (
+            "SPEECHRAIL_DIARIZATION_PROTOCOL_ERROR",
+            "SpeechRail returned an invalid diarization finalized event",
         )
     return "SPEECHRAIL_PROTOCOL_ERROR", "SpeechRail returned an invalid transcription event"

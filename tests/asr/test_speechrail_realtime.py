@@ -5,6 +5,8 @@ import base64
 import json
 from collections.abc import AsyncIterator
 
+import pytest
+
 from sona.asr.contracts import ASREvent, ASRSessionContext
 from sona.speechrail import (
     SpeechRailRealtimeClient,
@@ -888,3 +890,412 @@ async def _drain_events(events: AsyncIterator[ASREvent]) -> list[ASREvent]:
 
 async def _immediate(connection: FakeConnection) -> FakeConnection:
     return connection
+
+
+# ---------------------------------------------------------------------------
+# S1: SPK-E2E-1 扩展模式（协商、样本时间线、修订连续性、断线）
+# ---------------------------------------------------------------------------
+
+_EXTENSIONS_CONTRACT = {
+    "version": 1,
+    "timebase": "session_samples",
+    "sample_rate": 16000,
+    "max_speakers": 4,
+    "max_item_duration_ms": 8000,
+    "max_revision_delay_ms": 3000,
+    "group_generation": "generation_example",
+}
+
+
+def _extensions_session_events() -> list[dict[str, object]]:
+    return [
+        _envelope(
+            "session.created",
+            1,
+            session={"id": "sess-1", "capabilities": ["speechrail.diarization.v1"]},
+        ),
+        _envelope(
+            "session.updated",
+            2,
+            session={"id": "sess-1", "diarization_contract": _EXTENSIONS_CONTRACT},
+        ),
+    ]
+
+
+def _extensions_completed(
+    transcript: str,
+    *,
+    sequence: int,
+    item_id: str,
+    start_sample: int,
+    end_sample: int,
+    units: list[dict[str, object]],
+) -> dict[str, object]:
+    return _envelope(
+        "conversation.item.input_audio_transcription.completed",
+        sequence,
+        item_id=item_id,
+        content_index=0,
+        transcript=transcript,
+        audio_start_sample=start_sample,
+        audio_end_sample=end_sample,
+        attribution_units=units,
+    )
+
+
+def _unit(
+    uid: str,
+    *,
+    text_start: int,
+    text_end: int,
+    start_sample: int,
+    end_sample: int,
+    timing: str = "aligned",
+) -> dict[str, object]:
+    return {
+        "segment_uid": uid,
+        "text_start": text_start,
+        "text_end": text_end,
+        "audio_start_sample": start_sample,
+        "audio_end_sample": end_sample,
+        "timing_quality": timing,
+    }
+
+
+def _diarization_update(
+    *,
+    sequence: int,
+    stable_through: int,
+    updates: list[dict[str, object]],
+) -> dict[str, object]:
+    return _envelope(
+        "speechrail.diarization.update",
+        sequence,
+        group_generation="generation_example",
+        stable_through_sample=stable_through,
+        updates=updates,
+        speaker_links=[],
+    )
+
+
+def _patch(
+    uid: str,
+    *,
+    revision: int,
+    status: str = "stable",
+    speaker: str | None = "spk_01",
+) -> dict[str, object]:
+    return {
+        "segment_uid": uid,
+        "revision": revision,
+        "status": status,
+        "speaker": speaker,
+        "coverage_ratio": 0.95,
+        "overlap_ratio": 0.0,
+        "candidates": ([] if speaker is None else [{"speaker": speaker, "support_ratio": 0.95}]),
+    }
+
+
+def _extensions_adapter(connection: FakeConnection, *, offset_ms: int = 0):
+    client = SpeechRailRealtimeClient(
+        url=connection.uri,
+        connection_factory=lambda _: _immediate(connection),
+    )
+    adapter = SpeechRailStreamingTranscriber(
+        client=client,
+        context=ASRSessionContext(
+            source_epoch=3,
+            offset_ms=offset_ms,
+            purpose="meeting",
+            diarization_group_id="b" * 64,
+        ),
+        language="zh",
+        diarization_extensions=True,
+    )
+    return adapter, client
+
+
+async def _drain_ready(events: AsyncIterator[ASREvent]) -> None:
+    first = await anext(events)
+    assert first.kind == "ready"
+
+
+def test_extensions_mode_negotiates_and_maps_units_with_unknown_speaker() -> None:
+    async def scenario() -> None:
+        connection = FakeConnection()
+        connection._messages = [
+            *_extensions_session_events(),
+            _extensions_completed(
+                "同意。",
+                sequence=4,
+                item_id="item-1",
+                start_sample=48000,
+                end_sample=56000,
+                units=[_unit("seg_1", text_start=0, text_end=3,
+                             start_sample=49600, end_sample=52800)],
+            ),
+        ]
+        adapter, client = _extensions_adapter(connection, offset_ms=1_000)
+
+        await adapter.connect()
+        assert adapter.extensions_negotiated is True
+        assert client.diarization_contract is not None
+        events = adapter.events()
+        await _drain_ready(events)
+        final = await anext(events)
+
+        assert final.kind == "final"
+        assert final.window is not None
+        assert final.window.source_session_id == "sess-1"
+        segment = final.window.segments[0]
+        # 新模式不拼 group+label 当持久身份；样本域换算只加一次 epoch offset。
+        assert segment.speaker_key == "unknown"
+        assert segment.source_uid == "seg_1"
+        assert segment.start_ms == 1_000 + 49_600 // 16
+        assert segment.end_ms == 1_000 + 52_800 // 16
+        assert segment.text == "同意。"
+        # 正文单元拼接逐字等于 canonical text。
+        assert segment.text == "同意。"
+
+    asyncio.run(scenario())
+
+
+def test_extensions_mode_second_commit_keeps_sample_timeline() -> None:
+    async def scenario() -> None:
+        connection = FakeConnection()
+        connection._messages = [
+            *_extensions_session_events(),
+            _extensions_completed(
+                "第一句说完了",
+                sequence=4,
+                item_id="item-1",
+                start_sample=48000,
+                end_sample=56000,
+                units=[
+                    _unit("s1", text_start=0, text_end=3, start_sample=48000, end_sample=52000),
+                    _unit("s2", text_start=3, text_end=6, start_sample=52000, end_sample=56000),
+                ],
+            ),
+            _extensions_completed(
+                "第二句",
+                sequence=6,
+                item_id="item-2",
+                start_sample=104000,
+                end_sample=120000,
+                units=[_unit("s3", text_start=0, text_end=3,
+                             start_sample=104000, end_sample=120000)],
+            ),
+        ]
+        adapter, _ = _extensions_adapter(connection, offset_ms=2_000)
+        await adapter.connect()
+        events = adapter.events()
+        await _drain_ready(events)
+        first = await anext(events)
+        second = await anext(events)
+
+        assert first.window is not None and second.window is not None
+        assert [s.end_ms for s in first.window.segments] == [
+            2_000 + 52_000 // 16,
+            2_000 + 56_000 // 16,
+        ]
+        # 第二个 commit 的时间不回零、不双加 offset。
+        assert second.window.segments[0].start_ms == 2_000 + 104_000 // 16
+        assert second.window.segments[0].start_ms > first.window.segments[-1].end_ms
+
+    asyncio.run(scenario())
+
+
+def test_extensions_mode_vad_long_silence_keeps_clock() -> None:
+    async def scenario() -> None:
+        connection = FakeConnection()
+        # 静音 16 分钟：第二 item 的样本区间整体后移，不压缩不重置。
+        silence_samples = 16 * 60 * 16_000
+        second_start = 56_000 + silence_samples
+        connection._messages = [
+            *_extensions_session_events(),
+            _extensions_completed(
+                "静音前",
+                sequence=4,
+                item_id="item-1",
+                start_sample=48000,
+                end_sample=56000,
+                units=[_unit("a", text_start=0, text_end=3,
+                             start_sample=48000, end_sample=56000)],
+            ),
+            _extensions_completed(
+                "静音后",
+                sequence=5,
+                item_id="item-2",
+                start_sample=second_start,
+                end_sample=second_start + 16_000,
+                units=[_unit("b", text_start=0, text_end=3,
+                             start_sample=second_start, end_sample=second_start + 16_000)],
+            ),
+        ]
+        adapter, _ = _extensions_adapter(connection)
+        await adapter.connect()
+        events = adapter.events()
+        await _drain_ready(events)
+        first = await anext(events)
+        second = await anext(events)
+
+        gap_ms = second.window.segments[0].start_ms - first.window.segments[0].end_ms
+        assert gap_ms >= 16 * 60 * 1000 - 1_000
+
+    asyncio.run(scenario())
+
+
+def test_extensions_mode_revision_continuity_and_conflict() -> None:
+    async def scenario() -> None:
+        connection = FakeConnection()
+        connection._messages = [
+            *_extensions_session_events(),
+            _extensions_completed(
+                "你好",
+                sequence=4,
+                item_id="item-1",
+                start_sample=0,
+                end_sample=32_000,
+                units=[_unit("u1", text_start=0, text_end=2,
+                             start_sample=1000, end_sample=30_000)],
+            ),
+            _diarization_update(sequence=5, stable_through=1000,
+                                updates=[_patch("u1", revision=1)]),
+            _diarization_update(sequence=6, stable_through=1000,
+                                updates=[_patch("u1", revision=2)]),
+            # 同 revision 同内容：幂等忽略。
+            _diarization_update(sequence=7, stable_through=1000,
+                                updates=[_patch("u1", revision=2)]),
+            _extensions_completed(
+                "继续",
+                sequence=8,
+                item_id="item-2",
+                start_sample=32_000,
+                end_sample=48_000,
+                units=[_unit("u2", text_start=0, text_end=2,
+                             start_sample=32_000, end_sample=48_000)],
+            ),
+            # 跳号：协议错误——停止分人，保留正文。
+            _diarization_update(sequence=9, stable_through=1000,
+                                updates=[_patch("u1", revision=4)]),
+            _extensions_completed(
+                "还在",
+                sequence=10,
+                item_id="item-3",
+                start_sample=48_000,
+                end_sample=64_000,
+                units=[_unit("u3", text_start=0, text_end=2,
+                             start_sample=48_000, end_sample=64_000)],
+            ),
+        ]
+        adapter, _ = _extensions_adapter(connection)
+        await adapter.connect()
+        events = adapter.events()
+        await _drain_ready(events)
+
+        final_1 = await anext(events)
+        assert final_1.kind == "final"
+        revision_1 = await anext(events)
+        assert revision_1.kind == "diarization"
+        revision_2 = await anext(events)
+        assert revision_2.kind == "diarization"
+        # 幂等重复不产生新事件，直接读到第二个 completed。
+        final_2 = await anext(events)
+        assert final_2.kind == "final"
+        # 跳号后分人停止：后续 completed 的 final 仍然交付。
+        final_3 = await anext(events)
+        assert final_3.kind == "final"
+        assert final_3.window.segments[0].text == "还在"
+        assert adapter.diarization_finalized is None
+
+    asyncio.run(scenario())
+
+
+def test_extensions_mode_stable_watermark_evicts_tracked_units() -> None:
+    async def scenario() -> None:
+        connection = FakeConnection()
+        connection._messages = [
+            *_extensions_session_events(),
+            _extensions_completed(
+                "早",
+                sequence=4,
+                item_id="item-1",
+                start_sample=0,
+                end_sample=16_000,
+                units=[_unit("old", text_start=0, text_end=1,
+                             start_sample=0, end_sample=16_000)],
+            ),
+            _extensions_completed(
+                "晚",
+                sequence=5,
+                item_id="item-2",
+                start_sample=32_000,
+                end_sample=48_000,
+                units=[_unit("new", text_start=0, text_end=1,
+                             start_sample=32_000, end_sample=48_000)],
+            ),
+            # 水位推进到 32000：旧单元（end 16000 < 32000）被冻结出缓存。
+            _diarization_update(sequence=6, stable_through=32_000,
+                                updates=[_patch("new", revision=1)]),
+        ]
+        adapter, _ = _extensions_adapter(connection)
+        await adapter.connect()
+        events = adapter.events()
+        await _drain_ready(events)
+        await anext(events)
+        await anext(events)
+        revision = await anext(events)
+        assert revision.kind == "diarization"
+        assert "old" not in adapter._unit_updates
+        assert "new" in adapter._unit_updates
+
+    asyncio.run(scenario())
+
+
+def test_extensions_mode_unknown_uid_update_stops_diarization_keeps_text() -> None:
+    async def scenario() -> None:
+        connection = FakeConnection()
+        connection._messages = [
+            *_extensions_session_events(),
+            _diarization_update(sequence=4, stable_through=0,
+                                updates=[_patch("ghost", revision=1)]),
+            _extensions_completed(
+                "正文仍在",
+                sequence=5,
+                item_id="item-1",
+                start_sample=0,
+                end_sample=16_000,
+                units=[_unit("u1", text_start=0, text_end=4,
+                             start_sample=0, end_sample=16_000)],
+            ),
+        ]
+        adapter, _ = _extensions_adapter(connection)
+        await adapter.connect()
+        events = adapter.events()
+        await _drain_ready(events)
+
+        final = await anext(events)
+        assert final.kind == "final"
+        assert final.window.segments[0].text == "正文仍在"
+
+    asyncio.run(scenario())
+
+
+def test_extensions_mode_ws_disconnect_terminates_events() -> None:
+    import websockets
+
+    async def scenario() -> None:
+        connection = FakeConnection()
+        adapter, _ = _extensions_adapter(connection)
+        await adapter.connect()
+        events = adapter.events()
+        await _drain_ready(events)
+
+        async def _explode() -> str:
+            raise websockets.ConnectionClosed(None, None)
+
+        connection.recv = _explode  # type: ignore[method-assign]
+        with pytest.raises(websockets.ConnectionClosed):
+            await anext(events)
+
+    asyncio.run(scenario())
