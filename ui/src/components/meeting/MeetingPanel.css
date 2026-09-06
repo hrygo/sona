@@ -2432,90 +2432,536 @@
   }
 }
 
-.modal-speaker-dialog {
-  max-width: 580px;
+/* ==========================================================================
+   Speaker Renaming Modal (SPK-E2E-1 Compliant High-Contrast Design)
+   ========================================================================== */
+
+.modal-speaker-backdrop {
+  z-index: 1200;
+  background:
+    radial-gradient(circle at 50% 32%, rgba(20, 184, 166, 0.12), transparent 48%),
+    rgba(5, 10, 18, 0.78);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
 }
 
-.speaker-presets-section {
+.modal-speaker-dialog {
+  max-width: 520px;
+  width: min(92vw, 520px);
+  padding: 0;
+  gap: 0;
+  overflow: hidden;
+  border-radius: var(--radius-lg);
+  border: 1px solid color-mix(in srgb, var(--mod-meeting-accent) 30%, var(--border-light));
+  background:
+    linear-gradient(
+      145deg,
+      color-mix(in srgb, var(--bg-card-solid) 92%, #fff 8%),
+      var(--bg-card-solid)
+    );
+  box-shadow:
+    0 24px 72px -8px rgba(0, 0, 0, 0.52),
+    0 0 0 1px color-mix(in srgb, var(--mod-meeting-accent) 12%, transparent);
+}
+
+.speaker-modal-header {
   display: flex;
   align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 22px 24px 18px;
+  border-bottom: 1px solid color-mix(in srgb, var(--mod-meeting-accent) 18%, var(--border));
+  background: color-mix(in srgb, var(--mod-meeting-accent) 5%, transparent);
+}
+
+.speaker-modal-header-lead {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+}
+
+.speaker-modal-avatar-preview {
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  border: 2px solid var(--mod-meeting-accent);
+  box-shadow: 0 0 16px color-mix(in srgb, var(--mod-meeting-accent) 24%, transparent);
+  transition: transform 0.2s ease;
+}
+
+.speaker-modal-avatar-preview:hover {
+  transform: scale(1.05);
+}
+
+.speaker-modal-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.speaker-modal-eyebrow {
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--mod-meeting-accent-light);
+}
+
+.speaker-modal-title {
+  margin: 0;
+  font-size: 1.1rem;
+  font-weight: 750;
+  letter-spacing: -0.01em;
+  color: var(--text-primary);
+  line-height: 1.3;
+}
+
+.speaker-modal-close-btn {
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: all 0.16s ease;
+}
+
+.speaker-modal-close-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  border-color: var(--border);
+  color: var(--text-primary);
+}
+
+.speaker-modal-close-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* 身份摘要卡片 */
+.speaker-modal-context-card {
+  margin: 18px 24px 0;
+  padding: 12px 16px;
+  border-radius: var(--radius-md);
+  border: 1px solid color-mix(in srgb, var(--mod-meeting-accent) 20%, var(--border));
+  background: color-mix(in srgb, var(--mod-meeting-accent) 8%, var(--bg-secondary));
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.speaker-modal-context-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.speaker-modal-context-label {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  letter-spacing: 0.02em;
+}
+
+.speaker-modal-context-val {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.86rem;
+  min-width: 0;
+}
+
+.speaker-modal-swatch-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  box-shadow: 0 0 6px currentColor;
+}
+
+.speaker-modal-current-name {
+  color: var(--text-primary);
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.speaker-modal-origin-hint {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.speaker-modal-context-note {
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  line-height: 1.45;
+}
+
+/* 表单输入部分 */
+.speaker-modal-form-group {
+  padding: 16px 24px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.speaker-modal-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.speaker-modal-char-count {
+  font-size: 0.68rem;
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+}
+
+.speaker-modal-input-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  width: 100%;
+}
+
+.speaker-modal-input {
+  width: 100%;
+  height: 42px;
+  padding: 0 36px 0 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-light);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font-size: 0.92rem;
+  font-weight: 500;
+  transition: all 0.18s ease;
+  outline: none;
+}
+
+.speaker-modal-input:focus {
+  border-color: var(--mod-meeting-accent);
+  background: var(--bg-card-solid);
+  box-shadow: 0 0 0 3px var(--mod-meeting-glow);
+}
+
+.speaker-modal-input-clear {
+  position: absolute;
+  right: 8px;
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  border: none;
+  background: var(--bg-hover);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.speaker-modal-input-clear:hover {
+  background: var(--bg-active);
+  color: var(--text-primary);
+}
+
+/* 快捷预设区 */
+.speaker-presets-section {
+  display: flex;
+  flex-direction: column;
   gap: 8px;
   margin-top: 10px;
   width: 100%;
 }
 
 .speaker-preset-label {
-  font-size: 0.78rem;
-  font-weight: 500;
+  font-size: 0.72rem;
+  font-weight: 600;
   color: var(--text-muted);
-  white-space: nowrap;
-  flex-shrink: 0;
+  letter-spacing: 0.02em;
 }
 
 .speaker-presets-list {
   display: flex;
   align-items: center;
   gap: 8px;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
 }
 
 .speaker-preset-btn {
-  font-size: 0.78rem;
-  padding: 4px 9px;
-  border-radius: var(--radius-sm);
+  font-size: 0.76rem;
+  font-weight: 500;
+  padding: 5px 11px;
+  border-radius: var(--radius-pill);
   white-space: nowrap;
   cursor: pointer;
-  background: var(--bg-hover);
+  background: color-mix(in srgb, var(--bg-secondary) 85%, transparent);
   border: 1px solid var(--border-light);
   color: var(--text-secondary);
   display: inline-flex;
   align-items: center;
-  justify-content: center;
+  gap: 5px;
   transition: all 0.18s cubic-bezier(0.4, 0, 0.2, 1);
   user-select: none;
 }
 
-.speaker-preset-btn:hover {
-  background: var(--bg-active);
-  border-color: var(--mod-meeting-accent);
-  color: var(--text-primary);
-  box-shadow: 0 2px 6px -1px rgba(0, 0, 0, 0.12);
+.speaker-preset-icon {
+  font-size: 0.82rem;
+  line-height: 1;
 }
 
-.speaker-preset-btn:active {
-  transform: scale(0.96);
+.speaker-preset-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  border-color: var(--mod-meeting-accent);
+  color: var(--text-primary);
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+}
+
+.speaker-preset-btn:active:not(:disabled) {
+  transform: translateY(0);
 }
 
 .speaker-preset-btn.active {
-  background: var(--mod-meeting-accent-subtle);
+  background: color-mix(in srgb, var(--mod-meeting-accent) 18%, transparent);
   border-color: var(--mod-meeting-accent);
   color: var(--mod-meeting-accent-light);
+  font-weight: 650;
+  box-shadow: 0 0 0 1px var(--mod-meeting-accent), 0 2px 10px var(--mod-meeting-glow);
+}
+
+.speaker-preset-check {
+  color: var(--mod-meeting-accent);
+  animation: modal-enter 0.15s ease-out;
+}
+
+.speaker-preset-reset-btn {
+  border-style: dashed;
+  border-color: var(--border-light);
+  color: var(--text-muted);
+}
+
+.speaker-preset-reset-btn:hover:not(:disabled) {
+  color: var(--text-primary);
+  border-color: var(--text-muted);
+}
+
+/* 技术通道 ID 折叠 */
+.speaker-modal-tech-id-wrapper {
+  padding: 14px 24px 0;
+}
+
+.speaker-modal-tech-id-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 0.68rem;
+  font-weight: 550;
+  cursor: pointer;
+  transition: color 0.15s ease;
+}
+
+.speaker-modal-tech-id-toggle:hover {
+  color: var(--text-secondary);
+}
+
+.speaker-modal-tech-arrow {
+  font-size: 0.55rem;
+  opacity: 0.7;
+}
+
+.speaker-modal-tech-id-box {
+  margin-top: 6px;
+  padding: 6px 10px;
+  border-radius: var(--radius-xs);
+  border: 1px solid var(--border);
+  background: var(--bg-base);
+  word-break: break-all;
+  animation: modal-enter 0.16s ease-out;
+}
+
+.speaker-modal-tech-code {
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  color: var(--text-muted);
+  line-height: 1.35;
+}
+
+/* 底部操作栏 */
+.speaker-modal-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  padding: 16px 24px 20px;
+  margin-top: 18px;
+  border-top: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg-secondary) 50%, transparent);
+}
+
+.speaker-modal-btn-cancel {
+  min-height: 38px;
+  padding: 0 14px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.78rem;
   font-weight: 600;
-  box-shadow: 0 0 0 1px var(--mod-meeting-accent-subtle), 0 2px 8px var(--mod-meeting-glow);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-light);
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.speaker-modal-btn-cancel:hover:not(:disabled) {
+  background: var(--bg-hover);
+  border-color: var(--text-secondary);
+}
+
+.speaker-modal-kbd {
+  padding: 2px 5px;
+  border: 1px solid var(--border-light);
+  border-radius: 4px;
+  background: var(--bg-secondary);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  font-weight: 600;
+}
+
+.speaker-modal-btn-save {
+  min-height: 38px;
+  padding: 0 18px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 0.8rem;
+  font-weight: 700;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--mod-meeting-accent);
+  background: var(--mod-meeting-accent);
+  color: #ffffff;
+  cursor: pointer;
+  box-shadow: 0 2px 10px var(--mod-meeting-glow);
+  transition: all 0.16s ease;
+}
+
+.speaker-modal-btn-save:hover:not(:disabled) {
+  background: var(--mod-meeting-accent-hover);
+  border-color: var(--mod-meeting-accent-hover);
+  box-shadow: 0 4px 16px var(--mod-meeting-glow);
+  transform: translateY(-1px);
+}
+
+.speaker-modal-btn-save:disabled,
+.speaker-modal-btn-cancel:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.speaker-modal-spinner {
+  width: 13px;
+  height: 13px;
+  border: 2px solid rgba(255, 255, 255, 0.35);
+  border-top-color: #ffffff;
+  border-radius: 50%;
+  animation: spin 0.75s linear infinite;
+}
+
+/* Light Theme 优化 (保证高对比度 WCAG 2.1 AA/AAA 规范) */
+[data-theme="light"] .modal-speaker-backdrop {
+  background:
+    radial-gradient(circle at 50% 32%, rgba(15, 118, 110, 0.08), transparent 48%),
+    rgba(15, 23, 42, 0.4);
+}
+
+[data-theme="light"] .modal-speaker-dialog {
+  background: linear-gradient(145deg, #ffffff, #f7fafb);
+  border-color: rgba(15, 118, 110, 0.22);
+  box-shadow: 0 24px 72px -8px rgba(15, 23, 42, 0.2), 0 0 0 1px rgba(15, 118, 110, 0.08);
+}
+
+[data-theme="light"] .speaker-modal-eyebrow {
+  color: var(--mod-meeting-accent);
+}
+
+[data-theme="light"] .speaker-modal-context-card {
+  background: rgba(15, 118, 110, 0.06);
+  border-color: rgba(15, 118, 110, 0.16);
+}
+
+[data-theme="light"] .speaker-preset-btn {
+  background: #ffffff;
+  border-color: var(--border-light);
+  color: var(--text-secondary);
 }
 
 [data-theme="light"] .speaker-preset-btn.active {
   color: var(--mod-meeting-accent);
   background: rgba(15, 118, 110, 0.12);
+  border-color: var(--mod-meeting-accent);
 }
 
-.modal-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
+[data-theme="light"] .speaker-modal-input {
+  background: #ffffff;
+  border-color: var(--border-light);
 }
 
-.modal-title {
-  font-size: 1rem;
-  font-weight: 700;
-  color: var(--text-primary);
+[data-theme="light"] .speaker-modal-tech-id-box {
+  background: var(--bg-tertiary);
 }
 
-.modal-actions {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 10px;
+@media (max-width: 560px) {
+  .modal-speaker-backdrop {
+    align-items: flex-end;
+    padding: 12px;
+  }
+
+  .modal-speaker-dialog {
+    max-width: none;
+    border-radius: 20px;
+  }
+
+  .speaker-modal-header {
+    padding: 18px 18px 14px;
+  }
+
+  .speaker-modal-context-card {
+    margin: 14px 18px 0;
+  }
+
+  .speaker-modal-form-group {
+    padding: 14px 18px 0;
+  }
+
+  .speaker-modal-tech-id-wrapper {
+    padding: 12px 18px 0;
+  }
+
+  .speaker-modal-actions {
+    padding: 14px 18px 16px;
+  }
 }
 
 /* ==========================================================================

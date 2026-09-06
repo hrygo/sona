@@ -5,7 +5,7 @@ import { useInnerOSStore, InnerOSUnsavedTray } from "../../features/innerOS";
 import type { CommandSocketApi } from "../../hooks/useCommandSocket";
 import { MeetingHistorySidebar } from "./MeetingHistorySidebar";
 import { MeetingIdleView } from "./MeetingIdleView";
-import { formatElapsed, MeetingRecordingView } from "./MeetingRecordingView";
+import { formatElapsed, MeetingRecordingView, SPEAKER_COLORS } from "./MeetingRecordingView";
 import { MeetingFinalizingView } from "./MeetingFinalizingView";
 import { MeetingDetailView } from "./MeetingDetailView";
 import { MeetingSpeakerModal } from "./MeetingSpeakerModal";
@@ -523,6 +523,14 @@ export default function MeetingPanel({ commandSocket }: MeetingPanelProps) {
           isOpen={speakerModalOpen}
           speakerKey={speakerModalTarget.key}
           currentDisplayName={speakerModalTarget.currentName}
+          speakerColor={(() => {
+            const list = store.selectedMeetingId ? store.selectedSegments : store.segments;
+            const uniqueKeys = Array.from(new Set(list.map((s: { speaker_key: string }) => s.speaker_key)));
+            const idx = uniqueKeys.indexOf(speakerModalTarget.key);
+            return idx >= 0
+              ? SPEAKER_COLORS[idx % SPEAKER_COLORS.length]
+              : "var(--mod-meeting-accent)";
+          })()}
           onClose={() => {
             setSpeakerModalOpen(false);
             setSpeakerModalTarget(null);
