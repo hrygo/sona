@@ -768,6 +768,23 @@ async def test_partial_only_does_not_write_srt(tmp_path: Path) -> None:
     await proxy.stop()
 
 
+async def test_empty_final_does_not_add_subtitle_line_or_srt(
+    tmp_path: Path,
+) -> None:
+    proxy = _proxy(tmp_path)
+    await proxy.start()
+    await proxy._subtitle_session._open_epoch()
+
+    await proxy._subtitle_session._handle_stream_event(
+        ASREvent(kind="final", window=ASRWindow(source_epoch=1))
+    )
+
+    assert proxy._last_payload is not None
+    assert proxy._last_payload["lines"] == []
+    assert not (tmp_path / "subtitles" / "current.srt").exists()
+    await proxy.stop()
+
+
 async def test_duplicate_confirmed_snapshot_does_not_rewrite_srt(
     tmp_path: Path,
 ) -> None:

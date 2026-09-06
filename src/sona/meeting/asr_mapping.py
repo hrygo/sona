@@ -46,7 +46,11 @@ def to_transcript_window(window: ASRWindow) -> TranscriptWindow:
         partial_speaker_key=window.partial_speaker_key,
         segments=tuple(_to_normalized_segment(window, segment) for segment in window.segments),
         speaker_remap=window.speaker_remap,
-        completed=tuple(_to_completed_item(item, window) for item in window.completed_items),
+        completed=tuple(
+            _to_completed_item(item, window)
+            for item in window.completed_items
+            if item.canonical_text.strip()
+        ),
     )
 
 

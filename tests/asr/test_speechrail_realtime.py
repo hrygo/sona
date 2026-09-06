@@ -854,10 +854,48 @@ def test_streaming_adapter_accepts_empty_completed_transcript_as_no_new_text() -
     assert events[-1].window.segments == ()
 
 
-def test_streaming_adapter_falls_back_for_diarized_completed_without_segments() -> None:
+def test_streaming_adapter_records_empty_completion_without_storing_text() -> None:
+    async def scenario() -> None:
+        connection = FakeConnection()
+        connection._messages = [
+            *_session_events(),
+            _envelope("input_audio_buffer.committed", 4),
+            _transcription_completed("", sequence=5),
+        ]
+        adapter = SpeechRailStreamingTranscriber(
+            client=SpeechRailRealtimeClient(
+                url=connection.uri,
+                connection_factory=lambda _: _immediate(connection),
+            ),
+            context=ASRSessionContext(source_epoch=2, offset_ms=0, purpose="meeting"),
+            language="Chinese",
+        )
+        await adapter.connect()
+        await adapter.send_audio(b"\x00\x00" * 160)
+        events = adapter.events()
+
+        assert (await anext(events)).kind == "ready"
+        assert (await anext(events)).kind == "final"
+        await events.aclose()
+
+        assert adapter.diagnostics.snapshot() == {
+            "sent_samples": 160,
+            "partial_events": 0,
+            "empty_completed": 1,
+            "nonempty_completed": 0,
+            "committed_events": 1,
+            "reconnects": 0,
+            "protocol_errors": 0,
+        }
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("text", ["嗯", "对", "好", "嗯，我同意"])
+def test_streaming_adapter_preserves_real_short_answers(text: str) -> None:
     connection = FakeConnection()
     connection._messages = [*_session_events(),
-        _transcription_completed("嗯。", sequence=4),
+        _transcription_completed(text, sequence=4),
     ]
     events = _collect_stream_events(
         connection,
@@ -866,7 +904,7 @@ def test_streaming_adapter_falls_back_for_diarized_completed_without_segments() 
 
     assert [event.kind for event in events] == ["ready", "final"]
     assert events[-1].window is not None
-    assert events[-1].window.segments[0].text == "嗯。"
+    assert events[-1].window.segments[0].text == text
     assert events[-1].window.segments[0].speaker_key == "epoch:2:speaker:0"
 
 

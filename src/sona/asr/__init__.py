@@ -8,9 +8,11 @@ from sona.asr.contracts import (
     ConversationSTTFactory,
     StreamingTranscriber,
 )
+from sona.asr.diagnostics import ASRDiagnostics
 
 __all__ = [
     "ASRCapabilities",
+    "ASRDiagnostics",
     "ASREvent",
     "ASREventKind",
     "ASRSessionContext",

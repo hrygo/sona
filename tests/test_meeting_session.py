@@ -24,7 +24,7 @@ from sona.meeting.session import (
     MeetingSession,
     MeetingStorageUnavailableError,
 )
-from sona.meeting.speaker_attribution import SpeakerPatchResult
+from sona.meeting.speaker_attribution import CompletedItem, SpeakerPatchResult
 from sona.speechrail.transcription_events import (
     DiarizationCandidate,
     DiarizationUpdate,
@@ -81,6 +81,16 @@ class FakeRepository:
             content_revision=1,
             replace_from_ms=min((item.start_ms for item in window.segments), default=0),
             segments=window.segments,
+        )
+
+    async def append_completed_item(self, meeting_id: UUID, item: CompletedItem):
+        self.calls.append("append_completed_item")
+        return TranscriptReconcileResult(
+            meeting_id=meeting_id,
+            transcript_revision=1,
+            content_revision=1,
+            replace_from_ms=0,
+            segments=(),
         )
 
     async def finalize_transcript(
@@ -1124,6 +1134,66 @@ async def test_window_without_segments_only_emits_partial(
 
     assert [event[0] for event in events].count("transcript_partial") == 1
     assert "reconcile" not in repository.calls
+
+
+async def test_empty_completed_item_does_not_persist_a_meeting_body(
+    repository: FakeRepository, gateway: FakeGateway
+) -> None:
+    session = MeetingSession(repository, gateway)
+    await _start_session(session)
+    empty_item = CompletedItem(
+        source_session_id="sess-empty",
+        source_epoch=1,
+        meeting_start_sample=0,
+        item_id="item-empty",
+        event_id="evt-empty",
+        sequence=1,
+        audio_start_sample=0,
+        audio_end_sample=0,
+        canonical_text="",
+        units=(),
+    )
+
+    await session._on_window(
+        TranscriptWindow(source_epoch=1, completed=(empty_item,))
+    )
+
+    assert "append_completed_item" not in repository.calls
+    gateway.abort_capture.assert_not_awaited()
+
+
+async def test_empty_completed_item_does_not_hide_valid_segments(
+    repository: FakeRepository, gateway: FakeGateway
+) -> None:
+    session = MeetingSession(repository, gateway)
+    await _start_session(session)
+    empty_item = CompletedItem(
+        source_session_id="sess-empty",
+        source_epoch=1,
+        meeting_start_sample=0,
+        item_id="item-empty",
+        event_id="evt-empty",
+        sequence=1,
+        audio_start_sample=0,
+        audio_end_sample=0,
+        canonical_text="",
+        units=(),
+    )
+    segment = NormalizedSegment(
+        order=0,
+        source_epoch=1,
+        speaker_key="epoch:1:speaker:0",
+        start_ms=0,
+        end_ms=100,
+        text="真实正文",
+    )
+
+    await session._on_window(
+        TranscriptWindow(source_epoch=1, completed=(empty_item,), segments=(segment,))
+    )
+
+    assert "append_completed_item" not in repository.calls
+    assert repository.calls.count("reconcile") == 1
 
 
 async def test_window_without_partial_still_reconciles_and_inactive_window_is_ignored(

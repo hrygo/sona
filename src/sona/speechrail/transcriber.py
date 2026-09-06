@@ -15,6 +15,7 @@ from collections.abc import AsyncIterator
 from dataclasses import replace
 
 from sona.asr.contracts import ASRCapabilities, ASREvent, ASRSessionContext
+from sona.asr.diagnostics import ASRDiagnostics
 from sona.asr.models import (
     ASRAttributionUnitSpan,
     ASRCompletedItem,
@@ -112,10 +113,16 @@ class SpeechRailStreamingTranscriber:
         self._diarization_finalized: DiarizationFinalizedEvent | None = None
         self._finalize_sent = False
         self._finalized_ready = asyncio.Event()
+        self._diagnostics = ASRDiagnostics()
 
     @property
     def uri(self) -> str:
         return self._client.uri
+
+    @property
+    def diagnostics(self) -> ASRDiagnostics:
+        """返回当前连接的有限计数诊断，不包含音频或转录内容。"""
+        return self._diagnostics
 
     async def connect(self) -> None:
         await self._client.connect(
@@ -162,6 +169,7 @@ class SpeechRailStreamingTranscriber:
     async def send_audio(self, chunk: bytes) -> None:
         await self._client.append_pcm(chunk)
         self._audio_ms += int(len(chunk) / _BYTES_PER_MS)
+        self._diagnostics.record_audio_samples(len(chunk) // 2)
 
     async def events(self) -> AsyncIterator[ASREvent]:
         if self._events_active:
@@ -178,6 +186,7 @@ class SpeechRailStreamingTranscriber:
                         event, diarization_extensions=self._extensions_negotiated
                     )
                 except SpeechRailProtocolError:
+                    self._diagnostics.record_protocol_error()
                     yield self._set_terminal_error(*_terminal_error_for(event))
                     return
                 if isinstance(decoded, Noop):
@@ -189,6 +198,9 @@ class SpeechRailStreamingTranscriber:
                             # EOF barrier; no session.completed event exists.
                             self._final_ready.set()
                             return
+                        continue
+                    if decoded.reason == "input_audio_buffer.committed":
+                        self._diagnostics.record_committed()
                         continue
                     if decoded.reason == "input_audio_buffer.speech_started":
                         self._active_item_id = decoded.item_id
@@ -209,6 +221,7 @@ class SpeechRailStreamingTranscriber:
                             self._last_audio_boundary_ms = decoded.audio_end_ms
                     continue
                 if isinstance(decoded, TranscriptionDelta):
+                    self._diagnostics.record_partial()
                     if (
                         decoded.item_id is not None
                         and self._partial_item_id is not None
@@ -239,6 +252,10 @@ class SpeechRailStreamingTranscriber:
                         )
                         return
                 elif isinstance(decoded, TranscriptionCompleted):
+                    if decoded.transcript.strip():
+                        self._diagnostics.record_nonempty_completed()
+                    else:
+                        self._diagnostics.record_empty_completed()
                     if self._extensions_negotiated:
                         # 扩展模式：completed 携带 attribution_units，一个单元一个
                         # 不可变正文段；样本区间换算会议时间，不再叠加 VAD onset/

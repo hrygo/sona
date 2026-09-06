@@ -606,9 +606,12 @@ class MeetingSession:
             return
         if self.diarization_smoother is not None:
             window = self.diarization_smoother.smooth_window(window)
-        if window.completed:
+        completed_items = tuple(
+            item for item in window.completed if item.canonical_text.strip()
+        )
+        if completed_items:
             # 扩展模式：固定正文走 append_completed_item；禁止 reconcile 后缀替换双写。
-            for item in window.completed:
+            for item in completed_items:
                 try:
                     result = await self._persistence.append_item(meeting_id, item)
                 except Exception:

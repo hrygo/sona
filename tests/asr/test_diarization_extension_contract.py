@@ -12,7 +12,7 @@ import pathlib
 
 import pytest
 
-from sona.asr.models import ASRWindow
+from sona.asr.models import ASRCompletedItem, ASRWindow
 from sona.meeting.asr_mapping import meeting_sample, to_transcript_window
 from sona.speechrail.transcription_events import (
     DiarizationFinalizedEvent,
@@ -116,6 +116,29 @@ def test_completed_without_samples_is_protocol_error_in_extensions_mode() -> Non
     decoded = decode_transcription_event(legacy_shape, diarization_extensions=False)
     assert isinstance(decoded, TranscriptionCompleted)
     assert decoded.attribution_units == ()
+
+
+def test_empty_extension_completed_is_not_mapped_to_persisted_body() -> None:
+    window = ASRWindow(
+        source_epoch=1,
+        source_session_id="sess-empty",
+        completed_items=(
+            ASRCompletedItem(
+                item_id="item-empty",
+                event_id="evt-empty",
+                sequence=4,
+                audio_start_sample=0,
+                audio_end_sample=0,
+                canonical_text="",
+                units=(),
+            ),
+        ),
+    )
+
+    mapped = to_transcript_window(window)
+
+    assert mapped.segments == ()
+    assert mapped.completed == ()
 
 
 # ---------------------------------------------------------------------------
