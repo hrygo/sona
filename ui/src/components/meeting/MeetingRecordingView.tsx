@@ -84,7 +84,7 @@ export function MeetingRecordingView({
   const starredIds = propStarredIds ?? localStarredIds;
   const [selectedSegmentId, setSelectedSegmentId] = useState<string | null>(null);
   const [filterStarredOnly, setFilterStarredOnly] = useState(false);
-  const [viewMode, setViewMode] = useState<"timeline" | "reading">("timeline");
+  const [viewMode, setViewMode] = useState<"timeline" | "reading">("reading");
   const [expandedBlockIds, setExpandedBlockIds] = useState<Set<string>>(() => new Set());
   const scrollRef = useRef<HTMLDivElement>(null);
   const [autoScroll, setAutoScroll] = useState(true);

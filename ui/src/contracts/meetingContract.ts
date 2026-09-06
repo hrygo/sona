@@ -55,6 +55,8 @@ export interface TranscriptViewBlock {
 }
 
 export interface ReadingBlockOptions {
+  readonly maxFillerGapMs?: number; // default 5000ms
+  readonly maxFillerDurationMs?: number; // default 30000ms
   readonly maxGapMs?: number;       // default 1200ms
   readonly maxDurationMs?: number;  // default 15000ms (15s)
   readonly maxLength?: number;       // default 180 chars

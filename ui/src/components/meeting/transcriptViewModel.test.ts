@@ -42,6 +42,118 @@ describe("transcriptViewModel (阅读视图派生模型 §5.1, §6.2)", () => {
     expect(blocks[0]?.text).toBe("各位同事好，今天讨论技术架构方案。");
   });
 
+  it("collapses repeated standalone filler segments while retaining raw segment ids", () => {
+    const segments: TranscriptSegment[] = [
+      {
+        id: "filler-1",
+        order: 1,
+        speaker_key: "spk_0",
+        speaker_name: "说话人 1",
+        start_ms: 0,
+        end_ms: 300,
+        text: "嗯",
+        source_epoch: 1,
+      },
+      {
+        id: "filler-2",
+        order: 2,
+        speaker_key: "spk_0",
+        speaker_name: "说话人 1",
+        start_ms: 2000,
+        end_ms: 2300,
+        text: "嗯。",
+        source_epoch: 1,
+      },
+      {
+        id: "filler-3",
+        order: 3,
+        speaker_key: "spk_0",
+        speaker_name: "说话人 1",
+        start_ms: 7000,
+        end_ms: 7300,
+        text: "嗯",
+        source_epoch: 1,
+      },
+    ];
+
+    const blocks = deriveReadingBlocks(segments, new Set(["filler-2"]));
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]?.text).toBe("嗯 × 3");
+    expect(blocks[0]?.segment_ids).toEqual(["filler-1", "filler-2", "filler-3"]);
+    expect(blocks[0]?.isStarred).toBe(true);
+    expect(getSegmentsForBlock(blocks[0]!, segments)).toHaveLength(3);
+  });
+
+  it("does not collapse fillers across speaker, epoch, token, or substantive-text boundaries", () => {
+    const first: TranscriptSegment = {
+      id: "filler-first",
+      order: 1,
+      speaker_key: "spk_0",
+      speaker_name: "说话人 1",
+      start_ms: 0,
+      end_ms: 300,
+      text: "嗯",
+      source_epoch: 1,
+    };
+    const cases: Array<[string, TranscriptSegment]> = [
+      [
+        "different speaker",
+        { ...first, id: "filler-speaker", speaker_key: "spk_1", speaker_name: "说话人 2", start_ms: 1000, end_ms: 1300 },
+      ],
+      [
+        "different source epoch",
+        { ...first, id: "filler-epoch", source_epoch: 2, start_ms: 1000, end_ms: 1300 },
+      ],
+      [
+        "different filler token",
+        { ...first, id: "filler-token", text: "呃", start_ms: 1000, end_ms: 1300 },
+      ],
+      [
+        "repeated characters are substantive text",
+        { ...first, id: "filler-repeated", text: "嗯嗯", start_ms: 1000, end_ms: 1300 },
+      ],
+      [
+        "filler followed by substantive text",
+        { ...first, id: "filler-substantive", text: "嗯我同意", start_ms: 1000, end_ms: 1300 },
+      ],
+    ];
+
+    for (const [label, second] of cases) {
+      expect(deriveReadingBlocks([first, second]), label).toHaveLength(2);
+    }
+  });
+
+  it("does not collapse fillers beyond the dedicated gap or duration limits", () => {
+    const makeFiller = (
+      id: string,
+      start_ms: number,
+      end_ms: number,
+    ): TranscriptSegment => ({
+      id,
+      order: start_ms + 1,
+      speaker_key: "spk_0",
+      speaker_name: "说话人 1",
+      start_ms,
+      end_ms,
+      text: "嗯",
+      source_epoch: 1,
+    });
+
+    expect(
+      deriveReadingBlocks([
+        makeFiller("gap-first", 0, 300),
+        makeFiller("gap-second", 5_601, 5_901),
+      ]),
+    ).toHaveLength(2);
+
+    expect(
+      deriveReadingBlocks([
+        makeFiller("duration-first", 0, 300),
+        makeFiller("duration-second", 2_500, 30_301),
+      ]),
+    ).toHaveLength(2);
+  });
+
   it("inserts space between ASCII/English words when merging", () => {
     const segments: TranscriptSegment[] = [
       {

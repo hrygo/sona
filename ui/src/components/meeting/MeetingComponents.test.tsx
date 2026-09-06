@@ -441,6 +441,8 @@ describe("Meeting React Components DOM Rendering", () => {
     expect(container.textContent).toContain("结束会议");
     expect(container.textContent).toContain("张三 (架构师)");
     expect(container.textContent).toContain("正在输入的临时转录片段...");
+    expect(container.querySelector(".reading-block-card")).not.toBeNull();
+    expect(container.querySelector("button[title*='阅读视图']")?.getAttribute("aria-pressed")).toBe("true");
 
     // Verify de-duplication: no redundant inline sidebar/mic toggle in recording toolbar
     expect(container.querySelector(".btn-sidebar-toggle-inline")).toBeNull();
@@ -451,7 +453,16 @@ describe("Meeting React Components DOM Rendering", () => {
     expect(container.querySelector(".btn-end-meeting")).not.toBeNull();
     expect(container.querySelector(".toolbar-kbd")).not.toBeNull();
 
-    // Switch to reading view
+    // Switch to the raw timeline view and verify the original segment remains inspectable.
+    const timelineBtn = container.querySelector("button[title*='时序视图']") as HTMLButtonElement;
+    expect(timelineBtn).not.toBeNull();
+    act(() => {
+      timelineBtn.click();
+    });
+    expect(container.querySelector("#segment-seg-001-uuid")).not.toBeNull();
+    expect(container.querySelector(".reading-block-card")).toBeNull();
+
+    // Switch back to reading view.
     const readingBtn = container.querySelector("button[title*='阅读视图']") as HTMLButtonElement;
     expect(readingBtn).not.toBeNull();
     act(() => {
