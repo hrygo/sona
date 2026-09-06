@@ -606,9 +606,12 @@ class MeetingSession:
             return
         if self.diarization_smoother is not None:
             window = self.diarization_smoother.smooth_window(window)
-        if window.completed:
+        completed_items = tuple(
+            item for item in window.completed if item.canonical_text.strip()
+        )
+        if completed_items:
             # 扩展模式：固定正文走 append_completed_item；禁止 reconcile 后缀替换双写。
-            for item in window.completed:
+            for item in completed_items:
                 try:
                     result = await self._persistence.append_item(meeting_id, item)
                 except Exception:
@@ -624,31 +627,13 @@ class MeetingSession:
                         segments=result.segments,
                     )
             if window.partial:
-                await self._emit(
-                    "transcript_partial",
-                    meeting_id,
-                    {
-                        "text": window.partial,
-                        "speaker_key": window.partial_speaker_key,
-                        "speaker_name": self._partial_speaker_name(
-                            window, self._speaker_names
-                        ),
-                    },
-                )
+                await self._emit_partial(meeting_id, window)
             return
         if window.partial:
-            await self._emit(
-                "transcript_partial",
-                meeting_id,
-                {
-                    "text": window.partial,
-                    "speaker_key": window.partial_speaker_key,
-                    "speaker_name": self._partial_speaker_name(
-                        window, self._speaker_names
-                    ),
-                },
-            )
+            await self._emit_partial(meeting_id, window)
         if not window.segments:
+            if not window.partial:
+                await self._emit_partial(meeting_id, window)
             return
         try:
             result = await self._persistence.reconcile(meeting_id, window)
@@ -670,6 +655,23 @@ class MeetingSession:
                     self._segment_payload(segment, speaker_names)
                     for segment in window.segments
                 ],
+            },
+        )
+
+    async def _emit_partial(self, meeting_id: UUID, window: TranscriptWindow) -> None:
+        """广播 partial；空窗口用空文本明确清除前端易失状态。"""
+        has_partial = bool(window.partial)
+        await self._emit(
+            "transcript_partial",
+            meeting_id,
+            {
+                "text": window.partial,
+                "speaker_key": window.partial_speaker_key if has_partial else None,
+                "speaker_name": (
+                    self._partial_speaker_name(window, self._speaker_names)
+                    if has_partial
+                    else None
+                ),
             },
         )
 

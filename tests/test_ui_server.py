@@ -437,6 +437,15 @@ class TestServices:
                 "last_event_age_ms": None,
                 "dropped_chunks": 0,
                 "gap_count": 0,
+                "asr": {
+                    "sent_samples": 0,
+                    "partial_events": 0,
+                    "empty_completed": 0,
+                    "nonempty_completed": 0,
+                    "committed_events": 0,
+                    "reconnects": 0,
+                    "protocol_errors": 0,
+                },
             },
             "tts": {
                 "source_chunk_gaps_over_200ms": 0,

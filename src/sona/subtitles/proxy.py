@@ -12,6 +12,7 @@ from enum import StrEnum
 from typing import Any
 
 from sona.asr.contracts import ASRSessionContext, StreamingTranscriber
+from sona.asr.diagnostics import ASRDiagnostics
 from sona.config import SubtitleSettings
 from sona.meeting.asr_mapping import to_transcript_window
 from sona.meeting.models import PCMOwner, TranscriptWindow
@@ -64,6 +65,7 @@ class SubtitleProxyDiagnostics:
     last_event_age_ms: int | None
     dropped_chunks: int
     gap_count: int
+    asr: dict[str, int] | None = None
 
 
 class SubtitleProxy:
@@ -92,6 +94,7 @@ class SubtitleProxy:
         self._settings = settings
         self._profile = settings.asr_profile
         self._diarization_extensions_enabled = diarization_extensions_enabled
+        self._asr_diagnostics = ASRDiagnostics()
         self._transcriber_factory = transcriber_factory or self._build_speechrail_transcriber(
             speechrail_connection_factory
         )
@@ -168,6 +171,7 @@ class SubtitleProxy:
                 context=context,
                 language=self._profile.language,
                 finish_timeout_secs=self._profile.final_timeout_secs,
+                diagnostics=self._asr_diagnostics,
                 # 分人扩展只在会议目的且显式开启时协商；普通字幕永远 legacy。
                 diarization_extensions=(
                     self._diarization_extensions_enabled and context.purpose == "meeting"
@@ -281,6 +285,7 @@ class SubtitleProxy:
 
     def _on_session_reconnect(self) -> None:
         self._reconnect_count += 1
+        self._asr_diagnostics.record_reconnect()
 
     def _on_session_last_event(self) -> None:
         self._last_event_at = self._clock()
@@ -339,6 +344,7 @@ class SubtitleProxy:
             last_event_age_ms=last_event_age_ms,
             dropped_chunks=self._dropped_chunks,
             gap_count=self._gap_count,
+            asr=self._asr_diagnostics.snapshot(),
         )
 
     def _diagnostic_ready(self, expected_owner: PCMOwner) -> bool:

@@ -16,6 +16,7 @@ from sona.asr.contracts import ASRCapabilities, ASREvent, ASRSessionContext
 from sona.asr.models import ASRSegment, ASRWindow
 from sona.asr.presenters import legacy_subtitle_payload
 from sona.config import SubtitleSettings
+from sona.meeting.models import PCMOwner
 from sona.subtitles import (
     FinalizationTimeoutError,
     SubtitleProxy,
@@ -134,6 +135,24 @@ def _proxy(tmp_path: Path) -> SubtitleProxy:
         _settings(tmp_path),
         transcriber_factory=lambda _ctx: FakeTranscriber(source_epoch=1),
     )
+
+
+def test_subtitle_proxy_diagnostics_exposes_asr_counters(tmp_path: Path) -> None:
+    proxy = _proxy(tmp_path)
+
+    proxy._on_session_reconnect()
+
+    diagnostics = proxy.diagnostics(PCMOwner.NONE)
+
+    assert diagnostics.asr == {
+        "sent_samples": 0,
+        "partial_events": 0,
+        "empty_completed": 0,
+        "nonempty_completed": 0,
+        "committed_events": 0,
+        "reconnects": 1,
+        "protocol_errors": 0,
+    }
 
 
 def _window(*, partial: str = "", with_segment: bool = False) -> ASRWindow:
@@ -764,6 +783,23 @@ async def test_partial_only_does_not_write_srt(tmp_path: Path) -> None:
         legacy_subtitle_payload(_window(partial="识别中")), persist=True
     )
 
+    assert not (tmp_path / "subtitles" / "current.srt").exists()
+    await proxy.stop()
+
+
+async def test_empty_final_does_not_add_subtitle_line_or_srt(
+    tmp_path: Path,
+) -> None:
+    proxy = _proxy(tmp_path)
+    await proxy.start()
+    await proxy._subtitle_session._open_epoch()
+
+    await proxy._subtitle_session._handle_stream_event(
+        ASREvent(kind="final", window=ASRWindow(source_epoch=1))
+    )
+
+    assert proxy._last_payload is not None
+    assert proxy._last_payload["lines"] == []
     assert not (tmp_path / "subtitles" / "current.srt").exists()
     await proxy.stop()
 
