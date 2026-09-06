@@ -60,7 +60,7 @@ export function MeetingDeleteModal({
           </button>
           <button
             type="button"
-            className="btn-end-meeting"
+            className="btn-danger"
             onClick={() => void handleDelete()}
             disabled={isDeleting}
           >

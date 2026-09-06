@@ -46,6 +46,7 @@ import {
 import { PersonaDialog } from "./PersonaDialog";
 import { VoiceDesignModal } from "./VoiceDesignModal";
 import { VoiceStudioModal } from "./VoiceStudioModal";
+import { VoiceDeleteModal } from "./VoiceDeleteModal";
 import { VoiceRecordingMicLease } from "./voiceRecordingMicLease";
 import { showToast } from "./Toast";
 import { SPEECHRAIL_TTS_MODEL, voiceService } from "../services/voiceService";
@@ -210,6 +211,7 @@ export default function AssistantPanel({
   const [isPreviewPlaying, setIsPreviewPlaying] = useState(false);
   const [showVoiceDesignModal, setShowVoiceDesignModal] = useState(false);
   const [showVoiceStudioModal, setShowVoiceStudioModal] = useState(false);
+  const [deleteConfirmTargetVoice, setDeleteConfirmTargetVoice] = useState<VoiceCatalogItem | null>(null);
   const voiceRecordingMicLeaseRef = useRef<VoiceRecordingMicLease | null>(null);
   if (voiceRecordingMicLeaseRef.current === null) {
     voiceRecordingMicLeaseRef.current = new VoiceRecordingMicLease();
@@ -424,12 +426,11 @@ export default function AssistantPanel({
     [isPreviewPlaying],
   );
 
-  /** 删除自定义音色 */
-  const handleDeleteVoice = useCallback(
+  /** 执行删除自定义音色真实操作 */
+  const executeDeleteVoice = useCallback(
     async (targetVoiceId: string) => {
       const targetVoice = availableVoices.find((v) => v.id === targetVoiceId);
       if (!targetVoice || targetVoice.is_system) return;
-      if (!window.confirm(`确定要删除自定义音色「${targetVoice.name}」吗？`)) return;
 
       try {
         await voiceService.delete(targetVoiceId);
@@ -443,6 +444,16 @@ export default function AssistantPanel({
       }
     },
     [availableVoices, voice, handleVoiceChange],
+  );
+
+  /** 打开删除自定义音色确认弹窗 */
+  const handleDeleteVoice = useCallback(
+    (targetVoiceId: string) => {
+      const targetVoice = availableVoices.find((v) => v.id === targetVoiceId);
+      if (!targetVoice || targetVoice.is_system) return;
+      setDeleteConfirmTargetVoice(targetVoice);
+    },
+    [availableVoices],
   );
 
   /** 自定义音色创建完成回调 */
@@ -1290,6 +1301,20 @@ export default function AssistantPanel({
           onClose={() => setShowVoiceStudioModal(false)}
           onStartRecordingVoice={handleVoiceRecordingStart}
           onStopRecordingVoice={handleVoiceRecordingStop}
+        />
+      )}
+
+      {/* 自定义音色快捷删除确认弹窗 */}
+      {deleteConfirmTargetVoice && (
+        <VoiceDeleteModal
+          isOpen={true}
+          voiceName={deleteConfirmTargetVoice.name}
+          isCurrentActive={deleteConfirmTargetVoice.id === voice}
+          onClose={() => setDeleteConfirmTargetVoice(null)}
+          onConfirm={async () => {
+            await executeDeleteVoice(deleteConfirmTargetVoice.id);
+            setDeleteConfirmTargetVoice(null);
+          }}
         />
       )}
     </div>

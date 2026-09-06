@@ -16,6 +16,7 @@ import {
   resolveVoiceMode,
   VOICE_MODE_META,
 } from "./assistantPresentation";
+import { VoiceDeleteModal } from "./VoiceDeleteModal";
 import "./VoiceStudioModal.css";
 
 export interface VoiceStudioModalProps {
@@ -130,9 +131,10 @@ export function VoiceStudioModal({
       ? "design"
       : "clone";
 
-  // 音色资产库模式过滤
+  // 音色资产库模式过滤与删除确认弹窗状态
   const [filterMode, setFilterMode] = useState<"all" | VoiceMode>("all");
   const [auditioningVoiceId, setAuditioningVoiceId] = useState<string | null>(null);
+  const [deleteTargetVoice, setDeleteTargetVoice] = useState<VoiceCatalogItem | null>(null);
 
   /* ====================== 1. 录音克隆 (Voice Clone) 状态 ====================== */
   const [prompts, setPrompts] = useState<readonly ClonePromptItem[]>(FALLBACK_PROMPTS);
@@ -686,9 +688,7 @@ export function VoiceStudioModal({
                           type="button"
                           className="btn-deck-delete"
                           onClick={() => {
-                            if (window.confirm(`确认删除音色「${item.name}」吗？`)) {
-                              onVoiceDeleted(item.id);
-                            }
+                            setDeleteTargetVoice(item);
                           }}
                           title="删除此音色资产"
                         >
@@ -700,6 +700,20 @@ export function VoiceStudioModal({
                 );
               })}
             </div>
+
+            {/* 自定义音色删除确认弹窗 */}
+            {deleteTargetVoice && (
+              <VoiceDeleteModal
+                isOpen={true}
+                voiceName={deleteTargetVoice.name}
+                isCurrentActive={deleteTargetVoice.id === currentVoiceId}
+                onClose={() => setDeleteTargetVoice(null)}
+                onConfirm={() => {
+                  onVoiceDeleted(deleteTargetVoice.id);
+                  setDeleteTargetVoice(null);
+                }}
+              />
+            )}
           </aside>
 
           {/* 右栏：声学创设舱 (Voice Forge) */}

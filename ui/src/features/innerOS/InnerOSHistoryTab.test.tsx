@@ -90,4 +90,36 @@ describe("InnerOSHistoryTab", () => {
     expect(container.textContent).toContain("证据变更");
     expect(container.textContent).not.toContain("原证据段已变更/修正");
   });
+
+  it("opens confirmation modal on delete and deletes on confirm", async () => {
+    const deleteActionMock = vi.fn().mockResolvedValue(undefined);
+    useInnerOSStore.setState({ deleteExchangeAction: deleteActionMock });
+
+    act(() => {
+      root.render(<InnerOSHistoryTab meetingId="meeting-1" />);
+    });
+
+    const deleteBtn = container.querySelector(".inner-os-history-del-btn") as HTMLButtonElement;
+    expect(deleteBtn).not.toBeNull();
+
+    act(() => {
+      deleteBtn.click();
+    });
+
+    expect(container.querySelector("#inneros-delete-title")?.textContent).toContain("删除内心 OS 记录");
+    expect(container.textContent).toContain("刚才确认了什么？");
+
+    const confirmBtn = Array.from(container.querySelectorAll<HTMLButtonElement>("button")).find(
+      (b) => b.textContent?.includes("确认删除"),
+    );
+    expect(confirmBtn).toBeDefined();
+
+    await act(async () => {
+      confirmBtn!.click();
+      await Promise.resolve();
+    });
+
+    expect(deleteActionMock).toHaveBeenCalledWith("meeting-1", "exchange-1");
+    expect(container.querySelector("#inneros-delete-title")).toBeNull();
+  });
 });

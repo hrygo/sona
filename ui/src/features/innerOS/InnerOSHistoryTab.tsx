@@ -9,7 +9,7 @@ import {
   MaskIcon,
   TrashIcon,
 } from "../../components/Icons";
-import type { InnerOSIntent } from "./contracts";
+import type { InnerOSExchange, InnerOSIntent } from "./contracts";
 
 interface Props {
   readonly meetingId: string;
@@ -34,6 +34,7 @@ export const InnerOSHistoryTab: React.FC<Props> = ({
   const exportNotesAsMarkdown = useInnerOSStore((s) => s.exportNotesAsMarkdown);
 
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [confirmDeleteExchange, setConfirmDeleteExchange] = useState<InnerOSExchange | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [copiedAll, setCopiedAll] = useState(false);
 
@@ -43,11 +44,11 @@ export const InnerOSHistoryTab: React.FC<Props> = ({
     }
   }, [meetingId, fetchHistory]);
 
-  const handleDelete = async (exchangeId: string) => {
-    if (!window.confirm("确定要从会议档案中删除该条内心 OS 记录吗？")) return;
+  const executeDelete = async (exchangeId: string) => {
     setDeletingId(exchangeId);
     try {
       await deleteExchangeAction(meetingId, exchangeId);
+      setConfirmDeleteExchange(null);
     } finally {
       setDeletingId(null);
     }
@@ -101,7 +102,6 @@ export const InnerOSHistoryTab: React.FC<Props> = ({
 
       <div className="inner-os-history-list">
         {historyList.map((exchange) => {
-          const isDeleting = deletingId === exchange.id;
           const isExpanded = expandedId === exchange.id;
           return (
             <div key={exchange.id} className="inner-os-history-item-wrap">
@@ -139,11 +139,11 @@ export const InnerOSHistoryTab: React.FC<Props> = ({
                 <button
                   type="button"
                   className="inner-os-history-del-btn"
-                  onClick={() => handleDelete(exchange.id)}
-                  disabled={isDeleting}
+                  onClick={() => setConfirmDeleteExchange(exchange)}
+                  disabled={deletingId === exchange.id}
                   title="从档案中删除"
                 >
-                  {isDeleting ? "删除中..." : <><TrashIcon size={13} /> 删除</>}
+                  {deletingId === exchange.id ? "删除中..." : <><TrashIcon size={13} /> 删除</>}
                 </button>
               </div>
 
@@ -185,6 +185,67 @@ export const InnerOSHistoryTab: React.FC<Props> = ({
           );
         })}
       </div>
+
+      {/* 内心 OS 记录删除确认弹窗 */}
+      {confirmDeleteExchange && (
+        <div
+          className="modal-backdrop"
+          onClick={() => {
+            if (!deletingId) setConfirmDeleteExchange(null);
+          }}
+        >
+          <div
+            className="modal-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="inneros-delete-title"
+            aria-describedby="inneros-delete-desc"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="modal-header">
+              <h3 id="inneros-delete-title" className="modal-title" style={{ color: "var(--color-red)" }}>
+                删除内心 OS 记录
+              </h3>
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => setConfirmDeleteExchange(null)}
+                disabled={Boolean(deletingId)}
+                style={{ padding: "2px 8px" }}
+                aria-label="关闭弹窗"
+              >
+                ✕
+              </button>
+            </div>
+
+            <p id="inneros-delete-desc" style={{ fontSize: "0.85rem", color: "var(--text-secondary)", lineHeight: 1.5, margin: "14px 0" }}>
+              确定要从会议档案中永久删除此条内心 OS 记录吗？
+              <strong style={{ display: "block", marginTop: "6px", color: "var(--text-primary)" }}>
+                “{confirmDeleteExchange.question}”
+              </strong>
+            </p>
+
+            <div className="modal-actions">
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => setConfirmDeleteExchange(null)}
+                disabled={Boolean(deletingId)}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                className="btn-danger"
+                onClick={() => void executeDelete(confirmDeleteExchange.id)}
+                disabled={Boolean(deletingId)}
+              >
+                {deletingId ? "删除中..." : "确认删除"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

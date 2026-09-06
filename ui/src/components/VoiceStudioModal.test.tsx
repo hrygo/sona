@@ -254,6 +254,49 @@ it("calls onClose when close button is clicked", () => {
   expect(onClose).toHaveBeenCalled();
 });
 
+it("opens VoiceDeleteModal when clicking delete on custom voice and confirms deletion", async () => {
+  renderStudio("default");
+  // 查找自定义音色的删除按钮（.btn-deck-delete）
+  const deleteButtons = Array.from(container.querySelectorAll<HTMLButtonElement>(".btn-deck-delete"));
+  expect(deleteButtons.length).toBeGreaterThan(0);
+
+  // 点击删除按钮，弹出确认弹窗
+  act(() => {
+    deleteButtons[0].click();
+  });
+
+  const deleteDialog = container.querySelector(".voice-delete-modal-dialog");
+  expect(deleteDialog).not.toBeNull();
+  expect(deleteDialog?.textContent).toContain("删除自定义音色");
+  expect(deleteDialog?.textContent).toContain("确定要永久删除音色资产");
+
+  // 点击取消按钮，弹窗关闭且不触发删除
+  const cancelBtn = Array.from(deleteDialog!.querySelectorAll<HTMLButtonElement>("button")).find(
+    (b) => b.textContent?.includes("取消"),
+  );
+  expect(cancelBtn).toBeDefined();
+  act(() => {
+    cancelBtn!.click();
+  });
+  expect(container.querySelector(".voice-delete-modal-dialog")).toBeNull();
+  expect(onVoiceDeleted).not.toHaveBeenCalled();
+
+  // 再次打开并点击确认删除
+  act(() => {
+    deleteButtons[0].click();
+  });
+  const confirmBtn = Array.from(container.querySelectorAll<HTMLButtonElement>("button")).find(
+    (b) => b.textContent?.includes("确认删除"),
+  );
+  expect(confirmBtn).toBeDefined();
+  await act(async () => {
+    confirmBtn!.click();
+  });
+
+  expect(onVoiceDeleted).toHaveBeenCalledWith("my_clone");
+  expect(container.querySelector(".voice-delete-modal-dialog")).toBeNull();
+});
+
 it("renders consistently under both light and dark themes", () => {
   document.documentElement.dataset.theme = "light";
   renderStudio();
