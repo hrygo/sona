@@ -20,6 +20,7 @@ from sona.speechrail import (
     ConnectionFactory,
     SpeechRailRealtimeClient,
     SpeechRailStreamingTranscriber,
+    build_server_vad_config,
 )
 from sona.subtitles.archive import SrtArchive
 from sona.subtitles.clients import ClientSender, SubtitleClientHub
@@ -161,6 +162,19 @@ class SubtitleProxy:
         self, connection_factory: ConnectionFactory | None
     ) -> TranscriberFactory:
         def create(context: ASRSessionContext) -> StreamingTranscriber:
+            extensions = (
+                self._diarization_extensions_enabled and context.purpose == "meeting"
+            )
+            silence_ms = (
+                (1_000 if extensions else 900)
+                if context.purpose == "meeting"
+                else (600 if extensions else 400)
+            )
+            turn_detection = build_server_vad_config(
+                threshold=self._settings.vad_threshold,
+                silence_duration_ms=silence_ms,
+                prefix_padding_ms=300,
+            )
             return SpeechRailStreamingTranscriber(
                 client=SpeechRailRealtimeClient(
                     url=self._profile.url,
@@ -173,9 +187,8 @@ class SubtitleProxy:
                 finish_timeout_secs=self._profile.final_timeout_secs,
                 diagnostics=self._asr_diagnostics,
                 # 分人扩展只在会议目的且显式开启时协商；普通字幕永远 legacy。
-                diarization_extensions=(
-                    self._diarization_extensions_enabled and context.purpose == "meeting"
-                ),
+                diarization_extensions=extensions,
+                turn_detection=turn_detection,
             )
 
         return create

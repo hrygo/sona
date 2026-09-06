@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import re
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
@@ -45,6 +46,21 @@ FinalizationTimeout = CaptureFinalizationTimeout
 STABLE_CONNECTION_RESET_AFTER_SECS = 30.0
 
 ReadinessProbe = Callable[[], Awaitable[bool]]
+
+STANDALONE_FILLER_CHARS: frozenset[str] = frozenset(
+    {"嗯", "呃", "啊", "唔", "额", "诶", "哦", "呀", "吧", "哩", "哈", "呵", "咳"}
+)
+
+
+def is_standalone_filler(text: str | None) -> bool:
+    """判断一段文本是否仅由停顿/语气单字及标点符号组成（典型的无声/环境底噪 ASR 幻觉）。"""
+    if not text:
+        return True
+    cleaned = re.sub(r"[\s\.,!?;:…~。！？，、；：—\-]+", "", text)
+    if not cleaned:
+        return True
+    return all(ch in STANDALONE_FILLER_CHARS for ch in cleaned)
+
 
 
 async def _wait_with_readiness(
@@ -519,8 +535,10 @@ class StandardSubtitleSession:
 
     def _record_confirmed_window(self, window: ASRWindow) -> None:
         """累计 confirmed 段并保留窗口最新 partial。"""
-        self._partial = window.partial
-        incoming = window.segments
+        self._partial = "" if is_standalone_filler(window.partial) else window.partial
+        incoming = tuple(
+            segment for segment in window.segments if not is_standalone_filler(segment.text)
+        )
         if not incoming:
             return
 
@@ -535,7 +553,7 @@ class StandardSubtitleSession:
                 ]
 
         matched_indices: set[int] = set()
-        for segment in window.segments:
+        for segment in incoming:
             index = self._find_segment_index(segment, excluded_indices=matched_indices)
             if index is None:
                 index = len(self._confirmed_segments)
@@ -1112,6 +1130,7 @@ class MeetingCaptureSession:
 
 __all__ = [
     "STABLE_CONNECTION_RESET_AFTER_SECS",
+    "STANDALONE_FILLER_CHARS",
     "CapturePayloadSink",
     "CapturePreparation",
     "FinalizationTimeout",
@@ -1123,4 +1142,5 @@ __all__ = [
     "SubtitleSessionState",
     "TranscriberFactory",
     "TranscriptionGap",
+    "is_standalone_filler",
 ]

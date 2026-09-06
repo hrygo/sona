@@ -1013,3 +1013,134 @@ async def test_capture_reconnect_waits_while_ready_probe_denies(
     assert len(created) >= 2
     await proxy.abort_capture()
     await proxy.stop()
+
+
+def test_is_standalone_filler_identifies_hallucinations_and_preserves_speech() -> None:
+    from sona.subtitles.sessions import is_standalone_filler
+
+    # 纯语气词/停顿/符号 -> 判定为孤立 filler
+    assert is_standalone_filler("") is True
+    assert is_standalone_filler("   ") is True
+    assert is_standalone_filler("。！？…") is True
+    assert is_standalone_filler("嗯") is True
+    assert is_standalone_filler("嗯。") is True
+    assert is_standalone_filler("啊！") is True
+    assert is_standalone_filler("呃……") is True
+    assert is_standalone_filler("嗯。哦。嗯。") is True
+    assert is_standalone_filler("唔……额……") is True
+
+    # 包含真实语义词汇 -> 判定为正常语音
+    assert is_standalone_filler("嗯，好的") is False
+    assert is_standalone_filler("嗯我知道了") is False
+    assert is_standalone_filler("啊对对对") is False
+    assert is_standalone_filler("hello") is False
+    assert is_standalone_filler("开会讨论") is False
+
+
+async def test_standard_subtitle_session_drops_standalone_filler_and_preserves_real_speech(
+    tmp_path: Path,
+) -> None:
+    from sona.subtitles.sessions import StandardSubtitleSession
+
+    transcriber = FakeTranscriber(source_epoch=1)
+    queue: asyncio.Queue[bytes] = asyncio.Queue()
+    stop_event = asyncio.Event()
+    payloads: list[dict[str, object]] = []
+
+    async def record_payload(p: dict[str, object]) -> None:
+        payloads.append(p)
+
+    async def noop_epoch_closed(_epoch: int) -> None:
+        pass
+
+    session = StandardSubtitleSession(
+        audio_queue=queue,
+        transcriber_factory=lambda _ctx: transcriber,
+        backoff_delays=(0.01,),
+        stop_event=stop_event,
+        running=lambda: True,
+        capture_active=lambda: False,
+        on_payload=record_payload,
+        on_state=lambda _s: None,
+        on_epoch_opened=lambda: None,
+        on_epoch_closed=noop_epoch_closed,
+        on_reconnect=lambda: None,
+        on_last_event=lambda: None,
+        on_last_error=lambda _e: None,
+        on_dropped_chunk=lambda: None,
+        on_gap=lambda: None,
+    )
+
+    preparation = await session.prepare(timeout_secs=1.0)
+    session.commit(preparation)
+
+    # 1. 模拟收到底噪语气词幻觉 "嗯。"
+    filler_window = ASRWindow(
+        source_epoch=1,
+        partial="嗯。",
+        segments=(
+            ASRSegment(
+                order=0,
+                source_epoch=1,
+                speaker_key="epoch:1:speaker:0",
+                start_ms=0,
+                end_ms=1000,
+                text="嗯。",
+            ),
+        ),
+    )
+    await session._handle_stream_event(ASREvent(kind="final", window=filler_window))
+
+    # 断言：纯孤立 filler 被丢弃，未录入 confirmed_segments，lines 为空，partial 为空
+    assert len(payloads) >= 1
+    last_payload = payloads[-1]
+    assert last_payload.get("type") == "full_update"
+    assert last_payload.get("lines") == []
+    assert last_payload.get("buffer_transcription") == ""
+
+    # 2. 模拟收到真实发言 "大家好，开会了"
+    real_window = ASRWindow(
+        source_epoch=1,
+        partial="",
+        segments=(
+            ASRSegment(
+                order=1,
+                source_epoch=1,
+                speaker_key="epoch:1:speaker:0",
+                start_ms=1500,
+                end_ms=3000,
+                text="大家好，开会了",
+            ),
+        ),
+    )
+    await session._handle_stream_event(ASREvent(kind="final", window=real_window))
+
+    # 断言：真实语音被正常记录并广播
+    last_payload = payloads[-1]
+    assert last_payload.get("type") == "full_update"
+    assert len(last_payload["lines"]) == 1  # type: ignore[arg-type]
+    assert last_payload["lines"][0]["text"] == "大家好，开会了"  # type: ignore[index]
+
+    await session.close_stream()
+
+
+def test_build_server_vad_config_defaults_to_calibrated_threshold() -> None:
+    from sona.speechrail.transport import (
+        DEFAULT_SERVER_VAD,
+        DEFAULT_SERVER_VAD_EXTENSIONS,
+        DEFAULT_SERVER_VAD_THRESHOLD,
+        MEETING_SERVER_VAD,
+        MEETING_SERVER_VAD_EXTENSIONS,
+        build_server_vad_config,
+    )
+
+    assert DEFAULT_SERVER_VAD_THRESHOLD == 0.65
+    assert DEFAULT_SERVER_VAD["threshold"] == 0.65
+    assert DEFAULT_SERVER_VAD_EXTENSIONS["threshold"] == 0.65
+    assert MEETING_SERVER_VAD["threshold"] == 0.65
+    assert MEETING_SERVER_VAD_EXTENSIONS["threshold"] == 0.65
+
+    custom = build_server_vad_config(threshold=0.75, silence_duration_ms=800)
+    assert custom["threshold"] == 0.75
+    assert custom["silence_duration_ms"] == 800
+    assert custom["prefix_padding_ms"] == 300

@@ -28,6 +28,12 @@ class SubtitleSettings(BaseSettings):
         default=None,
         description="SpeechRail 可选 API key；仅通过 WebSocket Authorization header 发送",
     )
+    vad_threshold: float = Field(
+        default=0.65,
+        ge=0.1,
+        le=0.99,
+        description="Realtime VAD 人声判定阈值（默认 0.65，有效滤除室内环境底噪误触发）",
+    )
 
     @field_validator("speechrail_url")
     @classmethod

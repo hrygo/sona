@@ -36,6 +36,12 @@ class MeetingSettings(BaseSettings):
     summary_model: str = Field(default=DEFAULT_LLM_MODEL, description="会后纪要模型 ID")
     summary_temperature: float = Field(default=0.2, ge=0.0, le=2.0)
     summary_reasoning: str = Field(default="off", description="纪要推理开关，首版固定 off")
+    vad_threshold: float = Field(
+        default=0.65,
+        ge=0.1,
+        le=0.99,
+        description="会议 Realtime VAD 人声判定阈值（默认 0.65）",
+    )
     inner_os_enabled: bool = Field(default=False, description="是否启用会议内心 OS")
     inner_os_analysis_enabled: bool = Field(
         default=False, description="是否启用 Inner OS analysis/mixed 意图"

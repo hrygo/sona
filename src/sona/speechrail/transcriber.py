@@ -11,7 +11,7 @@ rename semantics are preserved.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import replace
 
 from sona.asr.contracts import ASRCapabilities, ASREvent, ASRSessionContext
@@ -77,6 +77,7 @@ class SpeechRailStreamingTranscriber:
         finish_timeout_secs: float = 10.0,
         diarization_extensions: bool = False,
         diagnostics: ASRDiagnostics | None = None,
+        turn_detection: Mapping[str, object] | None = None,
     ) -> None:
         if finish_timeout_secs <= 0:
             raise ValueError("finish_timeout_secs must be positive")
@@ -85,6 +86,7 @@ class SpeechRailStreamingTranscriber:
         self._language = language
         self._finish_timeout_secs = finish_timeout_secs
         self._ready = False
+        self._turn_detection = dict(turn_detection) if turn_detection is not None else None
         self._last_window = ASRWindow(source_epoch=context.source_epoch)
         self._last_confirmed_window = self._last_window
         self._pending_segments: list[ASRSegment] = []
@@ -140,6 +142,8 @@ class SpeechRailStreamingTranscriber:
         self._ready = True
 
     def _turn_detection_config(self) -> dict[str, object]:
+        if self._turn_detection is not None:
+            return dict(self._turn_detection)
         if self._context.purpose == "meeting":
             return (
                 MEETING_SERVER_VAD_EXTENSIONS

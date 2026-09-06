@@ -22,6 +22,32 @@ export interface SubtitleReducerState {
   readonly clearedOffset?: number;
 }
 
+export const STANDALONE_FILLER_CHARS = new Set([
+  "嗯",
+  "呃",
+  "啊",
+  "唔",
+  "额",
+  "诶",
+  "哦",
+  "呀",
+  "吧",
+  "哩",
+  "哈",
+  "呵",
+  "咳",
+]);
+
+export function isStandaloneFiller(text: string | null | undefined): boolean {
+  if (!text) return true;
+  const cleaned = text.trim().replace(/[\s.,!?;:…~。！？，、；：—\-]+/gu, "");
+  if (!cleaned) return true;
+  for (const ch of cleaned) {
+    if (!STANDALONE_FILLER_CHARS.has(ch)) return false;
+  }
+  return true;
+}
+
 export function reduceSubtitleSnapshot(
   state: SubtitleReducerState,
   snap: Partial<SubtitleSnapshot>,
@@ -31,12 +57,17 @@ export function reduceSubtitleSnapshot(
   const currentCleared = state.clearedOffset ?? 0;
   // 如果 SpeechRail 新 session 导致 rawLines 变短，重置 offset
   const clearedOffset = currentCleared > rawCount ? 0 : currentCleared;
-  const visibleLines = rawLines.slice(clearedOffset);
+  const visibleLines = rawLines
+    .slice(clearedOffset)
+    .filter((line) => !isStandaloneFiller(line.text));
+
+  const incomingPartial = snap.buffer_transcription ?? state.partial;
+  const partial = isStandaloneFiller(incomingPartial) ? "" : incomingPartial;
 
   return {
     rawLines,
     lines: visibleLines,
-    partial: snap.buffer_transcription ?? state.partial,
+    partial,
     clearedOffset,
   };
 }

@@ -160,29 +160,47 @@ _DIARIZATION_CONTRACT_TIMEBASE = "session_samples"
 _DIARIZATION_CONTRACT_SAMPLE_RATE = 16_000
 _SESSION_UPDATED_TIMEOUT_SECS = 10.0
 
-DEFAULT_SERVER_VAD: dict[str, object] = {
-    "type": "server_vad",
-    "threshold": 0.5,
-    "prefix_padding_ms": 300,
-    "silence_duration_ms": 400,
-}
+DEFAULT_SERVER_VAD_THRESHOLD = 0.65
+
+
+def build_server_vad_config(
+    *,
+    threshold: float = DEFAULT_SERVER_VAD_THRESHOLD,
+    silence_duration_ms: int = 400,
+    prefix_padding_ms: int = 300,
+) -> dict[str, object]:
+    """构造 SpeechRail server_vad 配置；默认 0.65 阈值有效阻断麦克风环境底噪误触发。"""
+    return {
+        "type": "server_vad",
+        "threshold": threshold,
+        "prefix_padding_ms": prefix_padding_ms,
+        "silence_duration_ms": silence_duration_ms,
+    }
+
+
+DEFAULT_SERVER_VAD: dict[str, object] = build_server_vad_config(
+    threshold=DEFAULT_SERVER_VAD_THRESHOLD,
+    silence_duration_ms=400,
+    prefix_padding_ms=300,
+)
 # 扩展模式推荐的 server VAD（Rail 规格 §5.1/Sona 设计 §3：silence 600ms）。
-DEFAULT_SERVER_VAD_EXTENSIONS: dict[str, object] = {
-    "type": "server_vad",
-    "threshold": 0.5,
-    "prefix_padding_ms": 300,
-    "silence_duration_ms": 600,
-}
+DEFAULT_SERVER_VAD_EXTENSIONS: dict[str, object] = build_server_vad_config(
+    threshold=DEFAULT_SERVER_VAD_THRESHOLD,
+    silence_duration_ms=600,
+    prefix_padding_ms=300,
+)
 # 会议助手对自然短停顿更宽容，避免将连续发言切成大量孤立的填充词。
 # 字幕仍使用上面的通用窗口，避免改变其他实时转录模式的断句行为。
-MEETING_SERVER_VAD: dict[str, object] = {
-    **DEFAULT_SERVER_VAD,
-    "silence_duration_ms": 900,
-}
-MEETING_SERVER_VAD_EXTENSIONS: dict[str, object] = {
-    **DEFAULT_SERVER_VAD_EXTENSIONS,
-    "silence_duration_ms": 1_000,
-}
+MEETING_SERVER_VAD: dict[str, object] = build_server_vad_config(
+    threshold=DEFAULT_SERVER_VAD_THRESHOLD,
+    silence_duration_ms=900,
+    prefix_padding_ms=300,
+)
+MEETING_SERVER_VAD_EXTENSIONS: dict[str, object] = build_server_vad_config(
+    threshold=DEFAULT_SERVER_VAD_THRESHOLD,
+    silence_duration_ms=1_000,
+    prefix_padding_ms=300,
+)
 MANUAL_TURN_DETECTION: dict[str, object] = {"type": "manual"}
 
 
@@ -439,6 +457,7 @@ def _validate_diarization_contract(updated: dict[str, object]) -> dict[str, obje
 __all__ = [
     "DEFAULT_SERVER_VAD",
     "DEFAULT_SERVER_VAD_EXTENSIONS",
+    "DEFAULT_SERVER_VAD_THRESHOLD",
     "DIARIZATION_EXTENSION_CAPABILITY",
     "MANUAL_TURN_DETECTION",
     "MEETING_SERVER_VAD",
@@ -448,5 +467,6 @@ __all__ = [
     "SpeechRailOpenAITransport",
     "SpeechRailProtocolError",
     "SpeechRailRealtimeClient",
+    "build_server_vad_config",
     "decode_pcm16",
 ]
