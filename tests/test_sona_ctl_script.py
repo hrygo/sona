@@ -25,6 +25,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _UV_STUB = """#!/usr/bin/env bash
 set -euo pipefail
 if [[ "${2:-}" == "sona-ui" ]]; then
+    if [[ "${SONA_TEST_EXIT_IMMEDIATELY:-false}" == "true" ]]; then
+        exit 23
+    fi
     printf '%s\\n' "$*" > "${SONA_TEST_CAPTURE_PATH}"
     sleep 30 &
     child=$!
@@ -120,6 +123,20 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
+def _pid_running(pid: int) -> bool:
+    """判断进程仍在运行，排除已退出但尚未回收的 zombie。"""
+    if not _pid_alive(pid):
+        return False
+    result = subprocess.run(
+        ["ps", "-o", "stat=", "-p", str(pid)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    state = result.stdout.strip()
+    return bool(state) and "Z" not in state
+
+
 def _wait_for_file(path: Path, *, timeout: float = 5.0) -> None:
     deadline = time.monotonic() + timeout
     while not path.exists() and time.monotonic() < deadline:
@@ -174,6 +191,55 @@ def test_sona_ctl_start_daemon_writes_pid_and_banner(
     assert stop.returncode == 0, stop.stderr
     assert not pid_file.exists()
     assert not _pid_alive(pid)
+
+
+def test_sona_ctl_daemon_survives_launcher_process_group_cleanup(tmp_path: Path) -> None:
+    """后台服务不应因启动器退出时清理其原进程组而被误杀。"""
+    ctl = _stage_sona_ctl(tmp_path)
+    bin_dir = _stub_bin(tmp_path)
+    capture = tmp_path / "sona-ui-args.txt"
+    env = _sona_ctl_env(bin_dir, capture_path=capture)
+
+    launcher = subprocess.Popen(
+        ["bash", str(ctl), "start", "-d"],
+        cwd=PROJECT_ROOT,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    pid: int | None = None
+    try:
+        stdout, stderr = launcher.communicate(timeout=15)
+        assert launcher.returncode == 0, stderr
+
+        pid_file = tmp_path / "runtime" / "sona-ui.pid"
+        pid = int(pid_file.read_text().strip())
+        _wait_for_file(capture)
+
+        with suppress(ProcessLookupError, PermissionError):
+            os.killpg(launcher.pid, signal.SIGTERM)
+
+        deadline = time.monotonic() + 1.0
+        while not _pid_running(pid) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert _pid_running(pid), f"后台服务被启动器进程组清理: stdout={stdout!r}"
+    finally:
+        _run_ctl(ctl, ["stop"], env)
+
+
+def test_sona_ctl_daemon_reports_early_child_exit(tmp_path: Path) -> None:
+    ctl = _stage_sona_ctl(tmp_path)
+    bin_dir = _stub_bin(tmp_path)
+    env = _sona_ctl_env(bin_dir)
+    env["SONA_TEST_EXIT_IMMEDIATELY"] = "true"
+
+    result = _run_ctl(ctl, ["start", "-d"], env)
+
+    assert result.returncode == 1
+    assert "后台服务启动失败" in result.stdout
+    assert not (tmp_path / "runtime" / "sona-ui.pid").exists()
 
 
 def test_sona_ctl_lan_mode_advertises_lan_url(tmp_path: Path) -> None:

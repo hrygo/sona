@@ -52,6 +52,15 @@ pid_alive() {
     [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
 }
 
+# 存活探测排除已退出但尚未回收的 zombie，避免后台启动误报成功。
+pid_running() {
+    local pid="$1"
+    pid_alive "$pid" || return 1
+    local state
+    state=$(ps -o stat= -p "$pid" 2>/dev/null | xargs || true)
+    [[ -n "$state" && "$state" != Z* ]]
+}
+
 # pid 文件中的进程是否存活
 pid_file_alive() {
     [[ -f "$PID_FILE" ]] || return 1
@@ -104,6 +113,42 @@ stop_tree() {
     done
     for pid in "${targets[@]}"; do
         pid_alive "$pid" && kill -KILL "$pid" 2>/dev/null || true
+    done
+}
+
+# 启动独立 session，避免启动器退出时清理原进程组而误杀后台服务。
+# macOS 默认没有 setsid，因此使用 Python 标准库实现同等的 session 脱离，
+# 并通过 exec 保持 PID 文件指向最终的 uv 进程。
+start_detached() {
+    local -a command=("$@")
+    local python_bin
+    python_bin=$(command -v python3 2>/dev/null || true)
+    if [[ -z "$python_bin" && -x "$SONA_ROOT/.venv/bin/python" ]]; then
+        python_bin="$SONA_ROOT/.venv/bin/python"
+    fi
+    if [[ -z "$python_bin" ]]; then
+        log_info "❌ 后台服务启动失败: 找不到 python3，无法创建独立 session"
+        return 1
+    fi
+
+    nohup "$python_bin" -c '
+import os
+import sys
+
+os.setsid()
+os.execvpe(sys.argv[1], sys.argv[1:], os.environ)
+' "${command[@]}" >>"$UI_LOG" 2>&1 &
+    local daemon_pid=$!
+    echo "$daemon_pid" > "$PID_FILE"
+
+    # uv/应用启动可能需要数秒；这里只确认进程没有在启动阶段立即退出。
+    for _ in {1..20}; do
+        if ! pid_running "$daemon_pid"; then
+            rm -f "$PID_FILE"
+            log_info "❌ 后台服务启动失败 (pid=$daemon_pid)，详见日志: $UI_LOG"
+            return 1
+        fi
+        sleep 0.1
     done
 }
 
@@ -232,8 +277,9 @@ start_cmd() {
 
     if [[ "$daemon" == "true" ]]; then
         export SONA_LOG_TO_CONSOLE=false
-        nohup "${cmd[@]}" >>"$UI_LOG" 2>&1 &
-        echo "$!" > "$PID_FILE"
+        if ! start_detached "${cmd[@]}"; then
+            exit 1
+        fi
         log_info "✅ sona UI 后台启动成功 (pid=$(cat "$PID_FILE"))"
         log_info "📄 日志: $UI_LOG  →  scripts/sona-ctl.sh logs -f"
         log_info "🛑 停止: scripts/sona-ctl.sh stop"
