@@ -76,6 +76,7 @@ class SpeechRailStreamingTranscriber:
         language: str,
         finish_timeout_secs: float = 10.0,
         diarization_extensions: bool = False,
+        diagnostics: ASRDiagnostics | None = None,
     ) -> None:
         if finish_timeout_secs <= 0:
             raise ValueError("finish_timeout_secs must be positive")
@@ -113,7 +114,7 @@ class SpeechRailStreamingTranscriber:
         self._diarization_finalized: DiarizationFinalizedEvent | None = None
         self._finalize_sent = False
         self._finalized_ready = asyncio.Event()
-        self._diagnostics = ASRDiagnostics()
+        self._diagnostics = diagnostics if diagnostics is not None else ASRDiagnostics()
 
     @property
     def uri(self) -> str:

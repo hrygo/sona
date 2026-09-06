@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator
 import pytest
 
 from sona.asr.contracts import ASREvent, ASRSessionContext
+from sona.asr.diagnostics import ASRDiagnostics
 from sona.speechrail import (
     SpeechRailRealtimeClient,
     SpeechRailStreamingTranscriber,
@@ -857,6 +858,7 @@ def test_streaming_adapter_accepts_empty_completed_transcript_as_no_new_text() -
 def test_streaming_adapter_records_empty_completion_without_storing_text() -> None:
     async def scenario() -> None:
         connection = FakeConnection()
+        diagnostics = ASRDiagnostics()
         connection._messages = [
             *_session_events(),
             _envelope("input_audio_buffer.committed", 4),
@@ -869,6 +871,7 @@ def test_streaming_adapter_records_empty_completion_without_storing_text() -> No
             ),
             context=ASRSessionContext(source_epoch=2, offset_ms=0, purpose="meeting"),
             language="Chinese",
+            diagnostics=diagnostics,
         )
         await adapter.connect()
         await adapter.send_audio(b"\x00\x00" * 160)
@@ -878,7 +881,8 @@ def test_streaming_adapter_records_empty_completion_without_storing_text() -> No
         assert (await anext(events)).kind == "final"
         await events.aclose()
 
-        assert adapter.diagnostics.snapshot() == {
+        assert adapter.diagnostics is diagnostics
+        assert diagnostics.snapshot() == {
             "sent_samples": 160,
             "partial_events": 0,
             "empty_completed": 1,

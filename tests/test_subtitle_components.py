@@ -16,6 +16,7 @@ from sona.asr.contracts import ASRCapabilities, ASREvent, ASRSessionContext
 from sona.asr.models import ASRSegment, ASRWindow
 from sona.asr.presenters import legacy_subtitle_payload
 from sona.config import SubtitleSettings
+from sona.meeting.models import PCMOwner
 from sona.subtitles import (
     FinalizationTimeoutError,
     SubtitleProxy,
@@ -134,6 +135,24 @@ def _proxy(tmp_path: Path) -> SubtitleProxy:
         _settings(tmp_path),
         transcriber_factory=lambda _ctx: FakeTranscriber(source_epoch=1),
     )
+
+
+def test_subtitle_proxy_diagnostics_exposes_asr_counters(tmp_path: Path) -> None:
+    proxy = _proxy(tmp_path)
+
+    proxy._on_session_reconnect()
+
+    diagnostics = proxy.diagnostics(PCMOwner.NONE)
+
+    assert diagnostics.asr == {
+        "sent_samples": 0,
+        "partial_events": 0,
+        "empty_completed": 0,
+        "nonempty_completed": 0,
+        "committed_events": 0,
+        "reconnects": 1,
+        "protocol_errors": 0,
+    }
 
 
 def _window(*, partial: str = "", with_segment: bool = False) -> ASRWindow:

@@ -1136,6 +1136,30 @@ async def test_window_without_segments_only_emits_partial(
     assert "reconcile" not in repository.calls
 
 
+async def test_empty_final_clears_previous_partial_without_reconciling(
+    repository: FakeRepository, gateway: FakeGateway
+) -> None:
+    events: list[tuple[str, UUID, object]] = []
+
+    async def publish(event_type: str, meeting_id: UUID, payload: object) -> None:
+        events.append((event_type, meeting_id, payload))
+
+    session = MeetingSession(repository, gateway, event_publisher=publish)
+    await _start_session(session)
+
+    await session._on_window(TranscriptWindow(source_epoch=1, partial="临时文本"))
+    await session._on_window(TranscriptWindow(source_epoch=1))
+
+    partials = [
+        payload for event_type, _, payload in events if event_type == "transcript_partial"
+    ]
+    assert partials == [
+        {"text": "临时文本", "speaker_key": None, "speaker_name": None},
+        {"text": "", "speaker_key": None, "speaker_name": None},
+    ]
+    assert "reconcile" not in repository.calls
+
+
 async def test_empty_completed_item_does_not_persist_a_meeting_body(
     repository: FakeRepository, gateway: FakeGateway
 ) -> None:
