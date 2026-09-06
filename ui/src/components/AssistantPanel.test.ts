@@ -32,6 +32,32 @@ vi.mock("./AssistantWaveform", () => ({
   AssistantWaveform: () => createElement("div", { "data-testid": "assistant-waveform" }),
 }));
 
+vi.mock("./VoiceStudioModal", () => ({
+  VoiceStudioModal: (props: {
+    onStartRecordingVoice?: () => void | Promise<void>;
+    onStopRecordingVoice?: () => void | Promise<void>;
+  }) => createElement("div", { "data-testid": "voice-studio-modal" }, [
+    createElement(
+      "button",
+      {
+        key: "start",
+        className: "test-record-start",
+        onClick: () => void props.onStartRecordingVoice?.(),
+      },
+      "start",
+    ),
+    createElement(
+      "button",
+      {
+        key: "stop",
+        className: "test-record-stop",
+        onClick: () => void Promise.resolve(props.onStopRecordingVoice?.()).catch(() => undefined),
+      },
+      "stop",
+    ),
+  ]),
+}));
+
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
 let root: Root;
@@ -82,6 +108,52 @@ describe("assistant phase presentation", () => {
 
     expect(presentation.label).toBe("实时字幕占用音频");
     expect(presentation.detail).toContain("助手未接收麦克风语音");
+  });
+});
+
+describe("voice workshop microphone lease", () => {
+  it("retries assistant unmute after the control connection recovers", async () => {
+    const sendCommand = vi.fn().mockResolvedValue({});
+    const connectedSocket: CommandSocketApi = {
+      state: "open",
+      ready: true,
+      snapshot: null,
+      highestRuntimeRevision: null,
+      sendCommand,
+      reconcileRuntime: vi.fn().mockResolvedValue({}),
+    };
+
+    act(() => {
+      root.render(createElement(AssistantPanel, { commandSocket: connectedSocket }));
+    });
+    act(() => container.querySelector<HTMLButtonElement>(".btn-voice-studio-btn")?.click());
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>(".test-record-start")?.click();
+      await Promise.resolve();
+    });
+
+    expect(sendCommand).toHaveBeenCalledWith({ cmd: "set_mic_muted", muted: true });
+
+    const disconnectedSocket: CommandSocketApi = { ...connectedSocket, ready: false };
+    act(() => {
+      root.render(createElement(AssistantPanel, { commandSocket: disconnectedSocket }));
+    });
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>(".test-record-stop")?.click();
+      await Promise.resolve();
+    });
+
+    expect(sendCommand).not.toHaveBeenCalledWith({ cmd: "set_mic_muted", muted: false });
+
+    act(() => {
+      root.render(createElement(AssistantPanel, { commandSocket: connectedSocket }));
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(sendCommand).toHaveBeenCalledWith({ cmd: "set_mic_muted", muted: false });
   });
 });
 

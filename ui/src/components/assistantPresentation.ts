@@ -1,19 +1,11 @@
 import type { AssistantPhase, TurnMetrics } from "../stores/assistantStore";
 import type { DuplexMode } from "../stores/uiSettingsStore";
-
-export type VoiceMode = "system" | "clone" | "instruction";
-
-export interface VoiceCatalogItem {
-  readonly id: string;
-  readonly name: string;
-  readonly instruction?: string;
-  readonly is_system: boolean;
-  readonly mode?: VoiceMode;
-  readonly ref_text?: string;
-  readonly duration_seconds?: number;
-  readonly created_at?: number;
-  readonly available?: boolean;
-}
+export type {
+  VoiceCatalogItem,
+  VoiceMode,
+  VoiceModelCapabilities,
+} from "../contracts/voiceContract";
+import type { VoiceCatalogItem, VoiceMode } from "../contracts/voiceContract";
 
 export const DEFAULT_SYSTEM_VOICES: readonly VoiceCatalogItem[] = [
   { id: "default", name: "默认原声", instruction: "标准专业、吐字清晰的女声普通话", is_system: true, mode: "system" },

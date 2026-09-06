@@ -6,14 +6,16 @@ import asyncio
 import contextlib
 import json
 import logging
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import is_dataclass
 from typing import Any, Literal, cast
 from urllib.parse import urlsplit
+from uuid import uuid4
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.encoders import jsonable_encoder
+from fastapi.responses import JSONResponse
 
 from sona.lm_studio import lm_studio_auth_headers, lm_studio_openai_models_url
 from sona.network import local_async_client
@@ -24,6 +26,17 @@ logger = logging.getLogger(__name__)
 NetworkScope = Literal["local", "network"]
 _RUNTIME_DIAGNOSTIC_KEYS = ("audio_hub", "interaction", "subtitles", "tts", "last_transition")
 _ASR_WORKLOAD_KEYS = ("workload", "ws_state", "reconnect_count", "last_event_age_ms")
+_VOICE_CLONE_MAX_BODY_BYTES = 15 * 1024 * 1024
+_VOICE_PREVIEW_MAX_BODY_BYTES = 64 * 1024
+_VOICE_WORKSHOP_BLOCKED_MODES = frozenset({"meeting", "subtitles"})
+_PROXY_RESPONSE_HEADERS = (
+    "content-type",
+    "content-disposition",
+    "x-request-id",
+    "retry-after",
+    "www-authenticate",
+    "cache-control",
+)
 
 
 def _speechrail_health_url(rest_url: str) -> str:
@@ -38,6 +51,202 @@ def _speechrail_rest_path(rest_url: str, path: str) -> str:
 
 def _speechrail_auth_headers(api_key: str | None) -> dict[str, str] | None:
     return {"Authorization": f"Bearer {api_key}"} if api_key else None
+
+
+def _request_id(request: Request) -> str:
+    """读取或生成短 request id，错误响应可被前端和日志关联。"""
+    value = request.headers.get("x-request-id", "").strip()
+    if 0 < len(value) <= 64 and value.isprintable():
+        return value
+    return uuid4().hex
+
+
+def _error_response(
+    request: Request,
+    *,
+    status_code: int,
+    code: str,
+    message: str,
+    retryable: bool,
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "error": {
+                "code": code,
+                "message": message,
+                "type": "server_error"
+                if status_code >= 500 or retryable
+                else "invalid_request_error",
+                "request_id": _request_id(request),
+                "retryable": retryable,
+            }
+        },
+    )
+
+
+def _proxy_response(
+    response: httpx.Response,
+    *,
+    default_content_type: str = "application/json",
+) -> Response:
+    """保留上游状态、正文和安全响应头，避免错误被代理层改写。"""
+    headers: dict[str, str] = {}
+    for name in _PROXY_RESPONSE_HEADERS:
+        value = response.headers.get(name)
+        if value:
+            headers[name] = value
+    headers.setdefault(
+        "content-type",
+        "application/json" if response.status_code >= 400 else default_content_type,
+    )
+    return Response(
+        content=response.content,
+        status_code=response.status_code,
+        headers=headers,
+    )
+
+
+def _proxy_request_headers(
+    request: Request,
+    *,
+    content_type: str | None = None,
+    api_key: str | None,
+    preserve_content_length: bool = False,
+) -> dict[str, str] | None:
+    """只向 SpeechRail 转发必要的请求头，避免泄漏浏览器连接元数据。"""
+    headers: dict[str, str] = {}
+    if content_type:
+        headers["Content-Type"] = content_type
+    content_length = request.headers.get("content-length")
+    if preserve_content_length and content_length:
+        headers["Content-Length"] = content_length
+    request_id = request.headers.get("x-request-id")
+    if request_id:
+        headers["X-Request-ID"] = request_id
+    auth_headers = _speechrail_auth_headers(api_key)
+    if auth_headers is not None:
+        headers.update(auth_headers)
+    return headers or None
+
+
+def _speechrail_transport_error(
+    request: Request,
+    exc: httpx.HTTPError,
+    *,
+    message: str,
+) -> JSONResponse:
+    """将 Sona 代理自身的网络异常映射为稳定的公共错误。"""
+    if isinstance(exc, httpx.TimeoutException):
+        return _error_response(
+            request,
+            status_code=503,
+            code="backend_timeout",
+            message="SpeechRail 请求超时",
+            retryable=True,
+        )
+    if isinstance(exc, httpx.NetworkError):
+        return _error_response(
+            request,
+            status_code=503,
+            code="speechrail_unavailable",
+            message=message,
+            retryable=True,
+        )
+    return _error_response(
+        request,
+        status_code=502,
+        code="speechrail_bad_gateway",
+        message="SpeechRail 返回无效响应",
+        retryable=True,
+    )
+
+
+def _declared_body_size(request: Request, *, limit: int) -> Response | None:
+    raw_length = request.headers.get("content-length")
+    if raw_length is None:
+        return None
+    try:
+        content_length = int(raw_length)
+    except ValueError:
+        return _error_response(
+            request,
+            status_code=400,
+            code="invalid_content_length",
+            message="请求体长度无效",
+            retryable=False,
+        )
+    if content_length < 0:
+        return _error_response(
+            request,
+            status_code=400,
+            code="invalid_content_length",
+            message="请求体长度无效",
+            retryable=False,
+        )
+    if content_length > limit:
+        return _error_response(
+            request,
+            status_code=413,
+            code="payload_too_large",
+            message=f"请求体过大（上限 {limit // (1024 * 1024)} MiB）",
+            retryable=False,
+        )
+    return None
+
+
+async def _bounded_request_stream(request: Request, *, limit: int) -> AsyncIterator[bytes]:
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > limit:
+            raise _PayloadTooLargeError
+        yield chunk
+
+
+class _PayloadTooLargeError(Exception):
+    """请求声明长度未知但实际流超出代理上限。"""
+
+
+def _voice_workshop_guard(context: UIAppContext, request: Request) -> Response | None:
+    """会议/字幕独占音频时禁止工坊请求，assistant 的静音录音流程仍可用。"""
+    runtime = context.runtime
+    if runtime is None:
+        return _error_response(
+            request,
+            status_code=503,
+            code="runtime_unavailable",
+            message="运行时尚未就绪",
+            retryable=True,
+        )
+    try:
+        snapshot = runtime.snapshot()
+        mode = getattr(getattr(snapshot, "mode", None), "value", snapshot.mode)
+        owner = getattr(getattr(snapshot, "pcm_owner", None), "value", snapshot.pcm_owner)
+        meeting_state = getattr(
+            getattr(snapshot, "meeting_state", None), "value", snapshot.meeting_state
+        )
+    except Exception:
+        return _error_response(
+            request,
+            status_code=503,
+            code="runtime_unavailable",
+            message="运行时状态不可用",
+            retryable=True,
+        )
+    if (
+        mode in _VOICE_WORKSHOP_BLOCKED_MODES
+        or owner in _VOICE_WORKSHOP_BLOCKED_MODES
+        or meeting_state in {"recording", "finalizing"}
+    ):
+        return _error_response(
+            request,
+            status_code=409,
+            code="mode_conflict",
+            message="会议或字幕正在占用音频资源，请结束当前模式后再使用声音工坊",
+            retryable=False,
+        )
+    return None
 
 
 def _network_scope(host: str) -> NetworkScope:
@@ -230,8 +439,33 @@ def create_http_router(context: UIAppContext) -> APIRouter:
             raise HTTPException(status_code=503, detail="runtime 未就绪")
         return runtime.snapshot().model_dump(mode="json")
 
+    @router.get("/v1/models")
+    async def models(request: Request) -> Response:
+        """代理 SpeechRail 模型清单，供前端读取实际 TTS 能力。"""
+        settings = context.settings
+        url = _speechrail_rest_path(
+            settings.interaction.speechrail_tts_rest_url, "/models"
+        )
+        try:
+            async with local_async_client(timeout=settings.ui.api_timeout) as client:
+                resp = await client.get(
+                    url,
+                    headers=_proxy_request_headers(
+                        request,
+                        api_key=settings.interaction.speechrail_api_key,
+                    ),
+                )
+                return _proxy_response(resp)
+        except httpx.HTTPError as exc:
+            logger.warning("Sona: SpeechRail /v1/models 请求失败: %s", exc)
+            return _speechrail_transport_error(
+                request,
+                exc,
+                message="SpeechRail 模型能力不可用",
+            )
+
     @router.get("/v1/voices")
-    async def voices() -> dict[str, Any]:
+    async def voices(request: Request) -> Response:
         """代理 SpeechRail 音色列表，供前端音色下拉。"""
         settings = context.settings
         url = _speechrail_rest_path(
@@ -241,15 +475,19 @@ def create_http_router(context: UIAppContext) -> APIRouter:
             async with local_async_client(timeout=settings.ui.api_timeout) as client:
                 resp = await client.get(
                     url,
-                    headers=_speechrail_auth_headers(
-                        settings.interaction.speechrail_api_key
+                    headers=_proxy_request_headers(
+                        request,
+                        api_key=settings.interaction.speechrail_api_key,
                     ),
                 )
-                resp.raise_for_status()
-                return dict(resp.json())
+                return _proxy_response(resp)
         except httpx.HTTPError as exc:
             logger.warning("Sona: SpeechRail /v1/voices 请求失败: %s", exc)
-            raise HTTPException(status_code=502, detail="SpeechRail 音色列表不可用") from exc
+            return _speechrail_transport_error(
+                request,
+                exc,
+                message="SpeechRail 音色列表不可用",
+            )
 
     @router.get("/v1/voices/clone/prompts")
     async def clone_prompts() -> dict[str, Any]:
@@ -314,72 +552,148 @@ def create_http_router(context: UIAppContext) -> APIRouter:
             pass
         return {"object": "list", "data": default_prompts}
 
+    @router.post("/v1/voices/previews")
+    async def preview_voice(request: Request) -> Response:
+        """代理 SpeechRail 短生命周期自然语言声音设计试听。"""
+        guard = _voice_workshop_guard(context, request)
+        if guard is not None:
+            return guard
+
+        declared_size_error = _declared_body_size(
+            request, limit=_VOICE_PREVIEW_MAX_BODY_BYTES
+        )
+        if declared_size_error is not None:
+            return declared_size_error
+
+        content_type = request.headers.get("content-type", "application/json")
+        if not content_type.lower().startswith("application/json"):
+            return _error_response(
+                request,
+                status_code=415,
+                code="unsupported_media_type",
+                message="声音试听请求必须使用 application/json",
+                retryable=False,
+            )
+
+        try:
+            body = await request.body()
+            if len(body) > _VOICE_PREVIEW_MAX_BODY_BYTES:
+                return _error_response(
+                    request,
+                    status_code=413,
+                    code="payload_too_large",
+                    message="声音试听请求体过大",
+                    retryable=False,
+                )
+            settings = context.settings
+            url = _speechrail_rest_path(
+                settings.interaction.speechrail_tts_rest_url, "/voices/previews"
+            )
+            headers = _proxy_request_headers(
+                request,
+                content_type=content_type,
+                api_key=settings.interaction.speechrail_api_key,
+            )
+            async with local_async_client(
+                timeout=settings.interaction.speechrail_tts_request_timeout_secs
+            ) as client:
+                resp = await client.post(url, content=body, headers=headers)
+                return _proxy_response(resp, default_content_type="audio/wav")
+        except httpx.HTTPError as exc:
+            logger.warning("Sona: SpeechRail /v1/voices/previews 请求失败: %s", exc)
+            return _speechrail_transport_error(
+                request,
+                exc,
+                message="SpeechRail 声音试听服务不可用",
+            )
+        except Exception as exc:
+            logger.error(
+                "Sona: 处理声音试听请求异常: %s",
+                type(exc).__name__,
+            )
+            return _error_response(
+                request,
+                status_code=500,
+                code="internal_error",
+                message="声音试听请求处理失败",
+                retryable=False,
+            )
+
     @router.post("/v1/voices/clone")
     async def clone_voice(request: Request) -> Response:
-        """代理 SpeechRail 录音克隆音色（上传参考音频与引导文本）。"""
+        """透明代理 SpeechRail 录音克隆音色，不在 sona 解析或持久化音频。"""
+        guard = _voice_workshop_guard(context, request)
+        if guard is not None:
+            return guard
+
+        content_type = request.headers.get("content-type", "")
+        if not content_type.lower().startswith("multipart/form-data"):
+            return _error_response(
+                request,
+                status_code=415,
+                code="unsupported_media_type",
+                message="音色克隆请求必须使用 multipart/form-data",
+                retryable=False,
+            )
+        declared_size_error = _declared_body_size(
+            request, limit=_VOICE_CLONE_MAX_BODY_BYTES
+        )
+        if declared_size_error is not None:
+            return declared_size_error
+
         settings = context.settings
         url = _speechrail_rest_path(
             settings.interaction.speechrail_tts_rest_url, "/voices/clone"
         )
         try:
-            form = await request.form()
-            upload_file = form.get("audio")
-            ref_text = form.get("ref_text")
-            name = form.get("name")
-            voice_id = form.get("id")
-
-            if not upload_file or not hasattr(upload_file, "read"):
-                raise HTTPException(status_code=400, detail="缺少录音音频文件 (audio)")
-            if not ref_text or not str(ref_text).strip():
-                raise HTTPException(status_code=400, detail="缺少朗读参考文本 (ref_text)")
-            if not name or not str(name).strip():
-                raise HTTPException(status_code=400, detail="缺少音色名称 (name)")
-
-            audio_content = bytearray()
-            max_limit = 15 * 1024 * 1024  # 15MB
-            while chunk := await upload_file.read(64 * 1024):
-                audio_content.extend(chunk)
-                if len(audio_content) > max_limit:
-                    raise HTTPException(status_code=413, detail="录音音频过大（上限 15MB）")
-
-            if len(audio_content) < 1024:
-                raise HTTPException(status_code=400, detail="录音音频内容过小或为空")
-
-            filename = getattr(upload_file, "filename", "recording.wav") or "recording.wav"
-            content_type = getattr(upload_file, "content_type", "audio/wav") or "audio/wav"
-
-            data_fields: dict[str, str] = {
-                "name": str(name).strip(),
-                "ref_text": str(ref_text).strip(),
-            }
-            if voice_id and str(voice_id).strip():
-                data_fields["id"] = str(voice_id).strip()
-
-            auth_headers = _speechrail_auth_headers(settings.interaction.speechrail_api_key)
-            async with local_async_client(timeout=settings.ui.api_timeout) as client:
+            headers = _proxy_request_headers(
+                request,
+                content_type=content_type,
+                api_key=settings.interaction.speechrail_api_key,
+                preserve_content_length=True,
+            )
+            async with local_async_client(
+                timeout=settings.interaction.speechrail_tts_request_timeout_secs
+            ) as client:
                 resp = await client.post(
                     url,
-                    data=data_fields,
-                    files={"audio": (filename, bytes(audio_content), content_type)},
-                    headers=auth_headers,
+                    content=_bounded_request_stream(
+                        request, limit=_VOICE_CLONE_MAX_BODY_BYTES
+                    ),
+                    headers=headers,
                 )
-                return Response(
-                    content=resp.content,
-                    status_code=resp.status_code,
-                    media_type=resp.headers.get("content-type", "application/json"),
-                )
-        except HTTPException:
-            raise
+                return _proxy_response(resp)
+        except _PayloadTooLargeError:
+            return _error_response(
+                request,
+                status_code=413,
+                code="payload_too_large",
+                message="录音音频过大（上限 15 MiB）",
+                retryable=False,
+            )
         except httpx.HTTPError as exc:
             logger.warning("Sona: SpeechRail POST /v1/voices/clone 请求失败: %s", exc)
-            raise HTTPException(status_code=502, detail="SpeechRail 音色克隆服务响应异常") from exc
+            return _speechrail_transport_error(
+                request,
+                exc,
+                message="SpeechRail 音色克隆服务不可用",
+            )
         except Exception as exc:
-            logger.error("Sona: 处理音色克隆上传异常: %s", exc)
-            raise HTTPException(status_code=500, detail="处理音色克隆上传失败") from exc
+            logger.error("Sona: 处理音色克隆上传异常: %s", type(exc).__name__)
+            return _error_response(
+                request,
+                status_code=500,
+                code="internal_error",
+                message="音色克隆请求处理失败",
+                retryable=False,
+            )
 
     @router.post("/v1/voices")
     async def create_voice(request: Request) -> Response:
         """代理 SpeechRail 创建自定义音色。"""
+        guard = _voice_workshop_guard(context, request)
+        if guard is not None:
+            return guard
         settings = context.settings
         url = _speechrail_rest_path(
             settings.interaction.speechrail_tts_rest_url, "/voices"
@@ -390,36 +704,43 @@ def create_http_router(context: UIAppContext) -> APIRouter:
             auth_headers = _speechrail_auth_headers(settings.interaction.speechrail_api_key)
             if auth_headers is not None:
                 headers.update(auth_headers)
-            async with local_async_client(timeout=settings.ui.api_timeout) as client:
+            async with local_async_client(
+                timeout=settings.interaction.speechrail_tts_request_timeout_secs
+            ) as client:
                 resp = await client.post(url, content=body, headers=headers)
-                return Response(
-                    content=resp.content,
-                    status_code=resp.status_code,
-                    media_type=resp.headers.get("content-type", "application/json"),
-                )
+                return _proxy_response(resp)
         except httpx.HTTPError as exc:
             logger.warning("Sona: SpeechRail POST /v1/voices 请求失败: %s", exc)
-            raise HTTPException(status_code=502, detail="SpeechRail 创建音色失败") from exc
+            return _speechrail_transport_error(
+                request,
+                exc,
+                message="SpeechRail 创建音色服务不可用",
+            )
 
     @router.delete("/v1/voices/{voice_id}")
-    async def delete_voice(voice_id: str) -> Response:
+    async def delete_voice(request: Request, voice_id: str) -> Response:
         """代理 SpeechRail 删除自定义音色。"""
+        guard = _voice_workshop_guard(context, request)
+        if guard is not None:
+            return guard
         settings = context.settings
         url = _speechrail_rest_path(
             settings.interaction.speechrail_tts_rest_url, f"/voices/{voice_id}"
         )
         try:
             auth_headers = _speechrail_auth_headers(settings.interaction.speechrail_api_key)
-            async with local_async_client(timeout=settings.ui.api_timeout) as client:
+            async with local_async_client(
+                timeout=settings.interaction.speechrail_tts_request_timeout_secs
+            ) as client:
                 resp = await client.delete(url, headers=auth_headers)
-                return Response(
-                    content=resp.content,
-                    status_code=resp.status_code,
-                    media_type=resp.headers.get("content-type", "application/json"),
-                )
+                return _proxy_response(resp)
         except httpx.HTTPError as exc:
             logger.warning("Sona: SpeechRail DELETE /v1/voices/%s 请求失败: %s", voice_id, exc)
-            raise HTTPException(status_code=502, detail="SpeechRail 删除音色失败") from exc
+            return _speechrail_transport_error(
+                request,
+                exc,
+                message="SpeechRail 删除音色服务不可用",
+            )
 
     @router.post("/v1/audio/speech")
     async def proxy_speech(request: Request) -> Response:
@@ -430,22 +751,22 @@ def create_http_router(context: UIAppContext) -> APIRouter:
         )
         try:
             body = await request.body()
-            headers = {"Content-Type": "application/json"}
-            async with local_async_client(timeout=10.0) as client:
-                auth_headers = _speechrail_auth_headers(
-                    settings.interaction.speechrail_api_key
-                )
-                if auth_headers is not None:
-                    headers.update(auth_headers)
+            headers = _proxy_request_headers(
+                request,
+                content_type=request.headers.get("content-type", "application/json"),
+                api_key=settings.interaction.speechrail_api_key,
+            )
+            async with local_async_client(
+                timeout=settings.interaction.speechrail_tts_request_timeout_secs
+            ) as client:
                 resp = await client.post(url, content=body, headers=headers)
-                resp.raise_for_status()
-                return Response(
-                    content=resp.content,
-                    status_code=resp.status_code,
-                    media_type=resp.headers.get("content-type", "audio/wav"),
-                )
+                return _proxy_response(resp, default_content_type="audio/wav")
         except httpx.HTTPError as exc:
             logger.warning("Sona: SpeechRail /v1/audio/speech 试听请求失败: %s", exc)
-            raise HTTPException(status_code=502, detail="SpeechRail 语音合成不可用") from exc
+            return _speechrail_transport_error(
+                request,
+                exc,
+                message="SpeechRail 语音合成不可用",
+            )
 
     return router

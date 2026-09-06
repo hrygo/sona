@@ -244,6 +244,17 @@ def test_interaction_smart_turn_and_tts_fast_clause_defaults() -> None:
     assert settings.tts_first_clause_min_chars == 8
 
 
+def test_interaction_tts_request_timeout_matches_speechrail_budget() -> None:
+    settings = InteractionSettings(_env_file=None)
+    assert settings.speechrail_tts_request_timeout_secs == 120.0
+
+
+@pytest.mark.parametrize("value", [0, 3601])
+def test_interaction_rejects_invalid_tts_request_timeout(value: float) -> None:
+    with pytest.raises(ValidationError):
+        InteractionSettings(speechrail_tts_request_timeout_secs=value)
+
+
 def test_meeting_diarization_smoothing_defaults() -> None:
     settings = MeetingSettings(_env_file=None)
     assert settings.diarization_smoothing_enabled is True

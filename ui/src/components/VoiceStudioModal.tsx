@@ -1,8 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { apiUrl } from "../config/runtimeConfig";
+import {
+  SPEECHRAIL_TTS_MODEL,
+  voiceService,
+} from "../services/voiceService";
 import { playAudioBlob } from "../utils/audioPlayback";
 import { showToast } from "./Toast";
 import { SoundWaveAnimatedIcon } from "./Icons";
+import {
+  supportsVoiceCapability,
+  type VoiceModelCapabilities,
+} from "../contracts/voiceContract";
 import {
   type VoiceCatalogItem,
   type VoiceMode,
@@ -14,12 +21,15 @@ import "./VoiceStudioModal.css";
 export interface VoiceStudioModalProps {
   readonly currentVoiceId: string;
   readonly availableVoices: readonly VoiceCatalogItem[];
+  readonly modelCapabilities?: VoiceModelCapabilities;
   readonly onSelectVoice: (voiceId: string) => void;
   readonly onVoiceCreated: (newVoice: VoiceCatalogItem) => void;
   readonly onVoiceDeleted: (voiceId: string) => void;
   readonly onClose: () => void;
-  readonly onStartRecordingVoice?: () => void;
-  readonly onStopRecordingVoice?: () => void;
+  /** 在打开浏览器麦克风前暂停语音助手，并等待服务端确认。 */
+  readonly onStartRecordingVoice?: () => void | Promise<void>;
+  /** 录音结束或组件销毁时恢复语音助手输入。 */
+  readonly onStopRecordingVoice?: () => void | Promise<void>;
 }
 
 interface ClonePromptItem {
@@ -98,6 +108,7 @@ const DESIGN_INSPIRATIONS: readonly InspirationPrompt[] = [
 export function VoiceStudioModal({
   currentVoiceId,
   availableVoices,
+  modelCapabilities,
   onSelectVoice,
   onVoiceCreated,
   onVoiceDeleted,
@@ -105,8 +116,19 @@ export function VoiceStudioModal({
   onStartRecordingVoice,
   onStopRecordingVoice,
 }: VoiceStudioModalProps) {
+  const canClone = supportsVoiceCapability(modelCapabilities, "supports_clone");
+  const canPreview = supportsVoiceCapability(modelCapabilities, "supports_preview");
+  const canDesign = supportsVoiceCapability(modelCapabilities, "supports_instruction");
+
   // 创设模式：录音克隆 (clone) 或 自然语言设计 (design)
-  const [activeTab, setActiveTab] = useState<"clone" | "design">("clone");
+  const [activeTab, setActiveTab] = useState<"clone" | "design">(() => (
+    canClone ? "clone" : "design"
+  ));
+  const selectedTab = canClone && activeTab === "clone"
+    ? "clone"
+    : canDesign
+      ? "design"
+      : "clone";
 
   // 音色资产库模式过滤
   const [filterMode, setFilterMode] = useState<"all" | VoiceMode>("all");
@@ -134,9 +156,29 @@ export function VoiceStudioModal({
   const animFrameRef = useRef<number | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
+  const assistantMuteActiveRef = useRef(false);
+  const recordingStartInFlightRef = useRef(false);
+  const recordingAttemptRef = useRef(0);
+  const isMountedRef = useRef(true);
+  const onStopRecordingVoiceRef = useRef(onStopRecordingVoice);
+  onStopRecordingVoiceRef.current = onStopRecordingVoice;
+  const [isStartingRecording, setIsStartingRecording] = useState(false);
 
   // 环境音量与信噪指示
   const [micLevelStatus, setMicLevelStatus] = useState<"good" | "quiet" | "loud">("good");
+
+  const releaseAssistantMute = useCallback(async () => {
+    if (!assistantMuteActiveRef.current) return;
+    // 先清除本地租约，避免 recorder.onstop、reset 和 unmount 重复恢复输入。
+    assistantMuteActiveRef.current = false;
+    try {
+      await onStopRecordingVoiceRef.current?.();
+    } catch {
+      // 保留租约，让后续 reset/unmount 仍有机会重试恢复助手输入。
+      assistantMuteActiveRef.current = true;
+      showToast("语音助手麦克风恢复失败，请检查控制连接", "error");
+    }
+  }, []);
 
   /* ====================== 2. 灵感设计 (Voice Design) 状态 ====================== */
   const [designName, setDesignName] = useState("");
@@ -151,11 +193,9 @@ export function VoiceStudioModal({
     let cancelled = false;
     async function fetchPrompts() {
       try {
-        const resp = await fetch(apiUrl("/v1/voices/clone/prompts"));
-        if (!resp.ok) return;
-        const data = await resp.json();
-        if (!cancelled && Array.isArray(data.data) && data.data.length > 0) {
-          setPrompts(data.data as ClonePromptItem[]);
+        const data = await voiceService.clonePrompts();
+        if (!cancelled && data.length > 0) {
+          setPrompts(data);
         }
       } catch {
         // 降级使用内置精选文案库
@@ -209,23 +249,45 @@ export function VoiceStudioModal({
       }
       audioCtxRef.current = null;
     }
-    onStopRecordingVoice?.();
-  }, [onStopRecordingVoice]);
+  }, []);
 
   useEffect(() => {
     return () => {
+      isMountedRef.current = false;
+      recordingAttemptRef.current += 1;
+      recordingStartInFlightRef.current = false;
       cleanupRecording();
+      void releaseAssistantMute();
+    };
+  }, [cleanupRecording, releaseAssistantMute]);
+
+  useEffect(() => {
+    return () => {
       if (recordedAudioUrl) {
         URL.revokeObjectURL(recordedAudioUrl);
       }
     };
-  }, [cleanupRecording, recordedAudioUrl]);
+  }, [recordedAudioUrl]);
 
   /* ====================== 录音与波形绘制核心逻辑 ====================== */
   const startRecording = useCallback(async () => {
+    if (recordingStartInFlightRef.current) return;
+    recordingStartInFlightRef.current = true;
+    const attempt = recordingAttemptRef.current + 1;
+    recordingAttemptRef.current = attempt;
+    setIsStartingRecording(true);
     setCloneError("");
     try {
       cleanupRecording();
+      await releaseAssistantMute();
+
+      // 先暂停 sona 的交互管道，再申请浏览器麦克风，避免用户点击后立即朗读
+      // 的开头落入 AudioHub -> assistant 的输入队列。
+      assistantMuteActiveRef.current = onStartRecordingVoice !== undefined;
+      await onStartRecordingVoice?.();
+
+      if (!isMountedRef.current || recordingAttemptRef.current !== attempt) return;
+
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           echoCancellation: true,
@@ -233,6 +295,12 @@ export function VoiceStudioModal({
           sampleRate: 24000,
         },
       });
+      if (!isMountedRef.current || recordingAttemptRef.current !== attempt) {
+        for (const track of stream.getTracks()) {
+          track.stop();
+        }
+        return;
+      }
       audioStreamRef.current = stream;
 
       // 初始化 Web Audio API 进行实时波形与能量绘制
@@ -260,6 +328,9 @@ export function VoiceStudioModal({
 
       recorder.onstop = () => {
         const fullBlob = new Blob(audioChunksRef.current, { type: mimeType });
+        cleanupRecording();
+        void releaseAssistantMute();
+        if (!isMountedRef.current) return;
         setRecordedBlob(fullBlob);
         const url = URL.createObjectURL(fullBlob);
         setRecordedAudioUrl(url);
@@ -272,7 +343,6 @@ export function VoiceStudioModal({
       recorder.start(250);
       setCloneStage("recording");
       setRecordingSeconds(0);
-      onStartRecordingVoice?.();
 
       timerRef.current = window.setInterval(() => {
         setRecordingSeconds((sec) => {
@@ -311,11 +381,17 @@ export function VoiceStudioModal({
           const barWidth = (canvas.width / dataArray.length) * 2.2;
           let x = 0;
 
+          const isLight = typeof document !== "undefined" && document.documentElement.dataset.theme === "light";
           for (let i = 0; i < dataArray.length; i += 2) {
             const barHeight = (dataArray[i] / 255) * canvas.height * 0.9;
             const gradient = ctx.createLinearGradient(0, canvas.height - barHeight, 0, canvas.height);
-            gradient.addColorStop(0, "rgba(239, 68, 68, 0.9)");
-            gradient.addColorStop(1, "rgba(244, 63, 94, 0.4)");
+            if (isLight) {
+              gradient.addColorStop(0, "rgba(225, 29, 72, 0.95)");
+              gradient.addColorStop(1, "rgba(225, 29, 72, 0.4)");
+            } else {
+              gradient.addColorStop(0, "rgba(239, 68, 68, 0.9)");
+              gradient.addColorStop(1, "rgba(244, 63, 94, 0.4)");
+            }
 
             ctx.fillStyle = gradient;
             ctx.beginPath();
@@ -330,11 +406,18 @@ export function VoiceStudioModal({
         draw();
       }
     } catch (err) {
+      if (!isMountedRef.current || recordingAttemptRef.current !== attempt) return;
+      await releaseAssistantMute();
       const msg = err instanceof Error ? err.message : "无法开启麦克风，请检查浏览器权限";
       setCloneError(`麦克风采集失败: ${msg}`);
       setCloneStage("ready");
+    } finally {
+      if (recordingAttemptRef.current === attempt) {
+        recordingStartInFlightRef.current = false;
+        if (isMountedRef.current) setIsStartingRecording(false);
+      }
     }
-  }, [cleanupRecording, cloneName]);
+  }, [cleanupRecording, cloneName, onStartRecordingVoice, releaseAssistantMute]);
 
   const stopRecording = useCallback(() => {
     if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
@@ -364,6 +447,10 @@ export function VoiceStudioModal({
 
   /* ====================== 提交克隆至 SpeechRail ====================== */
   const handleSubmitClone = useCallback(async () => {
+    if (!canClone) {
+      setCloneError("当前 TTS 模型不支持声音克隆，请切换至 Quality / VoiceDesign 配置");
+      return;
+    }
     if (!recordedBlob) {
       setCloneError("请先完成一段语音录制");
       return;
@@ -390,17 +477,7 @@ export function VoiceStudioModal({
       formData.append("ref_text", activePrompt.script.trim());
       formData.append("name", cloneName.trim());
 
-      const resp = await fetch(apiUrl("/v1/voices/clone"), {
-        method: "POST",
-        body: formData,
-      });
-
-      if (!resp.ok) {
-        const errorData = await resp.json().catch(() => ({}));
-        throw new Error(errorData.detail || `音色克隆提交失败 (HTTP ${resp.status})`);
-      }
-
-      const createdVoice = (await resp.json()) as VoiceCatalogItem;
+      const createdVoice = await voiceService.clone(formData);
       setLastClonedVoice(createdVoice);
       setCloneStage("success");
       onVoiceCreated(createdVoice);
@@ -411,26 +488,19 @@ export function VoiceStudioModal({
       setCloneStage("recorded");
       showToast(msg, "error");
     }
-  }, [recordedBlob, recordingSeconds, cloneName, activePrompt.script, onVoiceCreated]);
+  }, [canClone, recordedBlob, recordingSeconds, cloneName, activePrompt.script, onVoiceCreated]);
 
   /* ====================== 试听生成与播放 ====================== */
   const handleAuditionVoice = useCallback(async (vItem: VoiceCatalogItem) => {
     if (auditioningVoiceId) return;
     setAuditioningVoiceId(vItem.id);
     try {
-      const resp = await fetch(apiUrl("/v1/audio/speech"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: "speechrail/qwen3-tts",
-          input: `你好，我是${vItem.name}，正在为你进行实时试听播放。`,
-          voice: vItem.id,
-        }),
+      const blob = await voiceService.speech({
+        model: SPEECHRAIL_TTS_MODEL,
+        input: `你好，我是${vItem.name}，正在为你进行实时试听播放。`,
+        voice: vItem.id,
+        response_format: "wav",
       });
-      if (!resp.ok) {
-        throw new Error(`试听生成失败 (HTTP ${resp.status})`);
-      }
-      const blob = await resp.blob();
       await playAudioBlob(blob);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "试听失败";
@@ -442,6 +512,10 @@ export function VoiceStudioModal({
 
   /* ====================== 灵感设计提交 ====================== */
   const handleSubmitDesign = useCallback(async () => {
+    if (!canDesign) {
+      setDesignError("当前 TTS 模型不支持自然语言设计，请切换至 Quality / VoiceDesign 配置");
+      return;
+    }
     const trimmedName = designName.trim();
     const trimmedInstruction = designInstruction.trim();
     if (!trimmedName) {
@@ -457,21 +531,10 @@ export function VoiceStudioModal({
     setIsDesignSubmitting(true);
 
     try {
-      const resp = await fetch(apiUrl("/v1/voices"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          name: trimmedName,
-          instruction: trimmedInstruction,
-        }),
+      const createdVoice = await voiceService.create({
+        name: trimmedName,
+        instruction: trimmedInstruction,
       });
-
-      if (!resp.ok) {
-        const data = await resp.json().catch(() => ({}));
-        throw new Error(data.detail || `创建音色失败 (HTTP ${resp.status})`);
-      }
-
-      const createdVoice = (await resp.json()) as VoiceCatalogItem;
       showToast(`专属设计音色「${createdVoice.name}」已创建`, "success");
       onVoiceCreated(createdVoice);
       onSelectVoice(createdVoice.id);
@@ -483,7 +546,7 @@ export function VoiceStudioModal({
     } finally {
       setIsDesignSubmitting(false);
     }
-  }, [designName, designInstruction, onVoiceCreated, onSelectVoice, onClose]);
+  }, [canDesign, designName, designInstruction, onVoiceCreated, onSelectVoice, onClose]);
 
   const filteredVoices = availableVoices.filter((v) => {
     if (filterMode === "all") return true;
@@ -643,32 +706,42 @@ export function VoiceStudioModal({
           <main className="voice-forge-panel">
             {/* Forge Tabs */}
             <div className="voice-forge-tabs">
-              <button
-                type="button"
-                className={`forge-tab-btn ${activeTab === "clone" ? "active" : ""}`}
-                onClick={() => setActiveTab("clone")}
-              >
-                <span className="tab-icon">🎙️</span>
-                <div className="tab-text-wrap">
-                  <span className="tab-title">声音克隆 (ICL 录音克隆)</span>
-                  <span className="tab-desc">朗读精选引导文案 · 提取声学特征分身</span>
-                </div>
-              </button>
-              <button
-                type="button"
-                className={`forge-tab-btn ${activeTab === "design" ? "active" : ""}`}
-                onClick={() => setActiveTab("design")}
-              >
-                <span className="tab-icon">✨</span>
-                <div className="tab-text-wrap">
-                  <span className="tab-title">自然语言设计 (Prompt 定制)</span>
-                  <span className="tab-desc">使用自然语言描述 · 塑造全新虚拟音色</span>
-                </div>
-              </button>
+              {canClone && (
+                <button
+                  type="button"
+                  className={`forge-tab-btn ${selectedTab === "clone" ? "active" : ""}`}
+                  onClick={() => setActiveTab("clone")}
+                >
+                  <span className="tab-icon">🎙️</span>
+                  <div className="tab-text-wrap">
+                    <span className="tab-title">声音克隆 (ICL 录音克隆)</span>
+                    <span className="tab-desc">朗读精选引导文案 · 提取声学特征分身</span>
+                  </div>
+                </button>
+              )}
+              {canDesign && (
+                <button
+                  type="button"
+                  className={`forge-tab-btn ${selectedTab === "design" ? "active" : ""}`}
+                  onClick={() => setActiveTab("design")}
+                >
+                  <span className="tab-icon">✨</span>
+                  <div className="tab-text-wrap">
+                    <span className="tab-title">自然语言设计 (Prompt 定制)</span>
+                    <span className="tab-desc">使用自然语言描述 · 塑造全新虚拟音色</span>
+                  </div>
+                </button>
+              )}
             </div>
 
+            {!canClone && !canDesign && (
+              <div className="forge-error-banner" role="alert">
+                ⚠️ 当前 TTS 模型不支持声音创设，请切换至 Quality / VoiceDesign 配置。
+              </div>
+            )}
+
             {/* Tab 1: 声音克隆 (Voice Clone) 创设流程 */}
-            {activeTab === "clone" && (
+            {selectedTab === "clone" && canClone && (
               <div className="clone-forge-container">
                 {/* 步骤 1: 提词引导与声学校准 */}
                 <section className="clone-step-section">
@@ -736,9 +809,11 @@ export function VoiceStudioModal({
                         type="button"
                         className="btn-record-primary"
                         onClick={() => void startRecording()}
+                        disabled={isStartingRecording}
+                        aria-busy={isStartingRecording}
                       >
                         <span className="record-dot" />
-                        <span>开始录音朗读</span>
+                        <span>{isStartingRecording ? "正在准备麦克风..." : "开始录音朗读"}</span>
                       </button>
                     )}
 
@@ -856,7 +931,7 @@ export function VoiceStudioModal({
             )}
 
             {/* Tab 2: 灵感设计 (Voice Design) */}
-            {activeTab === "design" && (
+            {selectedTab === "design" && canDesign && (
               <div className="design-forge-container">
                 <div className="forge-field">
                   <label htmlFor="design-name-input" className="forge-label">
@@ -938,17 +1013,12 @@ export function VoiceStudioModal({
                         }
                         setIsPlayingDesignPreview(true);
                         try {
-                          const resp = await fetch(apiUrl("/v1/audio/speech"), {
-                            method: "POST",
-                            headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({
-                              model: "speechrail/qwen3-tts",
-                              input: designPreviewText.trim() || "你好，很高兴与你对话。",
-                              instruction: designInstruction.trim(),
-                            }),
+                          const blob = await voiceService.preview({
+                            model: SPEECHRAIL_TTS_MODEL,
+                            input: designPreviewText.trim() || "你好，很高兴与你对话。",
+                            instruction: designInstruction.trim(),
+                            response_format: "wav",
                           });
-                          if (!resp.ok) throw new Error("试听生成失败");
-                          const blob = await resp.blob();
                           await playAudioBlob(blob);
                         } catch (err) {
                           const msg = err instanceof Error ? err.message : "试听失败";
@@ -957,12 +1027,17 @@ export function VoiceStudioModal({
                           setIsPlayingDesignPreview(false);
                         }
                       }}
-                      disabled={isPlayingDesignPreview || !designInstruction.trim()}
+                      disabled={!canPreview || isPlayingDesignPreview || !designInstruction.trim()}
                     >
                       <SoundWaveAnimatedIcon size={13} isPlaying={isPlayingDesignPreview} />
                       <span>{isPlayingDesignPreview ? "生成播放中..." : "试听效果"}</span>
                     </button>
                   </div>
+                  {!canPreview && (
+                    <div className="forge-capability-hint" role="status">
+                      当前模型不支持自然语言试听。
+                    </div>
+                  )}
                 </div>
 
                 {designError && (
@@ -976,7 +1051,7 @@ export function VoiceStudioModal({
                     type="button"
                     className="btn-save-design"
                     onClick={() => void handleSubmitDesign()}
-                    disabled={isDesignSubmitting || !designName.trim() || !designInstruction.trim()}
+                    disabled={!canDesign || isDesignSubmitting || !designName.trim() || !designInstruction.trim()}
                   >
                     {isDesignSubmitting ? "正在固化保存..." : "固化并设为助理声音"}
                   </button>

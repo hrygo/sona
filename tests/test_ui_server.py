@@ -654,6 +654,81 @@ class TestServices:
 
 
 class TestVoices:
+    def test_models_proxies_speechrail_capabilities_and_request_metadata(self) -> None:
+        """模型清单透传 TTS 能力、request id 与错误重试头。"""
+        mock_settings = Settings(
+            bridge={"host": "127.0.0.1", "port": 9999},
+            subtitles={"host": "127.0.0.1", "port": 9999},
+            interaction={
+                "llm_base_url": "http://127.0.0.1:9997/v1",
+                "speechrail_tts_rest_url": "http://127.0.0.1:9998/v1",
+                "speechrail_api_key": "tts-key",
+            },
+        )
+        app = create_app(mock_settings, initialize_meeting=False)
+        mock_resp = Mock(status_code=200)
+        mock_resp.content = (
+            b'{"object":"list","data":[{"id":"speechrail/qwen3-tts",'
+            b'"capabilities":{"supports_preview":true,"supports_clone":true,'
+            b'"supports_instruction":true}}]}'
+        )
+        mock_resp.headers = {
+            "content-type": "application/json",
+        }
+
+        with patch("sona.ui.server.UIRuntime") as fake_cls, patch(
+            "sona.ui.http_routes.httpx.AsyncClient.get",
+            new_callable=AsyncMock,
+            return_value=mock_resp,
+        ) as get:
+            fake_cls.return_value.start = AsyncMock()
+            fake_cls.return_value.stop = AsyncMock()
+            with TestClient(app) as client:
+                response = client.get(
+                    "/v1/models",
+                    headers={"X-Request-ID": "models-client-1"},
+                )
+
+        assert response.status_code == 200
+        assert response.json()["data"][0]["capabilities"]["supports_preview"] is True
+        get.assert_awaited_once()
+        assert get.call_args.args[0] == "http://127.0.0.1:9998/v1/models"
+        assert get.call_args.kwargs["headers"] == {
+            "X-Request-ID": "models-client-1",
+            "Authorization": "Bearer tts-key",
+        }
+
+    def test_models_speechrail_down_returns_503(self) -> None:
+        """模型能力发现不可达时返回可重试的 503。"""
+        mock_settings = Settings(
+            bridge={"host": "127.0.0.1", "port": 9999},
+            subtitles={"host": "127.0.0.1", "port": 9999},
+            interaction={"llm_base_url": "http://127.0.0.1:9997/v1"},
+        )
+        app = create_app(mock_settings, initialize_meeting=False)
+
+        with patch("sona.ui.server.UIRuntime") as fake_cls, patch(
+            "sona.ui.http_routes.httpx.AsyncClient.get",
+            new_callable=AsyncMock,
+            side_effect=httpx.ConnectError("refused"),
+        ):
+            fake_cls.return_value.start = AsyncMock()
+            fake_cls.return_value.stop = AsyncMock()
+            with TestClient(app) as client:
+                response = client.get(
+                    "/v1/models",
+                    headers={"X-Request-ID": "models-client-2"},
+                )
+
+        assert response.status_code == 503
+        assert response.json()["error"] == {
+            "code": "speechrail_unavailable",
+            "message": "SpeechRail 模型能力不可用",
+            "type": "server_error",
+            "request_id": "models-client-2",
+            "retryable": True,
+        }
+
     def test_voices_proxies_from_speechrail(self) -> None:
         """/v1/voices 代理 SpeechRail 预置音色目录。"""
         mock_settings = Settings(
@@ -676,6 +751,11 @@ class TestVoices:
                 {"id": "warm", "available": True},
             ],
         }
+        mock_resp.content = (
+            b'{"object":"list","data":[{"id":"default","available":true},'
+            b'{"id":"warm","available":true}]}'
+        )
+        mock_resp.headers = {"content-type": "application/json"}
 
         with patch("sona.ui.server.UIRuntime") as fake_cls, patch(
             "sona.ui.http_routes.httpx.AsyncClient.get",
@@ -731,8 +811,284 @@ class TestVoices:
             "Authorization": "Bearer tts-key",
         }
 
-    def test_voices_speechrail_down_returns_502(self) -> None:
-        """SpeechRail 不可达时返回 502，不抛未处理异常。"""
+    def test_speech_proxy_preserves_upstream_validation_error(self) -> None:
+        """标准 TTS 的上游 4xx 必须原样返回，供 OpenAI 兼容客户端识别。"""
+        mock_response = Mock(status_code=422)
+        mock_response.content = (
+            b'{"error":{"code":"voice_required","message":"voice is required",'
+            b'"request_id":"speech-req-1","retryable":false}}'
+        )
+        mock_response.headers = {"content-type": "application/json"}
+
+        with (
+            patch(
+                "sona.ui.http_routes.httpx.AsyncClient.post",
+                new_callable=AsyncMock,
+                return_value=mock_response,
+            ) as post,
+            _running_client(_FakeRuntime(mode=RuntimeMode.IDLE)) as client,
+        ):
+            response = client.post(
+                "/v1/audio/speech",
+                json={"model": "speechrail/qwen3-tts", "input": "你好"},
+            )
+
+        assert response.status_code == 422
+        assert response.json()["error"]["code"] == "voice_required"
+        assert response.json()["error"]["request_id"] == "speech-req-1"
+        post.assert_awaited_once()
+
+    def test_clone_streams_multipart_without_local_parsing(self) -> None:
+        """clone 透传原始 multipart，避免 sona 依赖 python-multipart 和二次缓冲。"""
+        mock_response = Mock(status_code=201)
+        mock_response.content = '{"id":"clone-1","name":"测试分身"}'.encode()
+        mock_response.headers = {"content-type": "application/json"}
+        forwarded_body: dict[str, bytes] = {}
+
+        async def capture_upstream(_url: str, **kwargs: Any) -> Mock:
+            forwarded_body["body"] = b"".join(
+                [chunk async for chunk in kwargs["content"]]
+            )
+            return mock_response
+
+        with (
+            patch(
+                "sona.ui.http_routes.httpx.AsyncClient.post",
+                new_callable=AsyncMock,
+                side_effect=capture_upstream,
+            ) as post,
+            _running_client(_FakeRuntime(mode=RuntimeMode.IDLE)) as client,
+        ):
+            response = client.post(
+                "/v1/voices/clone",
+                data={"name": "测试分身", "ref_text": "白日依山尽"},
+                files={"audio": ("recording.webm", b"x" * 2048, "audio/webm")},
+            )
+
+        assert response.status_code == 201
+        assert response.json()["id"] == "clone-1"
+        post.assert_awaited_once()
+        kwargs = post.call_args.kwargs
+        assert kwargs["headers"]["Content-Type"].startswith("multipart/form-data; boundary=")
+        assert hasattr(kwargs["content"], "__aiter__")
+        assert "files" not in kwargs
+        assert "data" not in kwargs
+        assert b'name="name"' in forwarded_body["body"]
+        assert b'name="ref_text"' in forwarded_body["body"]
+        assert b'filename="recording.webm"' in forwarded_body["body"]
+
+    def test_voice_preview_proxies_to_extension_and_preserves_error(self) -> None:
+        """自然语言试听走独立 preview 扩展，并保留 SpeechRail 错误信封。"""
+        mock_response = Mock(status_code=422)
+        mock_response.content = (
+            b'{"error":{"code":"voice_preview_unsupported",'
+            b'"message":"preview is unavailable","request_id":"preview-req-1",'
+            b'"retryable":false}}'
+        )
+        mock_response.headers = {"content-type": "application/json"}
+
+        with (
+            patch(
+                "sona.ui.http_routes.httpx.AsyncClient.post",
+                new_callable=AsyncMock,
+                return_value=mock_response,
+            ) as post,
+            _running_client(_FakeRuntime(mode=RuntimeMode.IDLE)) as client,
+        ):
+            response = client.post(
+                "/v1/voices/previews",
+                json={
+                    "model": "speechrail/qwen3-tts",
+                    "input": "你好",
+                    "instruction": "温柔知性、吐字清晰",
+                    "response_format": "wav",
+                },
+            )
+
+        assert response.status_code == 422
+        assert response.json()["error"]["code"] == "voice_preview_unsupported"
+        assert response.json()["error"]["request_id"] == "preview-req-1"
+        post.assert_awaited_once()
+        assert post.call_args.args[0].endswith("/v1/voices/previews")
+
+    def test_voice_preview_network_failure_returns_stable_retryable_error(self) -> None:
+        with (
+            patch(
+                "sona.ui.http_routes.httpx.AsyncClient.post",
+                new_callable=AsyncMock,
+                side_effect=httpx.ConnectError("refused"),
+            ) as post,
+            _running_client(_FakeRuntime(mode=RuntimeMode.IDLE)) as client,
+        ):
+            response = client.post(
+                "/v1/voices/previews",
+                json={
+                    "model": "speechrail/qwen3-tts",
+                    "input": "你好",
+                    "instruction": "温柔知性",
+                },
+                headers={"X-Request-ID": "preview-client-1"},
+            )
+
+        assert response.status_code == 503
+        assert response.json()["error"] == {
+            "code": "speechrail_unavailable",
+            "message": "SpeechRail 声音试听服务不可用",
+            "type": "server_error",
+            "request_id": "preview-client-1",
+            "retryable": True,
+        }
+        post.assert_awaited_once()
+
+    def test_voice_preview_timeout_returns_backend_timeout(self) -> None:
+        with (
+            patch(
+                "sona.ui.http_routes.httpx.AsyncClient.post",
+                new_callable=AsyncMock,
+                side_effect=httpx.ReadTimeout("timed out"),
+            ) as post,
+            _running_client(_FakeRuntime(mode=RuntimeMode.IDLE)) as client,
+        ):
+            response = client.post(
+                "/v1/voices/previews",
+                json={
+                    "model": "speechrail/qwen3-tts",
+                    "input": "你好",
+                    "instruction": "温柔知性",
+                },
+            )
+
+        assert response.status_code == 503
+        assert response.json()["error"]["code"] == "backend_timeout"
+        assert response.json()["error"]["retryable"] is True
+        post.assert_awaited_once()
+
+    def test_voice_preview_error_without_content_type_is_json(self) -> None:
+        mock_response = Mock(status_code=503)
+        mock_response.content = (
+            b'{"error":{"message":"not ready","type":"server_error",'
+            b'"code":"backend_not_ready","request_id":"preview-req-2",'
+            b'"retryable":true}}'
+        )
+        mock_response.headers = {}
+
+        with (
+            patch(
+                "sona.ui.http_routes.httpx.AsyncClient.post",
+                new_callable=AsyncMock,
+                return_value=mock_response,
+            ),
+            _running_client(_FakeRuntime(mode=RuntimeMode.IDLE)) as client,
+        ):
+            response = client.post(
+                "/v1/voices/previews",
+                json={
+                    "model": "speechrail/qwen3-tts",
+                    "input": "你好",
+                    "instruction": "温柔知性",
+                },
+            )
+
+        assert response.status_code == 503
+        assert response.headers["content-type"].startswith("application/json")
+        assert response.json()["error"]["code"] == "backend_not_ready"
+
+    def test_voice_preview_preserves_retry_after_on_queue_full(self) -> None:
+        mock_response = Mock(status_code=429)
+        mock_response.content = (
+            b'{"error":{"message":"Inference queue is full",'
+            b'"type":"server_error","code":"queue_full",'
+            b'"request_id":"preview-req-3","retryable":true}}'
+        )
+        mock_response.headers = {
+            "content-type": "application/json",
+            "retry-after": "1",
+        }
+
+        with (
+            patch(
+                "sona.ui.http_routes.httpx.AsyncClient.post",
+                new_callable=AsyncMock,
+                return_value=mock_response,
+            ),
+            _running_client(_FakeRuntime(mode=RuntimeMode.IDLE)) as client,
+        ):
+            response = client.post(
+                "/v1/voices/previews",
+                json={
+                    "model": "speechrail/qwen3-tts",
+                    "input": "你好",
+                    "instruction": "温柔知性",
+                },
+            )
+
+        assert response.status_code == 429
+        assert response.headers["retry-after"] == "1"
+        assert response.json()["error"]["code"] == "queue_full"
+
+    def test_clone_rejects_declared_oversize_before_upstream(self) -> None:
+        with (
+            patch(
+                "sona.ui.http_routes.httpx.AsyncClient.post",
+                new_callable=AsyncMock,
+            ) as post,
+            _running_client(_FakeRuntime(mode=RuntimeMode.IDLE)) as client,
+        ):
+            response = client.post(
+                "/v1/voices/clone",
+                content=b"too-small-body-but-declared-large",
+                headers={
+                    "content-type": "multipart/form-data; boundary=sona-test",
+                    "content-length": str(http_routes_module._VOICE_CLONE_MAX_BODY_BYTES + 1),
+                },
+            )
+
+        assert response.status_code == 413
+        assert response.json()["error"]["code"] == "payload_too_large"
+        post.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        ("mode", "owner"),
+        [
+            (RuntimeMode.MEETING, PCMOwner.MEETING),
+            (RuntimeMode.SUBTITLES, PCMOwner.SUBTITLES),
+        ],
+    )
+    def test_voice_workshop_rejects_pcm_owned_modes(
+        self, mode: RuntimeMode, owner: PCMOwner
+    ) -> None:
+        """会议/字幕占用 PCM 时，工坊操作必须在本地提前拒绝。"""
+        runtime = _FakeRuntime(mode=RuntimeMode.IDLE)
+        runtime.force_state(mode, owner, 2)
+
+        with patch(
+            "sona.ui.http_routes.httpx.AsyncClient.post",
+            new_callable=AsyncMock,
+        ) as post, _running_client(runtime) as client:
+            preview = client.post(
+                "/v1/voices/previews",
+                json={
+                    "model": "speechrail/qwen3-tts",
+                    "input": "你好",
+                    "instruction": "温柔知性",
+                },
+            )
+            clone = client.post(
+                "/v1/voices/clone",
+                content=b"not-forwarded",
+                headers={
+                    "content-type": "multipart/form-data; boundary=sona-test",
+                },
+            )
+
+        assert preview.status_code == 409
+        assert preview.json()["error"]["code"] == "mode_conflict"
+        assert clone.status_code == 409
+        assert clone.json()["error"]["code"] == "mode_conflict"
+        post.assert_not_awaited()
+
+    def test_voices_speechrail_down_returns_503(self) -> None:
+        """SpeechRail 不可达时返回可重试的 503。"""
         mock_settings = Settings(
             bridge={"host": "127.0.0.1", "port": 9999},
             subtitles={"host": "127.0.0.1", "port": 9999},
@@ -749,7 +1105,7 @@ class TestVoices:
             fake_cls.return_value.stop = AsyncMock()
             with TestClient(app) as client:
                 resp = client.get("/v1/voices")
-                assert resp.status_code == 502
+                assert resp.status_code == 503
 
     def test_create_voice_proxies_to_speechrail(self) -> None:
         """POST /v1/voices 代理到 SpeechRail 创建自定义音色。"""
@@ -818,7 +1174,7 @@ class TestVoices:
         assert delete.call_args.args[0] == "http://127.0.0.1:9998/v1/voices/custom_test"
         assert delete.call_args.kwargs["headers"]["Authorization"] == "Bearer tts-key"
 
-    def test_create_voice_speechrail_down_returns_502(self) -> None:
+    def test_create_voice_speechrail_down_returns_503(self) -> None:
         mock_settings = Settings(
             bridge={"host": "127.0.0.1", "port": 9999},
             subtitles={"host": "127.0.0.1", "port": 9999},
@@ -834,7 +1190,7 @@ class TestVoices:
             fake_cls.return_value.stop = AsyncMock()
             with TestClient(app) as client:
                 resp = client.post("/v1/voices", json={"name": "test", "instruction": "test"})
-                assert resp.status_code == 502
+                assert resp.status_code == 503
 
 
 

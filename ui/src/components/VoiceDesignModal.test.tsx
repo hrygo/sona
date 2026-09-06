@@ -2,6 +2,11 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { VoiceDesignModal } from "./VoiceDesignModal";
+import type { VoiceModelCapabilities } from "../contracts/voiceContract";
+
+vi.mock("../utils/audioPlayback", () => ({
+  playAudioBlob: vi.fn().mockResolvedValue(undefined),
+}));
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 let root: Root;
@@ -23,9 +28,15 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-function renderModal() {
+function renderModal(modelCapabilities?: VoiceModelCapabilities) {
   act(() => {
-    root.render(<VoiceDesignModal onCancel={onCancel} onCreated={onCreated} />);
+    root.render(
+      <VoiceDesignModal
+        modelCapabilities={modelCapabilities}
+        onCancel={onCancel}
+        onCreated={onCreated}
+      />,
+    );
   });
 }
 
@@ -51,6 +62,32 @@ it("fills name and instruction when inspiration chip is clicked", () => {
   const descInput = container.querySelector<HTMLTextAreaElement>("#voice-design-desc");
   expect(nameInput?.value).toBe("知性女声");
   expect(descInput?.value).toContain("温柔轻快");
+});
+
+it("sends legacy design preview to the dedicated preview extension", async () => {
+  const fetchMock = vi.fn().mockResolvedValue({
+    ok: true,
+    status: 200,
+    blob: async () => new Blob(["audio"], { type: "audio/wav" }),
+  });
+  vi.stubGlobal("fetch", fetchMock);
+
+  renderModal();
+  const warmChip = Array.from(container.querySelectorAll<HTMLButtonElement>(".voice-inspiration-chip")).find((b) =>
+    b.textContent?.includes("温柔知性"),
+  )!;
+  act(() => warmChip.click());
+  const previewButton = container.querySelector<HTMLButtonElement>(".btn-voice-design-preview")!;
+  await act(async () => {
+    previewButton.click();
+    await Promise.resolve();
+  });
+
+  const previewCall = fetchMock.mock.calls.find(([url]) => String(url).includes("/v1/voices/previews"));
+  expect(previewCall).toBeDefined();
+  const payload = JSON.parse((previewCall?.[1] as RequestInit).body as string) as Record<string, unknown>;
+  expect(payload.instruction).toContain("温柔轻快");
+  expect(payload.voice).toBeUndefined();
 });
 
 it("submits new voice and calls onCreated on success", async () => {
@@ -108,4 +145,16 @@ it("calls onCancel when close or cancel button is clicked", () => {
     cancelBtn!.click();
   });
   expect(onCancel).toHaveBeenCalled();
+});
+
+it("disables design actions when the active model does not support instruction design", () => {
+  renderModal({
+    supports_preview: false,
+    supports_clone: false,
+    supports_instruction: false,
+  });
+
+  expect(container.textContent).toContain("当前 TTS 模型不支持自然语言设计");
+  expect(container.querySelector<HTMLButtonElement>(".btn-voice-design-preview")?.disabled).toBe(true);
+  expect(container.querySelector<HTMLButtonElement>(".btn-save-voice")?.disabled).toBe(true);
 });

@@ -1,12 +1,17 @@
 import { useCallback, useEffect, useState } from "react";
-import { apiUrl } from "../config/runtimeConfig";
+import { SPEECHRAIL_TTS_MODEL, voiceService } from "../services/voiceService";
 import { playAudioBlob } from "../utils/audioPlayback";
 import { showToast } from "./Toast";
 import { SoundWaveAnimatedIcon } from "./Icons";
 import type { VoiceCatalogItem } from "./assistantPresentation";
+import {
+  supportsVoiceCapability,
+  type VoiceModelCapabilities,
+} from "../contracts/voiceContract";
 import "./VoiceDesignModal.css";
 
 interface VoiceDesignModalProps {
+  readonly modelCapabilities?: VoiceModelCapabilities;
   readonly onCancel: () => void;
   readonly onCreated: (voice: VoiceCatalogItem) => void;
 }
@@ -45,7 +50,13 @@ const INSPIRATIONS: readonly InspirationPrompt[] = [
   },
 ];
 
-export function VoiceDesignModal({ onCancel, onCreated }: VoiceDesignModalProps) {
+export function VoiceDesignModal({
+  modelCapabilities,
+  onCancel,
+  onCreated,
+}: VoiceDesignModalProps) {
+  const canPreview = supportsVoiceCapability(modelCapabilities, "supports_preview");
+  const canDesign = supportsVoiceCapability(modelCapabilities, "supports_instruction");
   const [name, setName] = useState("");
   const [instruction, setInstruction] = useState("");
   const [previewText, setPreviewText] = useState("你好呀，我是你刚刚设计的专属音色，很高兴与你实时对话。");
@@ -70,6 +81,10 @@ export function VoiceDesignModal({ onCancel, onCreated }: VoiceDesignModalProps)
   }, []);
 
   const handlePreview = useCallback(async () => {
+    if (!canPreview) {
+      setErrorMsg("当前模型不支持自然语言试听");
+      return;
+    }
     if (!instruction.trim()) {
       setErrorMsg("请先输入音色特征描述，或选择上方灵感胶囊");
       return;
@@ -77,19 +92,12 @@ export function VoiceDesignModal({ onCancel, onCreated }: VoiceDesignModalProps)
     setErrorMsg("");
     setIsPlayingPreview(true);
     try {
-      const resp = await fetch(apiUrl("/v1/audio/speech"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: "speechrail/qwen3-tts",
-          input: previewText.trim() || "你好，很高兴与你对话。",
-          instruction: instruction.trim(),
-        }),
+      const blob = await voiceService.preview({
+        model: SPEECHRAIL_TTS_MODEL,
+        input: previewText.trim() || "你好，很高兴与你对话。",
+        instruction: instruction.trim(),
+        response_format: "wav",
       });
-      if (!resp.ok) {
-        throw new Error(`试听生成失败 (HTTP ${resp.status})`);
-      }
-      const blob = await resp.blob();
       await playAudioBlob(blob);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "语音试听生成失败，请检查服务状态";
@@ -98,9 +106,13 @@ export function VoiceDesignModal({ onCancel, onCreated }: VoiceDesignModalProps)
     } finally {
       setIsPlayingPreview(false);
     }
-  }, [instruction, previewText]);
+  }, [canPreview, instruction, previewText]);
 
   const handleSubmit = useCallback(async () => {
+    if (!canDesign) {
+      setErrorMsg("当前 TTS 模型不支持自然语言设计");
+      return;
+    }
     const trimmedName = name.trim();
     const trimmedInstruction = instruction.trim();
 
@@ -117,21 +129,10 @@ export function VoiceDesignModal({ onCancel, onCreated }: VoiceDesignModalProps)
     setIsSubmitting(true);
 
     try {
-      const resp = await fetch(apiUrl("/v1/voices"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          name: trimmedName,
-          instruction: trimmedInstruction,
-        }),
+      const createdVoice = await voiceService.create({
+        name: trimmedName,
+        instruction: trimmedInstruction,
       });
-
-      if (!resp.ok) {
-        const data = await resp.json().catch(() => ({}));
-        throw new Error(data.detail || `创建音色失败 (HTTP ${resp.status})`);
-      }
-
-      const createdVoice = (await resp.json()) as VoiceCatalogItem;
       showToast(`专属音色「${createdVoice.name}」已创建并应用`, "success");
       onCreated(createdVoice);
     } catch (err) {
@@ -141,7 +142,7 @@ export function VoiceDesignModal({ onCancel, onCreated }: VoiceDesignModalProps)
     } finally {
       setIsSubmitting(false);
     }
-  }, [name, instruction, onCreated]);
+  }, [canDesign, name, instruction, onCreated]);
 
   return (
     <div
@@ -162,6 +163,16 @@ export function VoiceDesignModal({ onCancel, onCreated }: VoiceDesignModalProps)
         </div>
 
         <div className="voice-design-body">
+          {!canDesign && (
+            <div className="voice-design-error" role="alert">
+              ⚠️ 当前 TTS 模型不支持自然语言设计，请切换至 Quality / VoiceDesign 配置。
+            </div>
+          )}
+          {canDesign && !canPreview && (
+            <div className="voice-design-error" role="status">
+              当前模型不支持自然语言试听，但仍可保存设计音色。
+            </div>
+          )}
           <div className="voice-design-field">
             <label htmlFor="voice-design-name" className="voice-design-label">
               音色名称 <span className="voice-design-required">*</span>
@@ -229,7 +240,7 @@ export function VoiceDesignModal({ onCancel, onCreated }: VoiceDesignModalProps)
                 type="button"
                 className={`btn-voice-design-preview ${isPlayingPreview ? "playing" : ""}`}
                 onClick={() => void handlePreview()}
-                disabled={isPlayingPreview || !instruction.trim()}
+                disabled={!canPreview || isPlayingPreview || !instruction.trim()}
               >
                 <SoundWaveAnimatedIcon size={14} isPlaying={isPlayingPreview} />
                 <span>{isPlayingPreview ? "合成播放中..." : "试听音色效果"}</span>
@@ -265,7 +276,7 @@ export function VoiceDesignModal({ onCancel, onCreated }: VoiceDesignModalProps)
               type="button"
               className="btn-primary btn-save-voice"
               onClick={() => void handleSubmit()}
-              disabled={isSubmitting || !name.trim() || !instruction.trim()}
+              disabled={!canDesign || isSubmitting || !name.trim() || !instruction.trim()}
             >
               {isSubmitting ? "正在固化保存..." : "固化并锁定音色"}
             </button>

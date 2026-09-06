@@ -180,3 +180,17 @@ sona 当前将「语音助手、实时字幕、会议助手」三路实时链路
 - `sona` 三路链路统一使用 `speechrail-openai-realtime` 与 `/v1/realtime`，不再提供 v2 fallback。
 
 原“若无法提供实时分人则保留 v2”的备选路径不再适用；当前实现与 [SpeechRail OpenAI Realtime 契约](../../../SpeechRail/contracts/realtime-openai.md) 及 SpeechRail ADR-0009 对齐。
+
+## 11. 声音工坊 HTTP 代理约定（2026-09-06）
+
+为保持 OpenAI 兼容协议面稳定，sona 的声音工坊遵循以下边界：
+
+- 标准 `POST /v1/audio/speech` 继续要求 `voice`，sona 不向该端点注入单数 `instruction`；SpeechRail 的状态码、正文和 `Content-Type` 原样透传。
+- 模型能力通过 `GET /v1/models` 原样代理；Sona 只消费 SpeechRail 返回的 `capabilities.supports_preview`、`supports_clone`、`supports_instruction`，不根据 profile 名称自行推断。未部署或旧版 SpeechRail 缺失能力字段时，前端保持兼容可用状态。
+- 自然语言试听使用独立的 `POST /v1/voices/previews` 扩展，请求体包含 `model`、`input`、`instruction` 和可选的 `seed`、`speed`、`language`、`response_format`；预览不在 sona 创建或持久化 `VoiceProfile`。
+- `POST /v1/voices/clone` 的 `multipart/form-data` 在 sona 侧执行 15 MiB 有界原始流转发，保留 multipart boundary 和 `Content-Length`，不使用本地 multipart 解析，也不落盘音频。
+- SpeechRail 上游 4xx/5xx 保留结构化 `type`、`code`、`request_id`、`retryable`，并转发 `Retry-After` 等安全响应头；Sona 自身的连接失败返回 `503 speechrail_unavailable`，请求超时返回 `503 backend_timeout`，协议异常返回 `502 speechrail_bad_gateway`。当前 SpeechRail preview 契约未提供生成 seed 响应头，Sona 不自行制造该字段。
+- 声音工坊 REST 请求使用 `SONA_INTERACTION_SPEECHRAIL_TTS_REQUEST_TIMEOUT_SECS` 控制总超时，默认 `120s`，与 SpeechRail 当前 `request_timeout_seconds` 预算对齐；模型/音色目录探活仍使用 UI 的短探活超时。
+- 会议/字幕独占音频期间，preview、clone、音色创建与删除返回 `409 mode_conflict`；assistant 录音流程由前端先静音后使用浏览器录音。
+
+preview 扩展的 SpeechRail 实现、能力矩阵和 OpenAPI 细节由 [SpeechRail#8](https://github.com/hrygo/SpeechRail/issues/8) 维护。

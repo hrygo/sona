@@ -103,6 +103,12 @@ class InteractionSettings(BaseSettings):
         default="http://127.0.0.1:8201/v1",
         description="SpeechRail TTS REST 试听端点；交互播放走 realtime OpenAI",
     )
+    speechrail_tts_request_timeout_secs: float = Field(
+        default=120.0,
+        gt=0.0,
+        le=3600.0,
+        description="SpeechRail TTS REST 声音工坊请求的总超时（秒）",
+    )
     speechrail_tts_model: str = Field(
         default=SPEECHRAIL_TTS_MODEL,
         description="SpeechRail 公共 TTS 逻辑模型 ID",

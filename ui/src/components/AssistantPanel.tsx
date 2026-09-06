@@ -37,6 +37,7 @@ import {
   getTelemetryBadge,
   PHASE_CONFIG,
   TELEMETRY_HELP_STEPS,
+  type VoiceModelCapabilities,
   type VoiceCatalogItem,
   VOICE_CONFIGS,
   resolveVoiceMode,
@@ -45,8 +46,9 @@ import {
 import { PersonaDialog } from "./PersonaDialog";
 import { VoiceDesignModal } from "./VoiceDesignModal";
 import { VoiceStudioModal } from "./VoiceStudioModal";
+import { VoiceRecordingMicLease } from "./voiceRecordingMicLease";
 import { showToast } from "./Toast";
-import { apiUrl } from "../config/runtimeConfig";
+import { SPEECHRAIL_TTS_MODEL, voiceService } from "../services/voiceService";
 import {
   ActivityIcon,
   BroomIcon,
@@ -204,10 +206,45 @@ export default function AssistantPanel({
   const voice = useUISettingsStore((s) => s.voice);
   const micMuted = useUISettingsStore((s) => s.micMuted);
   const [availableVoices, setAvailableVoices] = useState<readonly VoiceCatalogItem[]>(DEFAULT_SYSTEM_VOICES);
+  const [voiceModelCapabilities, setVoiceModelCapabilities] = useState<VoiceModelCapabilities | undefined>();
   const [isPreviewPlaying, setIsPreviewPlaying] = useState(false);
   const [showVoiceDesignModal, setShowVoiceDesignModal] = useState(false);
   const [showVoiceStudioModal, setShowVoiceStudioModal] = useState(false);
+  const voiceRecordingMicLeaseRef = useRef<VoiceRecordingMicLease | null>(null);
+  if (voiceRecordingMicLeaseRef.current === null) {
+    voiceRecordingMicLeaseRef.current = new VoiceRecordingMicLease();
+  }
   const currentVoiceItem = availableVoices.find((v) => v.id === voice);
+
+  const commandReady = commandSocket.ready;
+  const sendControlCommand = commandSocket.sendCommand;
+
+  const restoreVoiceRecordingMic = useCallback(async () => {
+    await voiceRecordingMicLeaseRef.current!.restore(commandReady, sendControlCommand);
+  }, [commandReady, sendControlCommand]);
+
+  useEffect(() => {
+    if (!commandReady || !voiceRecordingMicLeaseRef.current?.needsRestore) return;
+    void restoreVoiceRecordingMic().catch(() => {
+      showToast("语音助手麦克风恢复失败，请检查控制连接", "error");
+    });
+  }, [commandReady, restoreVoiceRecordingMic]);
+
+  const handleVoiceRecordingStart = useCallback(async () => {
+    const mutedBefore = useUISettingsStore.getState().micMuted;
+    const lease = voiceRecordingMicLeaseRef.current!;
+    lease.begin(mutedBefore);
+    if (mutedBefore) return;
+    if (!commandReady) {
+      lease.cancel();
+      throw new Error("控制端连接中，请稍候后再开始录音");
+    }
+    await sendControlCommand({ cmd: "set_mic_muted", muted: true });
+  }, [commandReady, sendControlCommand]);
+
+  const handleVoiceRecordingStop = useCallback(async () => {
+    await restoreVoiceRecordingMic();
+  }, [restoreVoiceRecordingMic]);
 
   // 打断插话动效监听
   useEffect(() => {
@@ -361,21 +398,18 @@ export default function AssistantPanel({
       let blob: Blob;
       try {
         const previewText = "你好，我是你的语音助手，很高兴为你服务。";
-        const res = await fetch(apiUrl("/v1/audio/speech"), {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            model: "speechrail/qwen3-tts",
-            input: previewText,
-            voice: v,
-            response_format: "wav",
-          }),
+        blob = await voiceService.speech({
+          model: SPEECHRAIL_TTS_MODEL,
+          input: previewText,
+          voice: v,
+          response_format: "wav",
         });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        blob = await res.blob();
       } catch (err) {
         setIsPreviewPlaying(false);
-        showToast("试听请求失败，请确保 SpeechRail 已启动", "error");
+        showToast(
+          err instanceof Error ? err.message : "试听请求失败，请确保 SpeechRail 已启动",
+          "error",
+        );
         return;
       }
 
@@ -398,12 +432,7 @@ export default function AssistantPanel({
       if (!window.confirm(`确定要删除自定义音色「${targetVoice.name}」吗？`)) return;
 
       try {
-        const resp = await fetch(apiUrl(`/v1/voices/${targetVoiceId}`), {
-          method: "DELETE",
-        });
-        if (!resp.ok) {
-          throw new Error(`删除失败 (HTTP ${resp.status})`);
-        }
+        await voiceService.delete(targetVoiceId);
         showToast(`已删除音色「${targetVoice.name}」`, "info");
         setAvailableVoices((prev) => prev.filter((v) => v.id !== targetVoiceId));
         if (voice === targetVoiceId) {
@@ -502,21 +531,18 @@ export default function AssistantPanel({
       showToast("🔊 正在合成语音并朗读...", "info");
 
       try {
-        const res = await fetch(apiUrl("/v1/audio/speech"), {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            model: "speechrail/qwen3-tts",
-            input: text.slice(0, 500),
-            voice,
-            response_format: "wav",
-          }),
+        const blob = await voiceService.speech({
+          model: SPEECHRAIL_TTS_MODEL,
+          input: text.slice(0, 500),
+          voice,
+          response_format: "wav",
         });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const blob = await res.blob();
         await playAudioBlob(blob);
-      } catch {
-        showToast("语音朗读请求失败，请确保 SpeechRail 已启动", "error");
+      } catch (err) {
+        showToast(
+          err instanceof Error ? err.message : "语音朗读请求失败，请确保 SpeechRail 已启动",
+          "error",
+        );
       } finally {
         setPlayingBubbleKey(null);
       }
@@ -594,41 +620,33 @@ export default function AssistantPanel({
   /** 获取音色列表 */
   useEffect(() => {
     let cancelled = false;
-    fetch(apiUrl("/v1/voices"))
-      .then((res) => {
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        return res.json() as Promise<{
-          data?: Array<{
-            id?: unknown;
-            name?: unknown;
-            instruction?: unknown;
-            is_system?: unknown;
-            created_at?: unknown;
-            available?: unknown;
-          }>;
-          available?: unknown;
-        }>;
-      })
-      .then((data) => {
+    voiceService.list()
+      .then((items) => {
         if (cancelled) return;
-        if (Array.isArray(data.data) && data.data.length > 0) {
-          const items: VoiceCatalogItem[] = data.data
-            .filter((item) => item.available !== false && typeof item.id === "string")
-            .map((item) => ({
-              id: item.id as string,
-              name: typeof item.name === "string" ? item.name : (item.id as string),
-              instruction: typeof item.instruction === "string" ? item.instruction : undefined,
-              is_system: item.is_system !== false,
-              created_at: typeof item.created_at === "number" ? item.created_at : undefined,
-              available: item.available !== false,
-            }));
-          if (items.length > 0) {
-            setAvailableVoices(items);
-          }
+        if (items.length > 0) {
+          setAvailableVoices(items);
         }
       })
       .catch(() => {
         // Fallback silently
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  /** 获取 SpeechRail 当前 TTS 模型能力；旧服务缺失该接口时保持兼容。 */
+  useEffect(() => {
+    let cancelled = false;
+    voiceService.models()
+      .then((models) => {
+        if (cancelled) return;
+        const ttsModel = models.find((model) => model.id === SPEECHRAIL_TTS_MODEL)
+          ?? models.find((model) => model.resolves_to === SPEECHRAIL_TTS_MODEL);
+        setVoiceModelCapabilities(ttsModel?.capabilities);
+      })
+      .catch(() => {
+        if (!cancelled) setVoiceModelCapabilities(undefined);
       });
     return () => {
       cancelled = true;
@@ -1255,6 +1273,7 @@ export default function AssistantPanel({
 
       {showVoiceDesignModal && (
         <VoiceDesignModal
+          modelCapabilities={voiceModelCapabilities}
           onCancel={() => setShowVoiceDesignModal(false)}
           onCreated={handleVoiceCreated}
         />
@@ -1264,20 +1283,13 @@ export default function AssistantPanel({
         <VoiceStudioModal
           currentVoiceId={voice}
           availableVoices={availableVoices}
+          modelCapabilities={voiceModelCapabilities}
           onSelectVoice={(vid) => void handleVoiceChange(vid)}
           onVoiceCreated={handleVoiceCreated}
           onVoiceDeleted={(vid) => void handleDeleteVoice(vid)}
           onClose={() => setShowVoiceStudioModal(false)}
-          onStartRecordingVoice={() => {
-            if (!micMuted && commandSocket.ready) {
-              void commandSocket.sendCommand({ cmd: "set_mic_muted", muted: true });
-            }
-          }}
-          onStopRecordingVoice={() => {
-            if (!micMuted && commandSocket.ready) {
-              void commandSocket.sendCommand({ cmd: "set_mic_muted", muted: false });
-            }
-          }}
+          onStartRecordingVoice={handleVoiceRecordingStart}
+          onStopRecordingVoice={handleVoiceRecordingStop}
         />
       )}
     </div>

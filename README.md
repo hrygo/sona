@@ -1,364 +1,265 @@
 # Sona
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/hrygo/sona/main/docs/assets/logo.png" alt="Sona Logo" width="120" onerror="this.style.display='none'"/>
+  <strong>面向 Apple Silicon 的本地实时语音工作台</strong><br />
+  实时语音助手 · 智能会议助手 · 实时字幕 · 会中 Inner OS
 </p>
 
 <p align="center">
-  <strong>全本地、端到端、低延迟的实时语音交互 + 智能会议助手 + 实时语音字幕系统</strong>
+  <a href="README.en.md">English</a> ·
+  <a href="https://github.com/hrygo/sona">GitHub</a> ·
+  <a href="docs/README.md">文档中心</a>
 </p>
 
 <p align="center">
-  <em>专为 Apple Silicon / macOS 打造 • 中文优先 • 100% 离线隐私安全 • 整洁架构</em>
+  <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/Python-3.12-3776AB?style=flat&logo=python&logoColor=white" alt="Python 3.12" /></a>
+  <a href="https://developer.apple.com/macos/"><img src="https://img.shields.io/badge/Platform-macOS%20%7C%20Apple%20Silicon-111111?style=flat&logo=apple&logoColor=white" alt="macOS and Apple Silicon" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green?style=flat" alt="MIT License" /></a>
+  <a href="pyproject.toml"><img src="https://img.shields.io/badge/Status-Beta-orange?style=flat" alt="Beta" /></a>
+  <a href="ui/package.json"><img src="https://img.shields.io/badge/Frontend-React%2019%20%7C%20Vite%207-61DAFB?style=flat&logo=react&logoColor=white" alt="React 19 and Vite 7" /></a>
 </p>
 
-<p align="center">
-  <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/Python-3.12-3776AB?style=flat&logo=python&logoColor=white" alt="Python 3.12"/></a>
-  <a href="https://developer.apple.com/macos/"><img src="https://img.shields.io/badge/Platform-macOS%20%7C%20Apple%20Silicon-black?style=flat&logo=apple&logoColor=white" alt="Platform"/></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green.svg?style=flat" alt="License"/></a>
-  <a href="https://github.com/astral-sh/ruff"><img src="https://img.shields.io/badge/Code%20Style-Ruff-black?style=flat&logo=ruff&logoColor=white" alt="Code Style: Ruff"/></a>
-  <a href="https://mypy.readthedocs.io/"><img src="https://img.shields.io/badge/Type%20Checked-Mypy%20Strict-blue?style=flat" alt="Mypy Strict"/></a>
-  <a href="tests/"><img src="https://img.shields.io/badge/Coverage-83.2%25-brightgreen.svg?style=flat" alt="Coverage"/></a>
-  <a href="ui/"><img src="https://img.shields.io/badge/Frontend-React%2019%20%7C%20Vite%207-61DAFB?style=flat&logo=react&logoColor=white" alt="Frontend"/></a>
-  <a href="CONTRIBUTING.md"><img src="https://img.shields.io/badge/PRs-Welcome-brightgreen.svg?style=flat" alt="PRs Welcome"/></a>
-</p>
+> **状态：Beta。** Sona 当前面向 Apple Silicon / macOS 优化。它依赖本机运行的 [SpeechRail](https://github.com/hrygo/SpeechRail) 与 [LM Studio](https://lmstudio.ai/)，不是开箱即用的单体安装包。
 
-<p align="center">
-  <a href="#-核心特性">✨ 核心特性</a> •
-  <a href="#️-系统架构与数据流">🏗️ 系统架构</a> •
-  <a href="#-软硬件要求">💻 软硬件要求</a> •
-  <a href="#-5-分钟快速上手">🚀 快速上手</a> •
-  <a href="#️-sona-控制台使用指南">🖥️ 控制台指南</a> •
-  <a href="#️-核心配置项与环境变量">⚙️ 配置说明</a> •
-  <a href="#️-质量门禁与工程规范">🛡️ 质量门禁</a> •
-  <a href="#-深入技术文档">📖 文档索引</a>
-</p>
+## 目录
 
----
+- [项目简介](#项目简介)
+- [核心能力](#核心能力)
+- [架构概览](#架构概览)
+- [运行要求](#运行要求)
+- [快速开始](#快速开始)
+- [使用方式](#使用方式)
+- [配置](#配置)
+- [数据与隐私边界](#数据与隐私边界)
+- [开发与验证](#开发与验证)
+- [仓库结构](#仓库结构)
+- [文档与协作](#文档与协作)
+- [许可证](#许可证)
 
-> 💡 **语源寓意**：`Sona` 源自拉丁语动词 *sonāre*（名词格/祈使语态，意为「**发出声音、回响、共鸣**」），象征着声音在人与机器之间的自然流转与智慧共振。
+## 项目简介
 
----
+Sona 是一套中文优先、全本地优先的实时语音工作台：将语音助手、会议转录与说话人分离、实时字幕和会中私密副驾驶统一到一个运行时中。
 
-## 🌟 核心特性
+它的核心约束是 **单一音频所有者**：`AudioHub` 独占采集麦克风 PCM，`RuntimeModeCoordinator` 在 `assistant`、`subtitles`、`meeting` 与 `idle` 模式之间仲裁，避免多个任务同时消费同一条音频流。
 
-### 🤖 全双工实时语音助手 (Voice Assistant)
-- **毫秒级极速流式交互**：集成 SpeechRail OpenAI Realtime 流式 ASR + 本地大语言模型（LM Studio 原生 `/api/v1/chat`）+ SpeechRail 24kHz Realtime TTS，告别死板的单向对讲机体验。
-- **坚固的双层声学防回声死循环防线**：
-  - **L1** `EchoSuppressionProcessor`：外放播报期间自动抑制收音；打断时启用动态峰值包络与快慢 EMA 自适应能量门限（`gain=2.5`）。
-  - **L2** `BotTextRecorder` + `SelfEchoFilter`：计算用户转写与近期机器人播报内容的相似度（$\ge 0.7$ 或子串覆盖即吞帧），彻底阻断外放环境下的“自我回复死循环”。
-- **灵活双工模式**：支持「🔊 外放保护」（播报时自动抑麦，防误触）与「🎧 耳机全双工」（随时自然插话打断 Barge-in）。
-- **长会话上下文智能滚动压缩 (ADR-003)**：基于 LM Studio 原生 Token 计数平滑压缩历史对话，在保证关键事实记忆的同时实现无感长聊。
+## 核心能力
 
-### 🎙️ 智能会议助手 (Meeting Assistant)
-- **SPK-E2E-1 持续说话人分离双通道**：无缝对接 SpeechRail diarization profile（Sortformer），流式转录文本通道（不可变正文）与说话人归属通道（原子 Patch 修订）解耦并行；支持会后/会中随时自定义重命名发言人。
-- **人工更正绝对优先 (Override Precedence)**：用户会中或会后手动指定的发言人享有最高法律效力，绝不被后续任何自动分人 patch、平滑合并或 EOF 冲刷覆盖。
-- **PostgreSQL ACID 可靠持久化与水位屏障**：全量确认转录记录与元数据入库存储，**绝不在数据库或磁盘落地原始音频**，充分保护隐私；内置 `0700/0600` 权限的崩溃恢复 Journal 与 EOF 水位对齐屏障。
-- **异步 AI 结构化纪要**：会议结束自动执行 EOF 优雅冲刷与分人终态对齐，后台调度本地 LLM 异步生成包含「议题大纲、核心讨论、关键决策、待办事项 (Action Items)」的高质量纪要。
-- **一键导出**：支持一键导出结构化 Markdown 会议纪要与带说话人时间戳的精确 SRT 字幕文件。
+| 模块 | 能力 | 关键边界 |
+|---|---|---|
+| **语音助手** | SpeechRail Realtime ASR/TTS + LM Studio 原生 `/api/v1/chat`；支持外放保护、耳机双工、Barge-in、上下文滚动压缩 | 语音助手、字幕和会议模式不并行录音 |
+| **会议助手** | 流式转录、持续说话人分离、不可变正文、原子分人修订、人工更正优先、PostgreSQL 持久化、EOF 水位屏障、异步 AI 纪要 | SpeechRail 负责 ASR/TTS/Diarization 模型生命周期；Sona 不保存原始音频 |
+| **实时字幕** | 低延迟字幕上屏、WebSocket 广播、断线重连期间 PCM 活跃快照重放、SRT 导出 | 字幕模式独占麦克风 PCM |
+| **会中 Inner OS** | `Cmd/Ctrl + K` 呼出私密侧边面板，提供局势研判、事实核查和回应草稿 | 默认会后即焚；只有用户主动保存的内容才进入会话存储 |
+| **隐私优先** | 默认 loopback 绑定；本地服务协作；故障恢复 Journal 采用 `0700/0600` 权限 | 首次安装依赖和准备本地模型快照可能需要网络 |
 
-### 🧠 会中内心 OS 伴侣 (Inner OS)
-- **会中私密智能外脑**：按下 `Cmd + K` 呼出侧边抽屉，实时获取局势研判、观点核查、反驳建议与回应草稿。
-- **会后即焚原则**：底牌与会中分析默认驻留在浏览器内存中，会议结束自动销毁，严防商业与个人机密外泄。
-
-### 📝 实时流式字幕 (Live Subtitles)
-- **低延迟流式上屏**：窗口式流式识别呈现，支持 PCM 活跃快照重连重放机制，断线不丢字。
-- **独立运行与无缝联动**：切换至字幕页面时系统自动挂起语音交互链路，独占麦克风保证转录纯净度。
-
-### 🔒 100% 离线与隐私保护 (Privacy-First)
-- **零云端依赖**：无需联网、不消耗任何第三方 API Token、零外部数据遥测，全链路音频、文本与模型权重 100% 留在 Apple Silicon 本地。
-
----
-
-## 🏗️ 系统架构与数据流
-
-Sona 严格遵循 **Clean Architecture（整洁架构）**，采用 **单音频源独占采集 + 有界扇出 + 两阶段状态机模式仲裁** 的系统设计：
+## 架构概览
 
 ```mermaid
-graph TD
-    MIC["🎙️ 麦克风输入 (Microphone)"] --> HUB["🔊 AudioHub (16kHz Mono s16le / 真实静音)"]
-    
-    HUB --> ROUTER{"🔀 RuntimeModeCoordinator<br/>(单 PCM 所有者仲裁 / 两阶段事务切换)"}
-    
-    ROUTER -->|assistant 模式| INTERACTION["🤖 语音助手流水线 (Pipecat)"]
-    ROUTER -->|subtitles 模式| SUBTITLES["📝 实时字幕代理 (SubtitleProxy)"]
-    ROUTER -->|meeting 模式| MEETING["🎙️ 会议助手会话 (MeetingSession)"]
-    
-    subgraph "🤖 语音交互域 (sona.interaction)"
-        INTERACTION --> L1["L1 声学防回声 (EchoSuppression)"]
-        L1 --> STT["SpeechRail Realtime STT"]
-        L1 --> L2["L2 文本自激过滤 (SelfEchoFilter)"]
-        STT --> L2
-        L2 --> LLM_INT["LM Studio (/api/v1/chat, reasoning: off)"]
-        LLM_INT --> TTS["SpeechRail Realtime TTS (24kHz)"]
-        TTS --> SPK["🔊 扬声器 / 耳机输出"]
-    end
+flowchart LR
+    MIC[麦克风] --> HUB[AudioHub<br/>单源采集 / 有界扇出]
+    HUB --> MODE{RuntimeModeCoordinator<br/>单 PCM 所有者}
 
-    subgraph "📝 流式字幕域 (sona.subtitles)"
-        SUBTITLES --> SR_ASR1["SpeechRail Realtime ASR (/v1/realtime)"]
-        SR_ASR1 --> SRT_ARCH["SRT 历史归档与快照重放"]
-        SRT_ARCH --> WS_SUB["WebSocket 客户端广播池"]
-    end
+    MODE --> ASSIST[语音助手<br/>Pipecat]
+    MODE --> SUB[实时字幕<br/>SubtitleProxy]
+    MODE --> MEET[会议助手<br/>MeetingSession]
 
-    subgraph "🎙️ 会议核心域 (sona.meeting - SPK-E2E-1)"
-        MEETING --> SR_ASR2["SpeechRail Realtime ASR + Diarization"]
+    ASSIST --> SR1[SpeechRail<br/>Realtime ASR / TTS]
+    ASSIST --> LLM1[LM Studio<br/>/api/v1/chat]
 
-        SR_ASR2 -->|文本流: transcript.done| RECONCILE["不可变正文入库<br/>(append_completed_item)"]
-        SR_ASR2 -->|分人流: speaker_map/segment| SMOOTHER["时序平滑与滤波<br/>(DiarizationSmoother)"]
-        SMOOTHER --> PATCH["原子分人原位修订<br/>(apply_speaker_patches)"]
+    SUB --> SR2[SpeechRail<br/>Realtime ASR]
+    SUB --> SRT[SRT / WebSocket 广播]
 
-        RECONCILE --> PG[("🐘 PostgreSQL ACID<br/>(不可变正文 / 分人元数据 / 水位)")]
-        PATCH -->|人工更正优先防覆盖| PG
-
-        MEETING -->|EOF commit| GATE{"EOF 水位等待屏障<br/>(RepositoryDiarizationGate)"}
-        SR_ASR2 -->|diarization.finalized| GATE
-        GATE --> FINAL["封存终态会议"]
-        FINAL --> SUMMARY["异步 AI 会议纪要 (Summary Pipeline)"]
-
-        MEETING -.短暂写入故障.-> JOURNAL["崩溃恢复 Journal (0700/0600)"]
-        MEETING --> INNER_OS["🧠 内心 OS 伴侣 (Inner OS Drawer)"]
-    end
+    MEET --> SR3[SpeechRail<br/>ASR + Diarization]
+    SR3 --> TEXT[不可变转录正文]
+    SR3 --> SPEAKER[分人映射与原位修订]
+    TEXT --> DB[(PostgreSQL<br/>文本 / 元数据 / 纪要)]
+    SPEAKER --> DB
+    MEET --> EOF[EOF 水位屏障]
+    EOF --> SUMMARY[异步本地 AI 纪要]
 ```
 
-### 代码包分层结构 (Clean Architecture)
+会议模式遵循 SPK-E2E-1 三条持久化公理：已确认正文不可变、说话人归属独立原位修订、人工更正不得被自动算法覆盖。详见 [端到端设计规格](docs/architecture/speaker-diarization-e2e-design.md)。
+
+## 运行要求
+
+| 依赖 | 要求 |
+|---|---|
+| 硬件与系统 | Apple Silicon Mac；macOS 14+。可选的物理输出采集 Helper 需要 macOS 14.2+ |
+| Python | `>=3.12,<3.13`，严格锁定 Python 3.12 |
+| Python 工具 | [`uv`](https://docs.astral.sh/uv/) |
+| 前端工具 | Node.js `^20.19.0` 或 `>=22.12.0`、npm（Vite 7 的运行要求） |
+| 数据库 | PostgreSQL 14+；仅保存会议结构化数据，不保存原始音频 |
+| SpeechRail | 独立本地服务，默认健康检查地址 `http://127.0.0.1:8201/health` |
+| LM Studio | 独立本地 Server，默认地址 `http://127.0.0.1:1234`；推荐模型 `local/kat-coder-2.5` |
+
+还需要为运行 Sona 的终端或应用授予 macOS 麦克风权限。
+
+## 快速开始
+
+以下命令均从仓库根目录执行。
+
+### 1. 安装依赖
+
+```bash
+git clone https://github.com/hrygo/sona.git
+cd sona
+
+# Python 依赖：运行时、交互管道和开发工具
+uv sync --all-extras
+
+# 前端依赖：使用锁文件保证可复现安装
+npm --prefix ui ci
+
+# Pipecat TTS 断句所需的 NLTK 数据
+bash scripts/install-nltk-data.sh
+
+# 构建 Web 控制台静态资源
+npm --prefix ui run build
+```
+
+### 2. 准备本地依赖服务
+
+1. 启动 SpeechRail，并在其中配置 ASR、TTS 和（会议模式需要的）Diarization profile。
+2. 打开 LM Studio，加载本地模型并启动 Local Server。
+3. 初始化 PostgreSQL：
+
+   ```bash
+   psql knowledge -f scripts/bootstrap-meeting-db.sql
+   ```
+
+4. 确认依赖服务可达：
+
+   ```bash
+   curl http://127.0.0.1:8201/health
+   curl http://127.0.0.1:1234/v1/models
+   ```
+
+### 3. 启动 Sona
+
+推荐使用统一控制脚本：
+
+```bash
+# 前台运行，Ctrl+C 停止
+scripts/sona-ctl.sh start
+
+# 或后台运行
+scripts/sona-ctl.sh start -d
+scripts/sona-ctl.sh status
+scripts/sona-ctl.sh logs -f
+```
+
+然后打开 <http://127.0.0.1:8100>。
+
+`scripts/run-all.sh` 是兼容入口，等价于 `scripts/sona-ctl.sh start`。如需局域网访问，显式设置绑定模式：
+
+```bash
+SONA_BIND_HOST=lan scripts/sona-ctl.sh start
+```
+
+## 使用方式
+
+### Web 控制台
+
+| 快捷键 | 功能 |
+|---|---|
+| `⌘/Ctrl + 1` | 语音助手 |
+| `⌘/Ctrl + 2` | 会议助手 |
+| `⌘/Ctrl + 3` | 实时字幕 |
+| `⌘/Ctrl + K` | 在会议助手中打开或收起 Inner OS |
+| `?` | 打开快捷键帮助 |
+| `Esc` | 从历史回溯返回当前录制视图 |
+
+进入会议模式后，语音助手会被挂起，会议会话独占麦克风；结束会议时会先执行 EOF 优雅冲刷，再封存转录和分人终态。
+
+### Headless 交互
+
+停止 `sona-ui` 后，可以使用命令行入口：
+
+```bash
+uv run sona-interact
+# 或
+scripts/run-interact.sh
+```
+
+`sona-ui` 与 `sona-interact` 通过运行时锁互斥，不能同时持有交互音频资源。
+
+## 配置
+
+配置由模块化 `pydantic-settings` 管理，可在仓库根目录 `.env` 中覆盖。常用项如下：
+
+| 环境变量 | 默认值 | 用途 |
+|---|---|---|
+| `SONA_BIND_HOST` | `127.0.0.1` | 绑定模式；可选 `lan` 或 `0.0.0.0` |
+| `SONA_UI_PORT` | `8100` | Web 控制台端口 |
+| `SONA_SUBTITLE_SPEECHRAIL_URL` | `ws://127.0.0.1:8201/v1/realtime` | 字幕与会议 ASR WebSocket |
+| `SONA_INTERACTION_SPEECHRAIL_REALTIME_URL` | `ws://127.0.0.1:8201/v1/realtime` | 语音助手 ASR/TTS Realtime 地址 |
+| `SONA_INTERACTION_LLM_BASE_URL` | `http://localhost:1234/v1` | 交互助手的 LM Studio 地址 |
+| `SONA_INTERACTION_LLM_MODEL` | `local/kat-coder-2.5` | 交互助手模型 ID |
+| `SONA_MEETING_DATABASE_URL` | `postgresql:///knowledge` | 会议数据库 DSN |
+| `SONA_MEETING_SCHEMA` | `sona` | 会议表所在 schema |
+| `SONA_MEETING_DIARIZATION_EXTENSIONS_ENABLED` | `false` | 是否协商持续分人扩展 |
+| `SONA_MEETING_INNER_OS_ENABLED` | `false` | 是否启用 Inner OS |
+
+完整配置与运行手册见 [会议助手后端运行与前后端联调手册](docs/manuals/会议助手后端运行与前后端联调.md)。不要将真实 API key、数据库密码或其他凭据提交到仓库。
+
+## 数据与隐私边界
+
+- **运行时本地优先**：Sona 默认只绑定 loopback，并通过本机 SpeechRail 与 LM Studio 工作；Sona 不主动上传音频、转录或遥测数据。
+- **不保存原始音频**：PostgreSQL 只保存会议元数据、确认后的转录、说话人映射和纪要；会议采集不写入音频文件或 `runtime/subtitles/current.srt`。
+- **故障恢复有界**：仅在数据库短暂写入失败时，恢复 Journal 临时记录必要的确认文本与 patch 操作；目录/文件权限分别为 `0700/0600`，回放成功后删除。
+- **会后即焚**：Inner OS 的会前底牌和会中分析默认仅驻留浏览器内存；只有用户主动保存的内容才持久化。
+- **首次安装例外**：安装 Python/npm 依赖及获取本地模型快照可能需要网络；运行时是否完全离线取决于外部服务和模型是否已准备好。
+
+## 开发与验证
+
+安装开发依赖后，可运行项目质量门禁：
+
+```bash
+# 后端测试（会议集成测试需要独立 PostgreSQL 测试 schema）
+SONA_TEST_DATABASE_URL=postgresql:///knowledge uv run pytest tests/
+
+# Python 类型与风格检查
+uv run mypy src/
+uv run ruff check src/ tests/
+
+# 前端测试与生产构建
+(cd ui && npm test -- --run)
+(cd ui && npm run build)
+```
+
+测试数据库必须使用独立临时 schema，禁止将生产 DSN 用作测试 DSN。提交 PR 前请阅读 [贡献指南](CONTRIBUTING.md)。
+
+## 仓库结构
 
 ```text
 src/sona/
-├── asr/                 # 【领域层】ASR 领域契约、窗口模型与结果呈现 (contracts, models, profiles, presenters)
-├── subtitles/           # 【领域层】实时字幕与流式转录核心业务 (proxy, archive, sessions, clients)
-├── meeting/             # 【领域层】会议核心状态机、双通道转录解耦、PostgreSQL 持久化
-│   ├── session.py       #   ├── 会议会话生命周期、双通道事件编排与 EOF 屏障
-│   ├── repository.py    #   ├── PostgreSQL ACID 仓储 (不可变正文、原子分人补丁、更正保护)
-│   ├── speaker_attribution.py # 说话人对账与归属状态追踪
-│   ├── diarization_smoother.py # 说话人时序平滑器与短片段杂音滤波
-│   ├── finalization.py  #   ├── EOF 冲刷与分人持久化水位等待门控
-│   ├── summary/         #   ├── 模块化 AI 纪要流水线 (errors, prompt_builder, chunker, gateway, service)
-│   ├── inner_os/        #   ├── 会中内心 OS 伴侣服务与意图研判
-│   ├── recovery.py      #   ├── 崩溃恢复 Journal 写入与回放
-│   └── runtime_mode.py  #   └── 运行时模式协调器 (RuntimeModeCoordinator)
-├── config/              # 【配置层】高内聚领域强类型配置 (audio, interaction, subtitles, meeting, ui, lm_studio)
-├── speechrail/          # 【基础设施层】SpeechRail 公共协议客户端与分人扩展适配器 (transcriber, events, stt, tts, transport)
-├── interaction/         # 【应用层】语音助手 Pipecat 管道、双层防回声、上下文滚动压缩与执行器
-├── audio/               # 【基础设施层】AudioHub 麦克风独占采集、有界 Sink 扇出与硬件设备探测
-└── ui/                  # 【接入层】Sona Web 控制台、模式协调器绑定、FastAPI 路由与控制 WebSocket
+├── audio/          # 单源麦克风采集、有界扇出和音频设备
+├── asr/            # ASR 领域契约、模型和呈现
+├── interaction/    # Pipecat 语音助手、LLM 状态链和防回声
+├── meeting/        # 会议状态机、持久化、分人、纪要和 Inner OS
+├── speechrail/     # SpeechRail Realtime ASR/TTS 协议适配
+├── subtitles/      # 实时字幕、归档和客户端广播
+├── config/         # 模块化运行配置
+└── ui/             # FastAPI/WebSocket 接入层
+ui/                 # React 19 + TypeScript + Vite 7 控制台
+contracts/          # 版本化 OpenAPI/AsyncAPI/JSON Schema 契约
+scripts/            # 启动、数据库、NLTK 和辅助工具
+docs/               # 架构、手册、决策记录和验收资料
 ```
 
----
+## 文档与协作
 
-## 💻 软硬件要求
+- [文档中心](docs/README.md)：完整索引、生命周期状态和按角色导航。
+- [系统总体架构与详细设计](docs/architecture/系统总体架构与详细设计方案.md)：权威拓扑与端到端时序。
+- [SPK-E2E-1 设计规格](docs/architecture/speaker-diarization-e2e-design.md)：持续分人与持久化公理。
+- [SPK-E2E-1 联合验收报告](docs/operations/speaker-diarization-e2e-acceptance-2026-09-06.md)：当前验收记录。
+- [会议助手运行手册](docs/manuals/会议助手后端运行与前后端联调.md)：运行、数据库和接口联调。
+- [Meeting Assistant 契约](contracts/meeting-assistant/v1/README.md)：版本化通信契约与 fixtures。
+- [Audio Capture 契约](contracts/audio-capture/v1/README.md)：可选物理输出采集 Helper 契约。
+- [贡献指南](CONTRIBUTING.md)：开发环境、质量门禁、提交和 PR 约定。
 
-| 维度 | 规格与推荐配置 | 说明 |
-|---|---|---|
-| **硬件平台** | **Apple Silicon Mac**（M1 / M2 / M3 / M4 / M5） | 深度优化 Metal / MPS 推理加速 |
-| **统一内存 (RAM)** | 推荐 **32GB 及以上**；16GB/24GB 亦可运行小模型 | 语音交互与会议纪要可共用同一模型，无需两套大模型常驻 |
-| **操作系统** | **macOS 14.0+**（Sonoma 或 Sequoia） | 物理输出采集 Helper 要求 macOS 14.2+ |
-| **Python 版本** | **`Python >=3.12,<3.13`**（严格锁定 3.12） | 保证 PyAudio、Torch 与 Pipecat 原生兼容性 |
-| **依赖管理工具** | [`uv`](https://docs.astral.sh/uv/)（极速 Rust 编写的 Python 依赖管理工具） | 严禁直接使用全局 pip 混用污染环境 |
-| **数据库** | **PostgreSQL 14+** | 用于会议助手持久化存储（不存音频，仅存结构化数据） |
-| **前端工具** | **Node.js 18+ & npm** | 用于构建 React 19 + TypeScript + Vite 7 前端控制台 |
-| **本地 LLM 服务** | [LM Studio](https://lmstudio.ai/) 0.3+（开启本地 Server `localhost:1234`） | 推荐模型：`local/kat-coder-2.5` |
-| **ASR/TTS 引擎** | [SpeechRail](https://github.com/hrygo/SpeechRail)（端口 `8201`） | 负责 Qwen3-ASR / Diarization / Qwen3-TTS 物理推理 |
+欢迎通过 [Issues](https://github.com/hrygo/sona/issues) 报告可复现的问题或提出改进建议。报告问题时请附上 macOS、Python、Node.js 版本和脱敏后的日志；不要上传音频、API key 或数据库凭据。
 
----
+## 许可证
 
-## 🚀 5 分钟快速上手
-
-### 步骤 1：克隆仓库与安装全量依赖
-
-```bash
-# 1. 克隆代码仓库
-git clone https://github.com/your-username/sona.git
-cd sona
-
-# 2. 一键安装 Python 全量依赖 (包含 interaction 与 dev 组)
-uv sync --all-extras
-
-# 3. 安装前端依赖并构建生产静态资源
-cd ui && npm install && npm run build && cd ..
-```
-
-### 步骤 2：初始化运行数据与环境
-
-```bash
-# 下载 NLTK punkt_tab 分词数据 (TTS 断句必需)
-bash scripts/install-nltk-data.sh
-```
-
-> ⚠️ **启动前依赖检查**：
-> 1. 确保独立 **SpeechRail** 服务已启动，且 `curl http://127.0.0.1:8201/health` 返回 `200 OK`；
-> 2. 如需多人会议分人，确保 SpeechRail 已配置 Diarization 模型（如 Sortformer）。
-
-### 步骤 3：初始化 PostgreSQL 数据库
-
-```bash
-# 初始化 sona 专用数据库角色与独立 schema (默认 DSN 为 postgresql:///knowledge)
-psql knowledge -f scripts/bootstrap-meeting-db.sql
-```
-
-### 步骤 4：配置并启动 LM Studio
-
-1. 打开 **LM Studio**，下载并加载推荐模型（例如 `local/kat-coder-2.5`）；
-2. 启动 Local Server，监听 `127.0.0.1:1234`；
-3. **重要提示**：确保关闭深度思考模式（`reasoning: "off"`），以获得毫秒级首字吐词延迟。
-
-### 步骤 5：启动 Sona 服务
-
-```bash
-# 推荐：一键启动完整控制台与服务 (默认绑定 127.0.0.1)
-scripts/run-all.sh
-
-# 支持局域网或内网设备访问模式
-SONA_BIND_HOST=lan scripts/run-all.sh
-```
-
-### 步骤 6：打开控制台
-
-在浏览器中访问：👉 **`http://127.0.0.1:8100`**
-
----
-
-## 🖥️ Sona 控制台使用指南
-
-Sona 提供了现代化响应式设计、支持深浅双色无障碍高对比度（WCAG 2.1 AA/AAA）的交互界面：
-
-### 1. 🤖 语音助手工作区 (`⌘ + 1`)
-- **自然对话**：对着麦克风说话，Silero VAD 自动检测静音端点，流式大模型即刻作答并驱动 SpeechRail 进行 24kHz 高品质声音合成。
-- **打断 (Barge-in)**：在佩戴耳机时切至「🎧 耳机双工」，说话即可自然打断机器人播报。
-- **音色与人设定制**：控制栏支持请求级切换音色预设（`default` / `warm` / `bright` / `calm`）与多重预设角色。
-
-### 2. 🎙️ 会议助手工作区 (`⌘ + 2`)
-- **一键录制**：点击「开始会议」，系统无缝暂停语音助手链路，独占麦克风进行流式转录。
-- **发言人实时识别与人工更正**：动态呈现匿名发言人（如 `Speaker 1`、`Speaker 2`），支持在面板中直接自定义重命名或原位更正；人工更正具备最高法律效力，绝不被后续自动算法覆盖。
-- **EOF 优雅冲刷与水位屏障**：点击「结束会议」，系统发送 commit EOF 信号，等待 SpeechRail 分人终态（`finalized`）与数据库持久化水位完全对齐后再行封存，确保长会议不丢字、分人完整。
-- **Markdown 纪要生成**：后台自动执行分块摘要与全篇归纳，自动提炼出「会议议题、讨论核心、达成决议、待办清单」。
-
-### 3. 🧠 会中内心 OS (`⌘ + K`)
-- **专属决策参谋**：在会议界面任意时刻按下快捷键呼出侧边抽屉。
-- **实时研判与草稿**：基于最近对话流，快速点击「局势研判」、「事实核查」或「回应草稿」，获取针对性的发言对策。
-- **会后即焚保护**：所有研判卡片均驻留在瞬态内存中，会议结束后自动清理。
-
-### 4. 📝 实时流式字幕 (`⌘ + 3`)
-- **无感全屏跟读**：纯净全屏展示，支持声学波形动态跳动、实时自动滚屏与暂停定位。
-- **断线自愈与导出**：内置重连 PCM 快照重放机制，支持一键下载标准 `.srt` 字幕。
-
-### 5. ⌨️ 全局快捷键清单
-
-| 快捷键 | 功能描述 |
-|---|---|
-| `⌘ + 1` / `Ctrl + 1` | 切换至 **语音助手** 视图 |
-| `⌘ + 2` / `Ctrl + 2` | 切换至 **会议助手** 视图 |
-| `⌘ + 3` / `Ctrl + 3` | 切换至 **实时字幕** 视图 |
-| `⌘ + K` / `Ctrl + K` | 在会议助手中呼出 / 收起 **内心 OS 伴侣面板** |
-| `?` | 弹出全局快捷键帮助浮层 |
-| `Esc` | 在历史记录回溯中快速返回当前主录制视图 |
-
----
-
-## ⚙️ 核心配置项与环境变量
-
-系统基于模块化 `pydantic-settings` 管理配置，支持在 `.env` 中覆写：
-
-| 领域分类 | 环境变量 | 默认值 | 说明 |
-|---|---|---|---|
-| **网络绑定** | `SONA_BIND_HOST` | `127.0.0.1` | 服务绑定模式：`127.0.0.1` (仅本机) / `lan` (局域网) / `0.0.0.0` |
-| **Web 界面** | `SONA_UI_PORT` | `8100` | Sona Web 控制台监听端口 |
-| **SpeechRail** | `SONA_SUBTITLE_SPEECHRAIL_URL` | `ws://127.0.0.1:8201/v1/realtime` | 字幕与会议 ASR 使用的 WebSocket 地址 |
-| | `SONA_SUBTITLE_SPEECHRAIL_API_KEY` | 空 | SpeechRail 鉴权密钥 (仅通过 WebSocket Authorization 发送) |
-| | `SONA_INTERACTION_SPEECHRAIL_REALTIME_URL` | `ws://127.0.0.1:8201/v1/realtime` | 语音助手 ASR/TTS 使用的 WebSocket 地址 |
-| | `SONA_INTERACTION_TTS_VOICE` | `default` | 默认合成音色预设 (`default` / `warm` / `bright` / `calm`) |
-| | `SONA_INTERACTION_SPEECHRAIL_API_KEY` | 空 | 语音助手 SpeechRail 鉴权密钥 (如有) |
-| **LM Studio** | `SONA_INTERACTION_LLM_BASE_URL` | `http://localhost:1234/v1` | 交互助手 LLM 服务根地址（可配置） |
-| | `SONA_INTERACTION_LLM_API_KEY` | `lm-studio` | 交互助手 LLM 授权密钥（可配置） |
-| | `SONA_INTERACTION_LLM_MODEL` | `local/kat-coder-2.5` | 交互助手模型 ID（可配置） |
-| | `SONA_LM_STUDIO_BASE_URL` | `http://localhost:1234/v1` | 纪要 / 标题 / 内心 OS 共享 LM Studio 服务根地址（缺省回落 `SONA_INTERACTION_LLM_BASE_URL`） |
-| | `SONA_LM_STUDIO_API_KEY` | `lm-studio` | 共享 LM Studio 授权密钥（缺省回落 `SONA_INTERACTION_LLM_API_KEY`） |
-| | `SONA_MEETING_SUMMARY_MODEL` | `local/kat-coder-2.5` | 会议纪要、标题与内心 OS 模型 ID（可配置） |
-| **会议与分人** | `SONA_MEETING_DATABASE_URL` | `postgresql://sona_app@/knowledge`| PostgreSQL 数据库连接 DSN |
-| | `SONA_MEETING_SCHEMA` | `sona` | 会议表所在独立 Schema |
-| | `SONA_MEETING_DIARIZATION_EXTENSIONS_ENABLED` | `false` | 是否协商持续分人扩展 (`speechrail.diarization.v1`) |
-| | `SONA_MEETING_DIARIZATION_SMOOTHING_ENABLED` | `true` | 是否启用会议说话人时序平滑与短片段杂音滤波 |
-| | `SONA_MEETING_DIARIZATION_MIN_DURATION_MS` | `350` | 短片段滤波最小有效时长（毫秒） |
-| | `SONA_MEETING_DIARIZATION_HANGOVER_GAP_MS` | `800` | 同一说话人相邻段落合并最大时间间隙（毫秒） |
-| | `SONA_MEETING_DIARIZATION_OVERLAY_ENABLED` | `false` | 诊断离线 overlay 开关 (默认关闭；扩展协商时隔离) |
-| | `SONA_MEETING_INNER_OS_ENABLED` | `false` | 是否启用会议内心 OS 伴侣 |
-| **音频与双工** | `SONA_INTERACTION_DUPLEX_MODE` | `speaker_focus` | 默认双工模式 (`speaker_focus` 外放保护 / `headphone_duplex` 耳机双工) |
-| | `SONA_INTERACTION_INPUT_DEVICE_NAME` | 空 (系统默认) | 指定麦克风物理硬件名称或名称片段 |
-
----
-
-## 🛡️ 质量门禁与工程规范
-
-Sona 坚持高标准的自动化工程测试规范，提交代码或发布前，**必须保证以下五重质量门禁全部通过**：
-
-```bash
-# 1. 运行全量后端单元测试与集成测试 (硬性门禁: fail_under >= 80%，当前实测 83.23%，1096 passed)
-SONA_TEST_DATABASE_URL=postgresql:///knowledge uv run pytest tests/
-
-# 2. Python Strict 模式静态类型检查 (108 个核心模块 0 错误)
-uv run mypy src/
-
-# 3. Python 代码风格与 Lint 检查
-uv run ruff check src/ tests/
-
-# 4. 前端单元与组件渲染测试 (当前实测 293 passed)
-cd ui && npm test -- --run
-
-# 5. 前端 TypeScript 类型检查与生产构建
-cd ui && npm run build
-```
-
----
-
-## ❓ 常见问题排查 (FAQ)
-
-<details>
-<summary><b>Q1: 为什么要求 LM Studio 必须关闭推理 (reasoning: "off")？</b></summary>
-
-在全双工实时语音交互场景中，大模型的思考过程（`<think>...</think>`）会导致首字延迟（TTFT）延长 2~5 秒以上，使对话失去即时感。Sona 封装了 LM Studio 原生 `/api/v1/chat` 端点，强制锁定 `reasoning: "off"`，实现毫秒级的极速首字输出。
-</details>
-
-<details>
-<summary><b>Q2: 麦克风无法收音或提示 Permission Denied 怎么处理？</b></summary>
-
-请打开 macOS 的 **「系统设置」➔「隐私与安全性」➔「麦克风」**，确认当前运行 Sona 的终端（Terminal、iTerm2、VS Code 等）已获得麦克风访问权限。
-</details>
-
-<details>
-<summary><b>Q3: 如何在无界面的轻量终端环境 (Headless) 下运行？</b></summary>
-
-Sona 提供了专门的命令行交互入口。在停止 `sona-ui` 后执行：
-```bash
-uv run sona-interact
-```
-两者通过跨进程独占文件锁自动互斥，确保麦克风资源安全。
-</details>
-
-<details>
-<summary><b>Q4: 离线断网环境下是否能完全正常运行？</b></summary>
-
-可以。Sona 严格贯彻离线优先设计（`allow_model_downloads=False`）。所有的 ASR、Diarization 与 TTS 运行时模型快照均由 SpeechRail 独立管理，LM Studio 模型存放于本地，无需任何公网通信。
-</details>
-
----
-
-## 📑 深入技术文档
-
-深入阅读完整的技术方案、时序图与架构设计决策：
-
-- 🧭 [**Sona 文档中心总览**](docs/README.md)
-- 🌟 [**Sona × SpeechRail 会议讲话人分离端到端设计 (SPK-E2E-1)**](docs/architecture/speaker-diarization-e2e-design.md)
-- 📋 [**SPK-E2E-1 端到端联合验收报告 (2026-09-06)**](docs/operations/speaker-diarization-e2e-acceptance-2026-09-06.md)
-- ⚡ [**Sona 会议讲话人分离端到端实施计划 (S0–S4)**](docs/superpowers/plans/2026-09-05-speaker-diarization-e2e.md)
-- 🏗️ [**系统总体架构与详细设计方案**](docs/architecture/系统总体架构与详细设计方案.md)
-- 📐 [**Sona 核心架构重构方案与实施路径**](docs/architecture/Sona-核心架构重构方案与实施路径.md)
-- 📖 [实时语音交互与字幕-方案与最佳实践](docs/architecture/实时语音交互与字幕-方案与最佳实践.md)
-- 📖 [声学防回声与全双工交互设计方案](docs/architecture/声学防回声与全双工交互设计方案.md)
-- 📖 [会议助手后端运行与前后端联调手册](docs/manuals/会议助手后端运行与前后端联调.md)
-- 📝 [架构决策记录 (ADR-001 ~ ADR-012)](docs/decisions/)
-- 🤝 [**贡献指南 (Contributing Guide)**](CONTRIBUTING.md)
-
----
-
-## 📄 开源许可证
-
-本项目遵循 [MIT License](LICENSE) 开源许可证。
+Sona 使用 [MIT License](LICENSE) 开源。
