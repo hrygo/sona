@@ -172,6 +172,118 @@ def test_transport_uri_uses_configured_url_when_connection_has_no_uri() -> None:
     asyncio.run(scenario())
 
 
+def test_meeting_adapter_uses_longer_vad_silence_window() -> None:
+    async def scenario() -> None:
+        connection = FakeConnection()
+        adapter = SpeechRailStreamingTranscriber(
+            client=SpeechRailRealtimeClient(
+                url=connection.uri,
+                connection_factory=lambda _: _immediate(connection),
+            ),
+            context=ASRSessionContext(source_epoch=2, offset_ms=0, purpose="meeting"),
+            language="Chinese",
+        )
+
+        await adapter.connect()
+
+        session_update = next(
+            event for event in connection.sent if event.get("type") == "session.update"
+        )
+        session = session_update["session"]
+        assert isinstance(session, dict)
+        turn_detection = session["turn_detection"]
+        assert isinstance(turn_detection, dict)
+        assert turn_detection["silence_duration_ms"] == 900
+
+    asyncio.run(scenario())
+
+
+def test_meeting_extensions_adapter_uses_extensions_vad_silence_window() -> None:
+    async def scenario() -> None:
+        connection = FakeConnection()
+        connection._messages = _extensions_session_events()
+        adapter = SpeechRailStreamingTranscriber(
+            client=SpeechRailRealtimeClient(
+                url=connection.uri,
+                connection_factory=lambda _: _immediate(connection),
+            ),
+            context=ASRSessionContext(
+                source_epoch=2,
+                offset_ms=0,
+                purpose="meeting",
+                diarization_group_id="a" * 64,
+            ),
+            language="Chinese",
+            diarization_extensions=True,
+        )
+
+        await adapter.connect()
+
+        session_update = next(
+            event for event in connection.sent if event.get("type") == "session.update"
+        )
+        session = session_update["session"]
+        assert isinstance(session, dict)
+        turn_detection = session["turn_detection"]
+        assert isinstance(turn_detection, dict)
+        assert turn_detection["silence_duration_ms"] == 1_000
+
+    asyncio.run(scenario())
+
+
+def test_subtitle_adapter_keeps_default_vad_silence_window() -> None:
+    async def scenario() -> None:
+        connection = FakeConnection()
+        adapter = SpeechRailStreamingTranscriber(
+            client=SpeechRailRealtimeClient(
+                url=connection.uri,
+                connection_factory=lambda _: _immediate(connection),
+            ),
+            context=ASRSessionContext(source_epoch=2, offset_ms=0, purpose="subtitles"),
+            language="Chinese",
+        )
+
+        await adapter.connect()
+
+        session_update = next(
+            event for event in connection.sent if event.get("type") == "session.update"
+        )
+        session = session_update["session"]
+        assert isinstance(session, dict)
+        turn_detection = session["turn_detection"]
+        assert isinstance(turn_detection, dict)
+        assert turn_detection["silence_duration_ms"] == 400
+
+    asyncio.run(scenario())
+
+
+def test_subtitle_extensions_request_keeps_default_extensions_vad_window() -> None:
+    async def scenario() -> None:
+        connection = FakeConnection()
+        adapter = SpeechRailStreamingTranscriber(
+            client=SpeechRailRealtimeClient(
+                url=connection.uri,
+                connection_factory=lambda _: _immediate(connection),
+            ),
+            context=ASRSessionContext(source_epoch=2, offset_ms=0, purpose="subtitles"),
+            language="Chinese",
+            diarization_extensions=True,
+        )
+
+        await adapter.connect()
+
+        session_update = next(
+            event for event in connection.sent if event.get("type") == "session.update"
+        )
+        session = session_update["session"]
+        assert isinstance(session, dict)
+        turn_detection = session["turn_detection"]
+        assert isinstance(turn_detection, dict)
+        assert turn_detection["silence_duration_ms"] == 600
+
+    asyncio.run(scenario())
+
+
 def test_streaming_adapter_maps_openai_snapshot_and_pcm_append() -> None:
     async def scenario() -> None:
         connection = FakeConnection()

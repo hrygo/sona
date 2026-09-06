@@ -35,6 +35,8 @@ from sona.speechrail.transcription_events import (
 from sona.speechrail.transport import (
     DEFAULT_SERVER_VAD,
     DEFAULT_SERVER_VAD_EXTENSIONS,
+    MEETING_SERVER_VAD,
+    MEETING_SERVER_VAD_EXTENSIONS,
     ConnectionFactory,
     SpeechRailProtocolError,
     SpeechRailRealtimeClient,
@@ -121,17 +123,26 @@ class SpeechRailStreamingTranscriber:
             diarization=self._diarization_requested,
             speaker_count_hint=self._context.speaker_count_hint,
             diarization_group_id=self._context.diarization_group_id,
-            turn_detection=(
-                DEFAULT_SERVER_VAD_EXTENSIONS
-                if self._extensions_requested
-                else DEFAULT_SERVER_VAD
-            ),
+            turn_detection=self._turn_detection_config(),
             diarization_extensions=self._extensions_requested,
         )
         self._extensions_negotiated = (
             self._extensions_requested and self._client.diarization_contract is not None
         )
         self._ready = True
+
+    def _turn_detection_config(self) -> dict[str, object]:
+        if self._context.purpose == "meeting":
+            return (
+                MEETING_SERVER_VAD_EXTENSIONS
+                if self._extensions_requested
+                else MEETING_SERVER_VAD
+            )
+        return (
+            DEFAULT_SERVER_VAD_EXTENSIONS
+            if self._extensions_requested
+            else DEFAULT_SERVER_VAD
+        )
 
     @property
     def session_id(self) -> str:
