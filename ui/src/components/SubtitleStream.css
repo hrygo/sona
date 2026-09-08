@@ -434,14 +434,27 @@
 }
 
 .subtitle-sidebar-actions {
-  gap: 5px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-items: stretch;
+  gap: 8px;
 }
 
 .subtitle-sidebar-action {
+  width: 100%;
   min-width: 0;
-  min-height: 30px;
-  padding: 4px 3px;
+  min-height: 34px;
+  padding: 5px 8px;
+  justify-content: center;
+  white-space: nowrap;
+  box-sizing: border-box;
   font-size: 0.66rem;
+}
+
+@media (max-width: 360px) {
+  .subtitle-sidebar-actions {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 .subtitle-sidebar-action.is-feedback {
