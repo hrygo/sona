@@ -1,17 +1,19 @@
 # Clone TTS 响度播放验收记录
 
-> 状态：`partial`。本记录覆盖 Sona 播放边界与不落盘的实时 PCM 统计；SpeechRail
-> 稳定响度能力和真实扬声器试听仍待完成。
+> 状态：`historical_baseline`。本记录保留 SpeechRail `1.13.1` 未声明 capability
+> 时的 Sona compatibility-mode 基线；后续 `v2.0.1` stable capability 的最终验证已记录在
+> [Sona#10 final verification](https://github.com/hrygo/sona/issues/10#issuecomment-5587479161)。
+> 真实扬声器试听和 cancel/interruption 仍待完成。
 
 ## 范围与环境
 
 - 关联：`hrygo/sona#10`、`hrygo/SpeechRail#34`。
 - 日期：2026-09-08（Asia/Shanghai）。
 - Sona：`fix/tts-clone-loudness-issue-10`，guard 与客户端接线已提交。
-- SpeechRail：本机 `1.13.1`，`quality` profile；`/health`、`/readyz` 均返回 ready。
-- 本次运行服务返回 `speech_capabilities.audio_loudness_profile` 缺失，因此 custom voice
+- SpeechRail：历史运行使用本机 `1.13.1`，`quality` profile；`/health`、`/readyz` 均返回 ready。
+- 历史运行服务返回 `speech_capabilities.audio_loudness_profile` 缺失，因此 custom voice
   使用 bounded compatibility mode；已知内置 preset 保持 PCM passthrough，未发送任何
-  proprietary Realtime 字段。
+  proprietary Realtime 字段。当前稳定 capability 的部署后数据不覆盖本表，见上方最终验证链接。
 
 ## 自动化验证
 
