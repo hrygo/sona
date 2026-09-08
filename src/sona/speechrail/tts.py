@@ -12,14 +12,20 @@ import asyncio
 import contextlib
 from collections.abc import AsyncIterator
 
+from sona.config import SPEECHRAIL_TTS_VOICE_IDS
 from sona.speechrail.transport import (
     ConnectionFactory,
     SpeechRailOpenAITransport,
     SpeechRailProtocolError,
     decode_pcm16,
 )
+from sona.speechrail.tts_loudness import (
+    LoudnessMode,
+    StreamingPcm16LoudnessGuard,
+)
 
 _TTS_ALIAS = "gpt-4o-mini-tts"
+_STABLE_LOUDNESS_PROFILE = "stable_loudness_v1"
 
 # Server->client events that don't terminate or carry audio for the TTS flow.
 _TTS_NOOPS = frozenset(
@@ -66,6 +72,12 @@ class SpeechRailTTSClient:
         self._connection_factory = connection_factory
         self._transport: SpeechRailOpenAITransport | None = None
         self._active_response_id: str | None = None
+        self._audio_loudness_profile: str | None = None
+
+    @property
+    def audio_loudness_profile(self) -> str | None:
+        """Return the last server-declared audio loudness profile."""
+        return self._audio_loudness_profile
 
     @property
     def active_response_id(self) -> str | None:
@@ -82,6 +94,8 @@ class SpeechRailTTSClient:
             api_key=self._api_key,
             connection_factory=self._connection_factory,
         )
+        loudness_guard = StreamingPcm16LoudnessGuard(sample_rate=24_000)
+        self._audio_loudness_profile = None
         self._transport = transport
         try:
             await transport.connect()
@@ -112,14 +126,21 @@ class SpeechRailTTSClient:
             while True:
                 event = await transport.receive()
                 event_type = event.get("type")
-                if event_type == "response.created":
+                if event_type == "session.created":
+                    profile = _audio_loudness_profile(event)
+                    self._audio_loudness_profile = profile
+                    mode = _resolve_loudness_mode(profile)
+                    if profile is None and self._voice.lower() in SPEECHRAIL_TTS_VOICE_IDS:
+                        mode = "safety"
+                    loudness_guard.set_mode(mode)
+                elif event_type == "response.created":
                     response_id = _response_id(event.get("response"))
                     if self._active_response_id is not None:
                         raise SpeechRailProtocolError("SPEECHRAIL_RESPONSE_ERROR")
                     self._active_response_id = response_id
                 elif event_type == "response.audio.delta":
                     self._ensure_active(event.get("response_id"))
-                    yield decode_pcm16(event.get("delta"))
+                    yield loudness_guard.process(decode_pcm16(event.get("delta")))
                 elif event_type == "response.done":
                     self._active_response_id = None
                     status = _response_status(event.get("response"))
@@ -143,6 +164,7 @@ class SpeechRailTTSClient:
                     await self.cancel(active_response_id)
             raise
         finally:
+            loudness_guard.reset()
             self._active_response_id = None
             await transport.close()
             self._transport = None
@@ -176,6 +198,27 @@ def _response_status(value: object) -> str:
         if isinstance(candidate, str):
             return candidate
     return ""
+
+
+def _resolve_loudness_mode(profile: object) -> LoudnessMode:
+    """Use safety-only processing only for the exact stable server contract."""
+    if profile == _STABLE_LOUDNESS_PROFILE:
+        return "safety"
+    return "compatibility"
+
+
+def _audio_loudness_profile(event: dict[str, object]) -> str | None:
+    """Extract the namespaced loudness profile from ``session.created``."""
+    session = event.get("session")
+    if not isinstance(session, dict):
+        return None
+    capabilities = session.get("speech_capabilities")
+    if not isinstance(capabilities, dict):
+        return None
+    profile = capabilities.get("audio_loudness_profile")
+    if isinstance(profile, str) and profile == _STABLE_LOUDNESS_PROFILE:
+        return profile
+    return None
 
 
 __all__ = ["SpeechRailTTSClient"]
