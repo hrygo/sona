@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { act } from "react";
+import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { InnerOSUnsavedTray } from "./InnerOSUnsavedTray";
 import type { InnerOSAnswer } from "./contracts";
@@ -60,6 +60,44 @@ describe("InnerOSUnsavedTray", () => {
     expect(container.querySelector(".inner-os-answer-content")).not.toBeNull();
     expect(container.querySelector(".inner-os-answer-card")).toBeNull();
     expect(container.querySelector(".inner-os-save-btn")).toBeNull();
+
+    act(() => {
+      root.unmount();
+    });
+    container.remove();
+  });
+
+  it("dismisses every staged exchange from the tray header", () => {
+    const secondItem: UnsavedExchangeItem = { ...item, queryId: "q-2" };
+
+    const TrayHarness = () => {
+      const [visibleItems, setVisibleItems] = useState<readonly UnsavedExchangeItem[]>([item, secondItem]);
+      return (
+        <InnerOSUnsavedTray
+          items={visibleItems}
+          onSaveItem={vi.fn().mockResolvedValue(undefined)}
+          onDismissItem={(queryId) => {
+            setVisibleItems((currentItems) => currentItems.filter((currentItem) => currentItem.queryId !== queryId));
+          }}
+        />
+      );
+    };
+
+    act(() => {
+      root.render(<TrayHarness />);
+    });
+
+    const dismissAllButton = container.querySelector(
+      '[data-testid="inner-os-tray-dismiss-all"]',
+    ) as HTMLButtonElement | null;
+    expect(dismissAllButton).not.toBeNull();
+    if (!dismissAllButton) return;
+
+    act(() => {
+      dismissAllButton.click();
+    });
+
+    expect(container.querySelector('[data-testid="inner-os-unsaved-tray"]')).toBeNull();
 
     act(() => {
       root.unmount();

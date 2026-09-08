@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -172,6 +173,24 @@ async def test_journal_append_sequence_is_monotonic(tmp_path: Path) -> None:
     journal_path = tmp_path / "journal" / f"{meeting_id}.jsonl"
     payloads = [json.loads(line) for line in journal_path.read_text().splitlines()]
     assert [payload["sequence"] for payload in payloads] == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_journal_append_logs_success_at_info_not_warning(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    journal = RecoveryJournal(tmp_path / "journal")
+
+    with caplog.at_level(logging.INFO, logger="sona.meeting.recovery"):
+        await journal.append(uuid4(), "finalize_transcript")
+
+    records = [
+        record
+        for record in caplog.records
+        if record.name == "sona.meeting.recovery"
+    ]
+    assert [record.levelno for record in records] == [logging.INFO]
 
 
 async def test_append_accepts_transcript_window_and_default_payload(tmp_path: Path) -> None:

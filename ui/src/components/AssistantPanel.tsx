@@ -393,13 +393,17 @@ export default function AssistantPanel({
 
   /** 音色切换 */
   const handleVoiceChange = useCallback(
-    async (value: string) => {
+    async (value: string, voiceItem?: VoiceCatalogItem) => {
       const acknowledged = await sendCommandWith({ cmd: "set_voice", voice: value });
       if (acknowledged) {
-        showToast(`音色已切换为: ${value}`, "success");
+        const resolvedVoiceItem = voiceItem ?? availableVoices.find((item) => item.id === value);
+        showToast(
+          `音色已切换为: ${getVoiceDisplayName(value, resolvedVoiceItem)}`,
+          "success",
+        );
       }
     },
-    [sendCommandWith],
+    [availableVoices, sendCommandWith],
   );
 
   /** 试听音色：请求后端 /v1/audio/speech 获取真实音频并播放 */
@@ -478,7 +482,7 @@ export default function AssistantPanel({
       });
       setShowVoiceDesignModal(false);
       setShowVoiceStudioModal(false);
-      void handleVoiceChange(newVoice.id);
+      void handleVoiceChange(newVoice.id, newVoice);
     },
     [handleVoiceChange],
   );

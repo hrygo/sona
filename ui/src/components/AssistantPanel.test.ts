@@ -22,6 +22,10 @@ const assistantEventHarness = vi.hoisted(() => ({
   onMessage: null as ((message: MessageEvent) => void) | null,
 }));
 
+const toastHarness = vi.hoisted(() => ({
+  showToast: vi.fn(),
+}));
+
 vi.mock("../hooks/useEventSocket", () => ({
   useEventSocket: (_url: string, onMessage: (message: MessageEvent) => void) => {
     assistantEventHarness.onMessage = onMessage;
@@ -70,6 +74,10 @@ vi.mock("./VoiceStudioModal", () => ({
   ]),
 }));
 
+vi.mock("./Toast", () => ({
+  showToast: toastHarness.showToast,
+}));
+
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
 let root: Root;
@@ -80,6 +88,7 @@ beforeEach(() => {
   document.body.append(container);
   root = createRoot(container);
   assistantEventHarness.onMessage = null;
+  toastHarness.showToast.mockClear();
   useAssistantStore.setState({ ...createAssistantSnapshot(), connected: false });
   useUISettingsStore.setState({ micMuted: false });
   vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("test fetch skipped")));
@@ -154,6 +163,36 @@ describe("voice audition presentation", () => {
     })).toBe("系统预设音色");
   });
 
+});
+
+describe("voice switching presentation", () => {
+  it("shows the readable voice name instead of its id after switching", async () => {
+    const sendCommand = vi.fn().mockResolvedValue({});
+    const commandSocket: CommandSocketApi = {
+      state: "open",
+      ready: true,
+      snapshot: null,
+      highestRuntimeRevision: null,
+      sendCommand,
+      reconcileRuntime: vi.fn().mockResolvedValue({}),
+    };
+
+    act(() => {
+      root.render(createElement(AssistantPanel, { commandSocket }));
+    });
+
+    const voiceSelect = container.querySelector<HTMLSelectElement>("#assistant-voice-select");
+    expect(voiceSelect).not.toBeNull();
+
+    await act(async () => {
+      voiceSelect!.value = "warm";
+      voiceSelect!.dispatchEvent(new Event("change", { bubbles: true }));
+      await Promise.resolve();
+    });
+
+    expect(sendCommand).toHaveBeenCalledWith({ cmd: "set_voice", voice: "warm" });
+    expect(toastHarness.showToast).toHaveBeenCalledWith("音色已切换为: 温暖磁性", "success");
+  });
 });
 
 describe("voice workshop microphone lease", () => {

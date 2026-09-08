@@ -90,7 +90,7 @@ class RecoveryJournal:
                     raise
             except OSError as exc:
                 raise RecoveryJournalError("无法写入 recovery journal") from exc
-            logger.warning(
+            logger.info(
                 "RecoveryJournal: 追加恢复记录 (meeting=%s, seq=%d, op=%s)",
                 meeting_id,
                 envelope.sequence,

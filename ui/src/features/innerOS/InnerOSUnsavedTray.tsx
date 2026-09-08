@@ -8,6 +8,7 @@ import {
   DownloadIcon,
   MaskIcon,
   TrashIcon,
+  XIcon,
 } from "../../components/Icons";
 
 interface Props {
@@ -80,6 +81,10 @@ export const InnerOSUnsavedTray: React.FC<Props> = ({
     }
   };
 
+  const handleDismissAll = () => {
+    items.forEach((item) => onDismissItem(item.queryId));
+  };
+
   return (
     <div className="inner-os-unsaved-tray" data-testid="inner-os-unsaved-tray">
       <div className="inner-os-tray-header">
@@ -116,6 +121,18 @@ export const InnerOSUnsavedTray: React.FC<Props> = ({
           <div className="inner-os-tray-ttl">
             <span title="会议结束后仍可在有效期内保存">30 分钟内可保存</span>
           </div>
+
+          <button
+            type="button"
+            className="inner-os-tray-tool-btn inner-os-tray-dismiss-all"
+            onClick={handleDismissAll}
+            title="忽略并关闭暂存托盘"
+            aria-label="忽略并关闭暂存托盘"
+            data-testid="inner-os-tray-dismiss-all"
+          >
+            <XIcon size={11} />
+            <span>忽略</span>
+          </button>
         </div>
       </div>
 
