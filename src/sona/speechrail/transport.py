@@ -1,10 +1,8 @@
-"""SpeechRail OpenAI-compatible Realtime transport adapter.
+"""SpeechRail v2.0.0 OpenAI-compatible Realtime transport.
 
-This is the single wire-protocol client for SpeechRail's ``WS /v1/realtime``
-(OpenAI Realtime ASR/TTS subset).  It owns only the OpenAI envelope concerns
-(JSON, ``type``/``session_id``/``sequence`` identity, strict monotonic
-sequence) and the outbound client events; ASR/TTS semantics stay in the
-adapters and ``speechrail.tts``.
+This module owns the WebSocket envelope, the standard ASR bootstrap and the
+single opt-in for the namespaced SpeechRail diarization extension. ASR event
+semantics are decoded by :mod:`sona.speechrail.transcription_events`.
 """
 
 from __future__ import annotations
@@ -55,7 +53,7 @@ class SpeechRailProtocolError(RuntimeError):
 
 
 class SpeechRailOpenAITransport:
-    """Validate the OpenAI Realtime envelope while leaving semantics to adapters."""
+    """Validate the OpenAI Realtime envelope and sequence identity."""
 
     def __init__(
         self,
@@ -67,20 +65,17 @@ class SpeechRailOpenAITransport:
     ) -> None:
         self._url = url
         normalized_key = api_key.strip() if isinstance(api_key, str) else None
-        if connection_factory is not None:
-            self._connection_factory: ConnectionFactory = connection_factory
-        else:
-            self._connection_factory = (
-                lambda target: _connect(
-                    target,
-                    headers=(
-                        {"Authorization": f"Bearer {normalized_key}"}
-                        if normalized_key
-                        else None
-                    ),
-                    open_timeout=connect_timeout_secs,
-                )
+        self._connection_factory = connection_factory or (
+            lambda target: _connect(
+                target,
+                headers=(
+                    {"Authorization": f"Bearer {normalized_key}"}
+                    if normalized_key
+                    else None
+                ),
+                open_timeout=connect_timeout_secs,
             )
+        )
         self._connection: SpeechRailConnection | None = None
         self._sequence = 0
         self._session_id: str | None = None
@@ -90,7 +85,6 @@ class SpeechRailOpenAITransport:
         return self._url
 
     async def connect(self) -> None:
-        """Open the socket without sending a protocol-specific session update."""
         if self._connection is not None:
             raise RuntimeError("SPEECHRAIL_ALREADY_CONNECTED")
         self._sequence = 0
@@ -113,8 +107,8 @@ class SpeechRailOpenAITransport:
             raise SpeechRailProtocolError("SPEECHRAIL_PROTOCOL_ERROR")
         sequence = payload.get("sequence")
         if (
-            not isinstance(sequence, int)
-            or isinstance(sequence, bool)
+            isinstance(sequence, bool)
+            or not isinstance(sequence, int)
             or sequence <= self._sequence
         ):
             raise SpeechRailProtocolError("SPEECHRAIL_SEQUENCE_ERROR")
@@ -138,38 +132,22 @@ class SpeechRailOpenAITransport:
 
     @property
     def session_id(self) -> str | None:
-        """已协商的 session id；连接关闭后回到 None。"""
         return self._session_id
 
     async def close(self) -> None:
-        if self._connection is not None:
-            try:
-                await self._connection.close()
-            finally:
-                self._connection = None
-                self._session_id = None
-                self._sequence = 0
+        if self._connection is None:
+            return
+        try:
+            await self._connection.close()
+        finally:
+            self._connection = None
+            self._session_id = None
+            self._sequence = 0
 
-
-_ASR_ALIAS_DIARIZE = "gpt-4o-transcribe-diarize"
-_ASR_ALIAS_PLAIN = "gpt-4o-transcribe"
-
-# SPK-E2E-1 分人扩展：能力字符串与 session.updated 契约约束（Rail 规格 §5.1）。
-DIARIZATION_EXTENSION_CAPABILITY = "speechrail.diarization.v1"
-_DIARIZATION_CONTRACT_TIMEBASE = "session_samples"
-_DIARIZATION_CONTRACT_SAMPLE_RATE = 16_000
-_SESSION_UPDATED_TIMEOUT_SECS = 10.0
 
 DEFAULT_SERVER_VAD_THRESHOLD = 0.65
-
-# (purpose, extensions) -> server_vad 静音窗毫秒；proxy 与 fallback 预设共用，
-# 静音窗调优只改这里这一处。
-_SERVER_VAD_SILENCE_MS: dict[tuple[str, bool], int] = {
-    ("subtitle", False): 400,
-    ("subtitle", True): 600,
-    ("meeting", False): 900,
-    ("meeting", True): 1_000,
-}
+_SESSION_UPDATED_TIMEOUT_SECS = 10.0
+_SERVER_VAD_SILENCE_MS = {"subtitle": 400, "meeting": 900}
 
 
 def build_server_vad_config(
@@ -178,7 +156,8 @@ def build_server_vad_config(
     silence_duration_ms: int = 400,
     prefix_padding_ms: int = 300,
 ) -> dict[str, object]:
-    """构造 SpeechRail server_vad 配置；默认 0.65 阈值有效阻断麦克风环境底噪误触发。"""
+    """Build the OpenAI-standard server VAD configuration."""
+
     return {
         "type": "server_vad",
         "threshold": threshold,
@@ -190,54 +169,26 @@ def build_server_vad_config(
 def resolve_server_vad_config(
     *,
     purpose: str,
-    extensions: bool,
+    diarization_enabled: bool = False,
     threshold: float = DEFAULT_SERVER_VAD_THRESHOLD,
 ) -> dict[str, object]:
-    """按会话用途与分人扩展协商结果解析 server_vad 配置。
+    """Resolve the bounded server VAD window for a subtitle or meeting stream."""
 
-    会议模式对自然短停顿更宽容（更长静音窗），避免将连续发言切成大量孤立的
-    填充词；分人扩展协商成功后再放宽一档。字幕等其余用途保持通用窗口。
-    """
-    key_purpose = "meeting" if purpose == "meeting" else "subtitle"
+    del diarization_enabled
+    key = "meeting" if purpose == "meeting" else "subtitle"
     return build_server_vad_config(
         threshold=threshold,
-        silence_duration_ms=_SERVER_VAD_SILENCE_MS[(key_purpose, extensions)],
-        prefix_padding_ms=300,
+        silence_duration_ms=_SERVER_VAD_SILENCE_MS[key],
     )
 
 
-DEFAULT_SERVER_VAD: dict[str, object] = resolve_server_vad_config(
-    purpose="subtitle",
-    extensions=False,
-)
-# 扩展模式推荐的 server VAD（Rail 规格 §5.1/Sona 设计 §3：silence 600ms）。
-DEFAULT_SERVER_VAD_EXTENSIONS: dict[str, object] = resolve_server_vad_config(
-    purpose="subtitle",
-    extensions=True,
-)
-MEETING_SERVER_VAD: dict[str, object] = resolve_server_vad_config(
-    purpose="meeting",
-    extensions=False,
-)
-MEETING_SERVER_VAD_EXTENSIONS: dict[str, object] = resolve_server_vad_config(
-    purpose="meeting",
-    extensions=True,
-)
+DEFAULT_SERVER_VAD = resolve_server_vad_config(purpose="subtitle")
+MEETING_SERVER_VAD = resolve_server_vad_config(purpose="meeting")
 MANUAL_TURN_DETECTION: dict[str, object] = {"type": "manual"}
 
 
 class SpeechRailRealtimeClient:
-    """One OpenAI-standard Realtime ASR session used by subtitle/meeting adapters.
-
-    ``connect`` opens the socket and sends a ``session.update`` that configures
-    the ``input_audio_transcription`` model/language and (optionally) enables
-    the session-scoped ``diarization`` profile.  Audio is streamed in 16 kHz
-    mono PCM16 base64 chunks and each turn is finalized with ``commit``.
-
-    线约束：追加块必须保持 512 采样（1024 字节）对齐。服务端 neural VAD 逐帧
-    打分且 commit 时对不足一帧的余数直接计分，非对齐流会累积余数并在 commit
-    时触发 ``backend_error``（本轮音频滞留）。
-    """
+    """One OpenAI-standard Realtime session for ASR and optional diarization."""
 
     def __init__(
         self,
@@ -253,7 +204,12 @@ class SpeechRailRealtimeClient:
             connect_timeout_secs=connect_timeout_secs,
             connection_factory=connection_factory,
         )
-        self._diarization_contract: dict[str, object] | None = None
+        self._baseline_ready = False
+        self._diarization_enabled = False
+        self._diarization_attempted = False
+        self._diarization_unavailable_reason: str | None = None
+        self._pcm_sent = False
+        self._finish_event_id: str | None = None
 
     @property
     def uri(self) -> str:
@@ -261,126 +217,106 @@ class SpeechRailRealtimeClient:
 
     @property
     def session_id(self) -> str | None:
-        """当前连接的 SpeechRail session id（未连接时为 None）。"""
         return self._transport.session_id
+
+    @property
+    def diarization_enabled(self) -> bool:
+        return self._diarization_enabled
+
+    @property
+    def diarization_unavailable_reason(self) -> str | None:
+        return self._diarization_unavailable_reason
 
     async def connect(
         self,
         *,
         language: str,
-        diarization: bool = False,
-        speaker_count_hint: int | None = None,
-        diarization_group_id: str | None = None,
         turn_detection: Mapping[str, object] | None = None,
-        diarization_extensions: bool = False,
+        diarization_enabled: bool = False,
     ) -> None:
+        """Bootstrap standard ASR, then optionally perform the one v2 opt-in."""
+
         await self._transport.connect()
-        negotiated_contract: dict[str, object] | None = None
-        negotiated = False
-        if diarization_extensions:
-            if speaker_count_hint is not None and not 1 <= speaker_count_hint <= 4:
-                await self._transport.close()
-                raise ValueError("SPEECHRAIL_SPEAKER_LIMIT_EXCEEDED")
-            created = await self._transport.receive()
-            capabilities = _session_capabilities(created)
-            if DIARIZATION_EXTENSION_CAPABILITY in capabilities:
-                negotiated_contract = await self._negotiate_extensions(
-                    language=language,
-                    speaker_count_hint=speaker_count_hint,
-                    diarization_group_id=diarization_group_id,
-                    turn_detection=turn_detection,
-                )
-                negotiated = True
-        if not negotiated:
-            await self._send_legacy_session_update(
-                language=language,
-                diarization=diarization,
-                speaker_count_hint=speaker_count_hint,
-                diarization_group_id=diarization_group_id,
-                turn_detection=turn_detection,
-            )
-        self._diarization_contract = negotiated_contract
+        self._baseline_ready = False
+        self._diarization_enabled = False
+        self._diarization_attempted = False
+        self._diarization_unavailable_reason = None
+        self._pcm_sent = False
+        self._finish_event_id = None
 
-    @property
-    def diarization_contract(self) -> dict[str, object] | None:
-        """协商成功后的 diarization_contract；legacy 连接为 None。"""
-        return self._diarization_contract
-
-    async def _negotiate_extensions(
-        self,
-        *,
-        language: str,
-        speaker_count_hint: int | None,
-        diarization_group_id: str | None,
-        turn_detection: Mapping[str, object] | None,
-    ) -> dict[str, object]:
-        transcription: dict[str, object] = {
-            "model": _ASR_ALIAS_DIARIZE,
-            "language": language,
-        }
-        diarization_config: dict[str, object] = {
-            "enabled": True,
-            "finalize": True,
-            "extensions": [DIARIZATION_EXTENSION_CAPABILITY],
-        }
-        if speaker_count_hint is not None:
-            diarization_config["speaker_count_hint"] = speaker_count_hint
-        if diarization_group_id is not None:
-            diarization_config["group_id"] = diarization_group_id
-        transcription["diarization"] = diarization_config
-        turn_cfg = dict(turn_detection) if turn_detection is not None else {
-            "type": "manual"
-        }
-        await self._transport.send_event(
-            {
-                "type": "session.update",
-                "session": {
-                    "turn_detection": turn_cfg,
-                    "input_audio_transcription": transcription,
-                },
-            }
-        )
-        updated = await asyncio.wait_for(
-            self._transport.receive(), timeout=_SESSION_UPDATED_TIMEOUT_SECS
-        )
-        if updated.get("type") != "session.updated":
-            raise SpeechRailProtocolError("SPEECHRAIL_PROTOCOL_ERROR")
-        return _validate_diarization_contract(updated)
-
-    async def _send_legacy_session_update(
-        self,
-        *,
-        language: str,
-        diarization: bool,
-        speaker_count_hint: int | None,
-        diarization_group_id: str | None,
-        turn_detection: Mapping[str, object] | None,
-    ) -> None:
-        transcription: dict[str, object] = {
-            "model": _ASR_ALIAS_DIARIZE if diarization else _ASR_ALIAS_PLAIN,
-            "language": language,
-        }
-        if diarization:
-            diarization_config: dict[str, object] = {"enabled": True, "finalize": True}
-            if speaker_count_hint is not None:
-                diarization_config["speaker_count_hint"] = speaker_count_hint
-            if diarization_group_id is not None:
-                diarization_config["group_id"] = diarization_group_id
-            transcription["diarization"] = diarization_config
+        await self._transport.receive()  # session.created: bootstrap only
         turn_cfg = dict(turn_detection) if turn_detection is not None else {"type": "manual"}
         await self._transport.send_event(
             {
                 "type": "session.update",
                 "session": {
                     "turn_detection": turn_cfg,
-                    "input_audio_transcription": transcription,
+                    "input_audio_transcription": {
+                        "model": "gpt-4o-transcribe",
+                        "language": language,
+                    },
                 },
             }
         )
+        baseline = await self._receive_session_updated()
+        self._validate_baseline_session(baseline)
+        self._baseline_ready = True
+        if diarization_enabled:
+            await self.negotiate_diarization()
+
+    async def _receive_session_updated(self) -> dict[str, object]:
+        try:
+            event = await asyncio.wait_for(
+                self._transport.receive(), timeout=_SESSION_UPDATED_TIMEOUT_SECS
+            )
+        except TimeoutError:
+            raise SpeechRailProtocolError("SPEECHRAIL_SESSION_UPDATE_TIMEOUT") from None
+        if event.get("type") == "error":
+            raise _error_from_event(event)
+        if event.get("type") != "session.updated":
+            raise SpeechRailProtocolError("SPEECHRAIL_PROTOCOL_ERROR")
+        return event
+
+    @staticmethod
+    def _validate_baseline_session(event: Mapping[str, object]) -> None:
+        session = event.get("session")
+        if not isinstance(session, dict) or "speechrail" in session:
+            raise SpeechRailProtocolError("SPEECHRAIL_PROTOCOL_ERROR")
+
+    async def negotiate_diarization(self) -> None:
+        """Perform the single pre-PCM namespaced opt-in, idempotently."""
+
+        if self._diarization_attempted:
+            return
+        if not self._baseline_ready:
+            raise SpeechRailProtocolError("SPEECHRAIL_SESSION_NOT_READY")
+        if self._pcm_sent:
+            raise SpeechRailProtocolError("SPEECHRAIL_LATE_DIARIZATION_OPT_IN")
+        self._diarization_attempted = True
+        await self._transport.send_event(
+            {
+                "type": "session.update",
+                "session": {"speechrail": {"diarization": {"enabled": True}}},
+            }
+        )
+        try:
+            event = await self._receive_session_updated()
+        except SpeechRailProtocolError as exc:
+            if exc.code in {"diarization_not_available", "unsupported_operation"}:
+                self._diarization_unavailable_reason = exc.code
+                return
+            raise
+        contract = _diarization_echo(event)
+        if contract != {"enabled": True, "version": 1, "max_speakers": 4}:
+            raise SpeechRailProtocolError("SPEECHRAIL_DIARIZATION_CONTRACT_ERROR")
+        self._diarization_enabled = True
 
     async def append_pcm(self, chunk: bytes) -> None:
         if not chunk or len(chunk) % 2:
             raise ValueError("PCM must be non-empty int16")
+        if self._finish_event_id is not None:
+            raise SpeechRailProtocolError("SPEECHRAIL_AUDIO_AFTER_FINISH")
+        self._pcm_sent = True
         await self._transport.send_event(
             {
                 "type": "input_audio_buffer.append",
@@ -389,21 +325,27 @@ class SpeechRailRealtimeClient:
         )
 
     async def commit(self) -> None:
+        if self._finish_event_id is not None:
+            raise SpeechRailProtocolError("SPEECHRAIL_COMMIT_AFTER_FINISH")
         await self._transport.send_event({"type": "input_audio_buffer.commit"})
 
     async def clear(self) -> None:
         await self._transport.send_event({"type": "input_audio_buffer.clear"})
 
-    async def send_diarization_finalize(self, finalization_id: str) -> None:
-        """发送 SPK-E2E-1 分人 finalize（Rail 规格 §5.4.3）。"""
-        if not finalization_id or len(finalization_id) > 128:
-            raise ValueError("finalization_id 长度必须在 1–128")
+    async def send_diarization_finish(self, event_id: str) -> None:
+        """Send one idempotent v2 finish request for the active diarization session."""
+
+        if not event_id or len(event_id) > 128:
+            raise ValueError("event_id 长度必须在 1–128")
+        if not self._diarization_enabled:
+            raise SpeechRailProtocolError("SPEECHRAIL_DIARIZATION_NOT_ENABLED")
+        if self._finish_event_id is not None:
+            if self._finish_event_id == event_id:
+                return
+            raise SpeechRailProtocolError("SPEECHRAIL_FINISH_ID_CONFLICT")
+        self._finish_event_id = event_id
         await self._transport.send_event(
-            {
-                "type": "speechrail.diarization.finalize",
-                "event_id": f"evt_client_{finalization_id}",
-                "finalization_id": finalization_id,
-            }
+            {"type": "speechrail.diarization.finish", "event_id": event_id}
         )
 
     async def receive(self) -> dict[str, object]:
@@ -411,6 +353,33 @@ class SpeechRailRealtimeClient:
 
     async def close(self) -> None:
         await self._transport.close()
+
+
+def _error_from_event(event: Mapping[str, object]) -> SpeechRailProtocolError:
+    error = event.get("error")
+    if not isinstance(error, dict):
+        return SpeechRailProtocolError("SPEECHRAIL_PROTOCOL_ERROR")
+    code = error.get("code")
+    message = error.get("message")
+    if not isinstance(code, str) or not code.strip():
+        return SpeechRailProtocolError("SPEECHRAIL_PROTOCOL_ERROR")
+    return SpeechRailProtocolError(
+        code,
+        message if isinstance(message, str) and message else None,
+    )
+
+
+def _diarization_echo(event: Mapping[str, object]) -> dict[str, object]:
+    session = event.get("session")
+    if not isinstance(session, dict):
+        raise SpeechRailProtocolError("SPEECHRAIL_DIARIZATION_CONTRACT_ERROR")
+    speechrail = session.get("speechrail")
+    if not isinstance(speechrail, dict):
+        raise SpeechRailProtocolError("SPEECHRAIL_DIARIZATION_CONTRACT_ERROR")
+    diarization = speechrail.get("diarization")
+    if not isinstance(diarization, dict):
+        raise SpeechRailProtocolError("SPEECHRAIL_DIARIZATION_CONTRACT_ERROR")
+    return {str(key): value for key, value in diarization.items()}
 
 
 def decode_pcm16(value: object) -> bytes:
@@ -427,67 +396,11 @@ def decode_pcm16(value: object) -> bytes:
     return audio
 
 
-def _session_capabilities(created: dict[str, object]) -> frozenset[str]:
-    """从 session.created 提取服务能力集合（缺失视为空）。"""
-    session = created.get("session")
-    if not isinstance(session, dict):
-        return frozenset()
-    capabilities = session.get("capabilities")
-    if not isinstance(capabilities, list):
-        return frozenset()
-    return frozenset(
-        item for item in capabilities if isinstance(item, str) and item
-    )
-
-
-def _validate_diarization_contract(updated: dict[str, object]) -> dict[str, object]:
-    """校验 session.updated 回显的 diarization_contract（Rail 规格 §5.1）。
-
-    未成功回显即未启用：任何字段缺失/越界都按协议错误处理，绝不降级猜测。
-    """
-    session = updated.get("session")
-    if not isinstance(session, dict):
-        raise SpeechRailProtocolError("SPEECHRAIL_PROTOCOL_ERROR")
-    contract = session.get("diarization_contract")
-    if not isinstance(contract, dict):
-        raise SpeechRailProtocolError("SPEECHRAIL_PROTOCOL_ERROR")
-    version = contract.get("version")
-    timebase = contract.get("timebase")
-    sample_rate = contract.get("sample_rate")
-    max_speakers = contract.get("max_speakers")
-    max_item_ms = contract.get("max_item_duration_ms")
-    max_revision_ms = contract.get("max_revision_delay_ms")
-    group_generation = contract.get("group_generation")
-    if (
-        version != 1
-        or timebase != _DIARIZATION_CONTRACT_TIMEBASE
-        or sample_rate != _DIARIZATION_CONTRACT_SAMPLE_RATE
-        or isinstance(max_speakers, bool)
-        or not isinstance(max_speakers, int)
-        or max_speakers < 1
-        or isinstance(max_item_ms, bool)
-        or not isinstance(max_item_ms, int)
-        or max_item_ms <= 0
-        or isinstance(max_revision_ms, bool)
-        or not isinstance(max_revision_ms, int)
-        or max_revision_ms <= 0
-    ):
-        raise SpeechRailProtocolError("SPEECHRAIL_PROTOCOL_ERROR")
-    if group_generation is not None and (
-        not isinstance(group_generation, str) or not group_generation
-    ):
-        raise SpeechRailProtocolError("SPEECHRAIL_PROTOCOL_ERROR")
-    return dict(contract)
-
-
 __all__ = [
     "DEFAULT_SERVER_VAD",
-    "DEFAULT_SERVER_VAD_EXTENSIONS",
     "DEFAULT_SERVER_VAD_THRESHOLD",
-    "DIARIZATION_EXTENSION_CAPABILITY",
     "MANUAL_TURN_DETECTION",
     "MEETING_SERVER_VAD",
-    "MEETING_SERVER_VAD_EXTENSIONS",
     "ConnectionFactory",
     "SpeechRailConnection",
     "SpeechRailOpenAITransport",
@@ -495,4 +408,5 @@ __all__ = [
     "SpeechRailRealtimeClient",
     "build_server_vad_config",
     "decode_pcm16",
+    "resolve_server_vad_config",
 ]

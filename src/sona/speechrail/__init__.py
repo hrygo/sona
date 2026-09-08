@@ -11,6 +11,9 @@ from sona.speechrail.transcriber import (
     SpeechRailStreamingTranscriber,
 )
 from sona.speechrail.transcription_events import (
+    DiarizationDoneEvent,
+    DiarizationStatusEvent,
+    DiarizationUpdatedEvent,
     Noop,
     SpeechRailTranscriptionError,
     TranscriptionCompleted,
@@ -32,6 +35,9 @@ from sona.speechrail.tts import SpeechRailTTSClient
 __all__ = [
     "ClientFactory",
     "ConnectionFactory",
+    "DiarizationDoneEvent",
+    "DiarizationStatusEvent",
+    "DiarizationUpdatedEvent",
     "Noop",
     "SpeechRailConnection",
     "SpeechRailConversationSTTFactory",
