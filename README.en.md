@@ -26,6 +26,16 @@
 
 > ⚠️ **Local Runtime Prerequisites**: Sona is deeply optimized for Apple Silicon and macOS, engineered with a 100% local-first architecture. It integrates with locally running [SpeechRail](https://github.com/hrygo/SpeechRail) (ASR / TTS / Diarization) and [LM Studio](https://lmstudio.ai/) (Local LLM Server); it is not an all-in-one monolithic package.
 
+## Current Implementation Status
+
+Sona now uses SpeechRail v2 through OpenAI Realtime: Meeting Assistant and Live Subtitles request the namespaced diarization opt-in independently through `/v1/realtime`, while disabled sessions retain the standard ASR flow. The current joint acceptance runtime is SpeechRail v2.0.2; `/health`, `/readyz`, and `realtime_vad` are ready, and Sona's protocol, transaction, frontend, and real meeting/subtitle smoke checks pass.
+
+- Meeting Assistant: immutable transcript text comes from `conversation.item.input_audio_transcription.completed`; `speechrail.diarization.updated/status/done` carries speaker revisions and the EOF watermark barrier.
+- Live Subtitles: queued PCM is drained, exactly one `finish` is sent, tail `updated` events are consumed through `done`, and the final SRT is written before shutdown.
+- Scope: SpeechRail DER/cpCER, long-file, long-duration resource, and RTTM/UEM quality are outside Sona's acceptance criteria.
+
+See the [SpeechRail v2 Joint Acceptance Report](docs/operations/speechrail-openai-diarization-integration-acceptance.md) and the [Implementation Plan](docs/superpowers/plans/2026-09-08-speechrail-openai-diarization-integration.md).
+
 ---
 
 ## Core Capabilities
@@ -78,10 +88,10 @@ flowchart LR
     ASSIST --> SR1[SpeechRail<br/>Realtime ASR / TTS]
     ASSIST --> LLM1[LM Studio<br/>Native /api/v1/chat]
 
-    SUB --> SR2[SpeechRail<br/>Realtime ASR]
+    SUB --> SR2[SpeechRail<br/>OpenAI Realtime ASR / optional diarization]
     SUB --> SRT[SRT Export / WS Broadcast]
 
-    MEET --> SR3[SpeechRail<br/>ASR + Diarization Channels]
+    MEET --> SR3[SpeechRail<br/>OpenAI Realtime ASR + Diarization]
     SR3 --> TEXT[Immutable Transcript Text]
     SR3 --> SPEAKER[Continuous Diarization & In-Place Patches]
     TEXT --> DB[(PostgreSQL<br/>Text / Metadata / Minutes)]
@@ -90,7 +100,7 @@ flowchart LR
     EOF --> SUMMARY[Asynchronous Local AI Minutes]
 ```
 
-> ℹ️ **Design References**: For in-depth technical specifications on continuous diarization negotiation, immutable transcripts, and the EOF barrier, refer to the [SPK-E2E-1 Design Specification](docs/architecture/speaker-diarization-e2e-design.md) and the [System Architecture Document](docs/architecture/系统总体架构与详细设计方案.md).
+> ℹ️ **Design References**: For SpeechRail v2 negotiation, immutable transcripts, and the EOF barrier, refer to the [SPK-E2E-1 Design Specification](docs/architecture/speaker-diarization-e2e-design.md), the [System Architecture Document](docs/architecture/系统总体架构与详细设计方案.md), and the [Joint Acceptance Report](docs/operations/speechrail-openai-diarization-integration-acceptance.md).
 
 ---
 
@@ -102,7 +112,7 @@ flowchart LR
 | **Python** | `==3.12.*` (Strictly pinned) | Managed via [`uv`](https://docs.astral.sh/uv/) for reproducible virtual environments |
 | **Frontend Tooling** | Node.js `^20.19.0` or `>=22.12.0`, npm | Required to build the React 19 + Vite 7 web console |
 | **Database** | PostgreSQL 14+ | Persists structured meeting records (DSN: `postgresql:///knowledge`, schema: `sona`) |
-| **SpeechRail** | Standalone local service (Default port: `8201`) | Provides streaming ASR, TTS, and diarization; health check: `http://127.0.0.1:8201/health` |
+| **SpeechRail** | Standalone local service (Default port: `8201`; v2.0.2 in current acceptance) | Provides OpenAI Realtime ASR, TTS, and diarization; health checks: `/health`, `/readyz` |
 | **LM Studio** | Standalone local service (Default port: `1234`) | Hosts local LLM inference; recommended model: `local/kat-coder-2.5` |
 
 > 💡 **Permission Note**: Before launching Sona, verify that macOS has granted **Microphone Access** to your terminal emulator or application in System Settings.
@@ -213,7 +223,8 @@ Configuration is validated via modular `pydantic-settings` classes and can be cu
 | `SONA_INTERACTION_LLM_MODEL` | `local/kat-coder-2.5` | Voice Assistant LLM model identifier |
 | `SONA_MEETING_DATABASE_URL` | `postgresql:///knowledge` | PostgreSQL DSN for meeting persistence |
 | `SONA_MEETING_SCHEMA` | `sona` | Isolated database schema for meeting tables |
-| `SONA_MEETING_DIARIZATION_EXTENSIONS_ENABLED` | `false` | Enable continuous diarization protocol extensions |
+| `SONA_MEETING_DIARIZATION_ENABLED` | `false` | Enable the SpeechRail v2 diarization opt-in for Meeting Assistant Realtime sessions |
+| `SONA_SUBTITLE_DIARIZATION_ENABLED` | `false` | Enable the SpeechRail v2 diarization opt-in for Live Subtitle Realtime sessions |
 | `SONA_MEETING_INNER_OS_ENABLED` | `false` | Enable the in-meeting Inner OS side panel |
 
 > For the comprehensive configuration surface, see the [Meeting Assistant Manual](docs/manuals/会议助手后端运行与前后端联调.md). Never commit `.env` files containing real credentials to version control.
@@ -237,8 +248,8 @@ sona/
 │   ├── audio/              # Single-source microphone capture & bounded fan-out Hub
 │   ├── asr/                # ASR unified contracts, audio chunk models & presenters
 │   ├── interaction/        # Pipecat pipeline, LM Studio chaining & dual echo defenses
-│   ├── meeting/            # Meeting state machine, diarization smoothing, DB & minutes
-│   ├── speechrail/         # SpeechRail Realtime protocol adapters & event deserializers
+│   ├── meeting/            # Meeting state machine, speaker-only revisions, DB & minutes
+│   ├── speechrail/         # SpeechRail OpenAI Realtime adapters & event deserializers
 │   ├── subtitles/          # Live subtitle streaming, SRT archive export & WS broadcast
 │   ├── config/             # Pydantic modular type-safe configuration subsystem
 │   └── ui/                 # Mode coordinator, FastAPI routes & WebSocket control gateway
@@ -281,8 +292,8 @@ uv run ruff check src/ tests/
 
 - 🧭 [Documentation Hub](docs/README.md): Full technical documentation index, document lifecycle statuses, and role-based navigation.
 - 🏛️ [System Architecture & Detailed Design](docs/architecture/系统总体架构与详细设计方案.md): Authoritative architectural topology, sequence diagrams, and module contracts.
-- 👥 [SPK-E2E-1 Diarization Design Specification](docs/architecture/speaker-diarization-e2e-design.md): Continuous diarization, immutable text, and watermark barrier specifications.
-- 📋 [SPK-E2E-1 Joint Acceptance Report](docs/operations/speaker-diarization-e2e-acceptance-2026-09-06.md): Integration test logs, coverage metrics, and verification records.
+- 👥 [SPK-E2E-1 Diarization Design Specification](docs/architecture/speaker-diarization-e2e-design.md): SpeechRail v2 dual-channel diarization, immutable text, and watermark barrier specifications.
+- 📋 [SpeechRail v2 Joint Acceptance Report](docs/operations/speechrail-openai-diarization-integration-acceptance.md): Real meeting/subtitle smoke, quality gates, and final SRT archive evidence.
 - 🛠️ [Meeting Assistant Manual](docs/manuals/会议助手后端运行与前后端联调.md): Operations guide, database setup, and end-to-end integration workflows.
 - 📜 [Meeting Assistant Contracts](contracts/meeting-assistant/v1/README.md): OpenAPI / AsyncAPI specifications and test fixtures.
 - 🤝 [Contributing Guide](CONTRIBUTING.md): Development environment setup, Git conventions, and PR workflows.

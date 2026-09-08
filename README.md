@@ -26,6 +26,16 @@
 
 > ⚠️ **本地运行说明**：Sona 专为 Apple Silicon / macOS 深度调优，基于全本地离线架构构建。它依赖本机独立运行的 [SpeechRail](https://github.com/hrygo/SpeechRail)（ASR / TTS / Diarization）与 [LM Studio](https://lmstudio.ai/)（Local LLM Server），并非打包全部模型的单体黑盒。
 
+## 当前实现状态
+
+Sona 已完成 SpeechRail v2 OpenAI Realtime 接入：会议与实时字幕在各自显式开关开启时，通过 `/v1/realtime` 使用唯一的 namespaced diarization opt-in；未开启时保持标准 ASR 流程。当前联合验收使用 SpeechRail v2.0.2，`/health`、`/readyz` 与 `realtime_vad` 均已验证 ready，Sona 的协议、事务、前端和真实会议/字幕 smoke 全部通过。
+
+- 会议：`conversation.item.input_audio_transcription.completed` 提供不可变正文，`speechrail.diarization.updated/status/done` 提供说话人修订与 EOF 水位屏障。
+- 字幕：停止时排空 PCM、发送一次 `finish`、消费尾部 `updated` 直到 `done`，再写入最终 SRT。
+- 验收边界：SpeechRail 的 DER/cpCER、长文件、长时资源和 RTTM/UEM 质量不包含在 Sona 本次 AC 中。
+
+详见 [SpeechRail v2 联合验收报告](docs/operations/speechrail-openai-diarization-integration-acceptance.md) 与 [对接实施计划](docs/superpowers/plans/2026-09-08-speechrail-openai-diarization-integration.md)。
+
 ---
 
 ## 核心能力
@@ -40,12 +50,12 @@ Sona 是一套 **中文优先、全本地、隐私主权** 的实时语音交互
   - **滚动上下文压缩（ADR-003）**：根据原生 Token 吞吐自适应无感原子换链，保留长时记忆。
 
 - 👥 **持续分人会议助手（Meeting Assistant · SPK-E2E-1）**
-  - **双通道流式转录**：转录正文通道与持续说话人分离（Diarization）通道完全解耦。
+  - **SpeechRail v2 双通道流式转录**：不可变正文通道与持续说话人分离（Diarization）修订通道完全解耦。
   - **三大持久化公理**：
     1. **正文不可变**：已确认的转录文本单元（`CompletedItem`）具有不可变法律效力；
     2. **分人原位修订**：说话人归属作为独立元数据原子更新，时序平滑器自动消除断续毛刺；
     3. **人工更正绝对优先**：会中或会后人工指定的说话人锁定保护，绝不被后续算法或 EOF 冲刷覆盖。
-  - **EOF 水位屏障与本地 AI 纪要**：会话结束优雅对齐分人水位，异步生成高精度结构化会议纪要。
+  - **EOF 水位屏障与本地 AI 纪要**：会话结束等待 `speechrail.diarization.done` 与分人水位对齐，再异步生成结构化会议纪要。
 
 - ⚡ **零延迟实时字幕（Live Subtitles）**
   - 极速流式转录上屏，毫秒级多端 WebSocket 广播与低延迟呈现。
@@ -78,10 +88,10 @@ flowchart LR
     ASSIST --> SR1[SpeechRail<br/>Realtime ASR / TTS]
     ASSIST --> LLM1[LM Studio<br/>原生 /api/v1/chat]
 
-    SUB --> SR2[SpeechRail<br/>Realtime ASR]
+    SUB --> SR2[SpeechRail<br/>OpenAI Realtime ASR / optional diarization]
     SUB --> SRT[SRT 导出 / WS 广播]
 
-    MEET --> SR3[SpeechRail<br/>ASR + Diarization 双通道]
+    MEET --> SR3[SpeechRail<br/>OpenAI Realtime ASR + Diarization]
     SR3 --> TEXT[不可变转录正文]
     SR3 --> SPEAKER[持续分人平滑与原位修订]
     TEXT --> DB[(PostgreSQL<br/>文本 / 元数据 / 纪要)]
@@ -90,7 +100,7 @@ flowchart LR
     EOF --> SUMMARY[异步本地 AI 纪要]
 ```
 
-> ℹ️ **设计参考**：关于持续分人协议协商、不可变正文与水位屏障的具体设计细节，请参阅 [SPK-E2E-1 端到端设计规格](docs/architecture/speaker-diarization-e2e-design.md) 与 [系统总体架构与详细设计方案](docs/architecture/系统总体架构与详细设计方案.md)。
+> ℹ️ **设计参考**：关于 SpeechRail v2 协议协商、不可变正文与水位屏障的具体设计细节，请参阅 [SPK-E2E-1 端到端设计规格](docs/architecture/speaker-diarization-e2e-design.md)、[系统总体架构与详细设计方案](docs/architecture/系统总体架构与详细设计方案.md) 与 [联合验收报告](docs/operations/speechrail-openai-diarization-integration-acceptance.md)。
 
 ---
 
@@ -102,7 +112,7 @@ flowchart LR
 | **Python** | `==3.12.*`（严格锁定） | 依赖包由 [`uv`](https://docs.astral.sh/uv/) 进行可复现管理 |
 | **前端环境** | Node.js `^20.19.0` 或 `>=22.12.0`，npm | 构建 React 19 + Vite 7 控制台 |
 | **数据库** | PostgreSQL 14+ | 存储会议结构化数据（DSN: `postgresql:///knowledge`，schema: `sona`） |
-| **SpeechRail** | 本地服务（默认端口 `8201`） | 提供 Realtime ASR、TTS 及持续分人能力；健康检查：`http://127.0.0.1:8201/health` |
+| **SpeechRail** | 本地服务（默认端口 `8201`；当前联调 v2.0.2） | 提供 OpenAI Realtime ASR、TTS 及持续分人能力；健康检查：`/health`、`/readyz` |
 | **LM Studio** | 本地服务（默认端口 `1234`） | 提供大模型推理能力；推荐模型：`local/kat-coder-2.5` |
 
 > 💡 **权限提示**：首次运行前，请务必在 macOS 系统偏好设置中为运行 Sona 的终端或应用授予 **麦克风访问权限**。
@@ -213,7 +223,8 @@ scripts/run-interact.sh
 | `SONA_INTERACTION_LLM_MODEL` | `local/kat-coder-2.5` | 交互助手推理模型 ID |
 | `SONA_MEETING_DATABASE_URL` | `postgresql:///knowledge` | 会议持久化 PostgreSQL DSN |
 | `SONA_MEETING_SCHEMA` | `sona` | 会议表所在隔离 Schema |
-| `SONA_MEETING_DIARIZATION_EXTENSIONS_ENABLED` | `false` | 是否启用与 SpeechRail 的持续分人扩展协商 |
+| `SONA_MEETING_DIARIZATION_ENABLED` | `false` | 是否在会议 Realtime session 中启用 SpeechRail v2 分人 opt-in |
+| `SONA_SUBTITLE_DIARIZATION_ENABLED` | `false` | 是否在实时字幕 Realtime session 中启用 SpeechRail v2 分人 opt-in |
 | `SONA_MEETING_INNER_OS_ENABLED` | `false` | 是否开启会中 Inner OS 战术侧边面板 |
 
 > 完整参数规格与高级调优请参阅 [会议助手后端运行与前后端联调手册](docs/manuals/会议助手后端运行与前后端联调.md)。切勿将含有敏感密钥的 `.env` 提交到公开版本库。
@@ -237,8 +248,8 @@ sona/
 │   ├── audio/              # 单源麦克风采集、硬件探测与有界扇出 Hub
 │   ├── asr/                # ASR 统一契约、音频切片模型与文本呈现器
 │   ├── interaction/        # Pipecat 全双工语音交互管道、LM Studio 链与双层防回声
-│   ├── meeting/            # 会议状态机、持续分人平滑、PostgreSQL 仓储与 AI 纪要
-│   ├── speechrail/         # SpeechRail Realtime ASR/TTS 协议适配与事件解析
+│   ├── meeting/            # 会议状态机、speaker-only 修订、PostgreSQL 仓储与 AI 纪要
+│   ├── speechrail/         # SpeechRail OpenAI Realtime 协议适配与事件解析
 │   ├── subtitles/          # 实时字幕引擎、SRT 归档导出与客户端广播池
 │   ├── config/             # Pydantic 强类型配置子系统
 │   └── ui/                 # 统一模式协调器、FastAPI / WebSocket 控制网关
@@ -281,8 +292,8 @@ uv run ruff check src/ tests/
 
 - 🧭 [文档中心总览 (Documentation Hub)](docs/README.md)：系统技术文档索引、生命周期状态对照表与角色导航矩阵。
 - 🏛️ [系统总体架构与详细设计方案](docs/architecture/系统总体架构与详细设计方案.md)：权威架构拓扑、全链路时序图与设计规格。
-- 👥 [SPK-E2E-1 持续分人端到端设计规格](docs/architecture/speaker-diarization-e2e-design.md)：持续分人双通道、不可变正文与水位屏障核心规范。
-- 📋 [SPK-E2E-1 端到端联合验收报告](docs/operations/speaker-diarization-e2e-acceptance-2026-09-06.md)：真实联调记录、覆盖率及全绿验收证据。
+- 👥 [SPK-E2E-1 持续分人端到端设计规格](docs/architecture/speaker-diarization-e2e-design.md)：SpeechRail v2 双通道、不可变正文与水位屏障核心规范。
+- 📋 [SpeechRail v2 联合验收报告](docs/operations/speechrail-openai-diarization-integration-acceptance.md)：真实 meeting/subtitle smoke、质量门和最终 SRT 归档证据。
 - 🛠️ [会议助手后端运行与前后端联调手册](docs/manuals/会议助手后端运行与前后端联调.md)：接口定义、数据库治理与端到端联调指南。
 - 📜 [Meeting Assistant 规范契约](contracts/meeting-assistant/v1/README.md)：OpenAPI / AsyncAPI 规范与通信 Fixtures。
 - 🤝 [贡献指南 (Contributing Guide)](CONTRIBUTING.md)：开发环境配置、Git Commit 规范与 PR 提交流程。
