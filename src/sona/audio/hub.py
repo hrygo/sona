@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import math
 import threading
 import time
 from collections.abc import Awaitable, Callable
@@ -34,6 +35,7 @@ SAMPLE_RATE = 16000
 CHANNELS = 1
 SAMPLE_WIDTH = 2  # 16-bit
 CHUNK_SIZE = 512  # 每次读取的采样帧数（~32ms @ 16kHz；mono int16 为 1024 bytes）
+STREAM_OPEN_TIMEOUT_SECS = 5.0
 
 
 @dataclass(slots=True)
@@ -70,11 +72,14 @@ class AudioHub:
         chunk_size: int = CHUNK_SIZE,
         queue_size: int = 8,
         throttle_secs: float = 0.0,
+        stream_open_timeout_secs: float = STREAM_OPEN_TIMEOUT_SECS,
     ) -> None:
         normalized_name = device_name.strip() if device_name is not None else None
         normalized_name = normalized_name or None
         if device_index is not None and normalized_name is not None:
             raise ValueError("麦克风设备索引与名称不能同时配置")
+        if not math.isfinite(stream_open_timeout_secs) or stream_open_timeout_secs <= 0:
+            raise ValueError("音频流打开超时必须是有限正数")
         self._device_index = device_index
         self._device_name = normalized_name
         self._resolved_device_index: int | None = None
@@ -82,6 +87,7 @@ class AudioHub:
         self._chunk_size = chunk_size
         self._queue_size = max(1, queue_size)
         self._throttle_secs = throttle_secs
+        self._stream_open_timeout_secs = stream_open_timeout_secs
         self._sinks: dict[str, _SinkState] = {}
         self._running = False
         self._muted = False
@@ -166,7 +172,13 @@ class AudioHub:
                 daemon=True,
             )
             self._thread.start()
-            await self._open_future
+            try:
+                async with asyncio.timeout(self._stream_open_timeout_secs):
+                    await self._open_future
+            except TimeoutError as exc:
+                raise AudioInputDeviceError(
+                    f"音频流打开超时（{self._stream_open_timeout_secs:g}s）"
+                ) from exc
         except BaseException:
             await self._cleanup_after_failed_start()
             raise

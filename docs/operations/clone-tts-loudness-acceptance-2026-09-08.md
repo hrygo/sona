@@ -9,16 +9,22 @@
 - 日期：2026-09-08（Asia/Shanghai）。
 - Sona：`fix/tts-clone-loudness-issue-10`，guard 与客户端接线已提交。
 - SpeechRail：本机 `1.13.1`，`quality` profile；`/health`、`/readyz` 均返回 ready。
-- 本次运行服务返回 `speech_capabilities.audio_loudness_profile` 缺失，因此 Sona 使用
-  bounded compatibility mode；未发送任何 proprietary Realtime 字段。
+- 本次运行服务返回 `speech_capabilities.audio_loudness_profile` 缺失，因此 custom voice
+  使用 bounded compatibility mode；已知内置 preset 保持 PCM passthrough，未发送任何
+  proprietary Realtime 字段。
 
 ## 自动化验证
 
-- TTS/guard focused tests：19 passed。
+- TTS/guard/config/pipeline focused tests：75 passed。
 - `mypy src/`：110 个源文件通过。
 - `ruff check src/ tests/`：通过。
 - 前端 `npm test -- --run`：353 passed。
 - 前端 `npm run build`：通过。
+- 全量后端：1159 passed，覆盖率 83.69%。新增回归覆盖 `AudioHub` 的阻塞式
+  `PyAudio.open()` 超时，以及 `/api/services` 探针测试不触碰真实音频设备。
+
+兼容模式参数已通过 `SONA_INTERACTION_TTS_LOUDNESS_*` 配置项注入生产 TTS client，且
+target、peak ceiling、最大增益/衰减和时间常数均有边界校验。
 
 ## 实时 PCM 统计
 

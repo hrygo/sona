@@ -612,7 +612,9 @@ class TestServices:
             return Mock(status_code=200)
 
         application = create_app(_settings(), initialize_meeting=False)
+        runtime = _FakeRuntime()
         with (
+            patch("sona.ui.server.UIRuntime", return_value=runtime),
             patch(
                 "sona.ui.http_routes.httpx.AsyncClient.get",
                 new_callable=AsyncMock,

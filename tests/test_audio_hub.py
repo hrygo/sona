@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from sona.audio.devices import AudioInputDeviceError
 from sona.audio.hub import AudioHub
 
 
@@ -114,6 +116,43 @@ class TestLifecycle:
             with pytest.raises(OSError, match="permission denied"):
                 await hub.start()
         mock_pa.PyAudio.return_value.terminate.assert_called_once()
+
+    async def test_start_times_out_when_stream_open_blocks(self) -> None:
+        open_started = threading.Event()
+        release_open = threading.Event()
+        open_finished = threading.Event()
+        mock_stream = MagicMock()
+        mock_pa = MagicMock()
+        mock_pa.PyAudio.return_value.get_default_input_device_info.return_value = {"index": 0}
+        mock_pa.PyAudio.return_value.get_device_info_by_index.return_value = {
+            "name": "mock-mic",
+            "maxInputChannels": 1,
+        }
+
+        def blocked_open(*_args: object, **_kwargs: object) -> MagicMock:
+            open_started.set()
+            release_open.wait(timeout=2.0)
+            open_finished.set()
+            return mock_stream
+
+        mock_pa.PyAudio.return_value.open.side_effect = blocked_open
+
+        with patch("sona.audio.hub.pyaudio", mock_pa):
+            hub = AudioHub(stream_open_timeout_secs=0.05)
+            try:
+                with pytest.raises(AudioInputDeviceError, match="音频流打开超时"):
+                    await hub.start()
+            finally:
+                release_open.set()
+
+        assert open_started.is_set()
+        assert await asyncio.to_thread(open_finished.wait, 1.0)
+        assert hub.running is False
+
+    @pytest.mark.parametrize("timeout_secs", [0.0, float("inf"), float("nan")])
+    def test_rejects_non_finite_stream_open_timeout(self, timeout_secs: float) -> None:
+        with pytest.raises(ValueError, match="有限正数"):
+            AudioHub(stream_open_timeout_secs=timeout_secs)
 
     async def test_start_twice_noop(self, mock_pyaudio: MagicMock) -> None:
         hub = AudioHub()
