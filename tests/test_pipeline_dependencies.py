@@ -111,6 +111,7 @@ def test_default_tts_factory_uses_speechrail_config() -> None:
     kwargs = tts_service.call_args.kwargs
     assert kwargs["url"] == settings.speechrail_realtime_url
     assert kwargs["api_key"] == settings.speechrail_api_key
+    assert kwargs["loudness_config"] == settings.tts_loudness_config()
     tts_service.Settings.assert_called_once_with(
         model=settings.speechrail_tts_model,
         voice=settings.tts_voice,

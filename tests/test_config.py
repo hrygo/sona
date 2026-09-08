@@ -184,6 +184,46 @@ def test_speechrail_tts_configuration_is_explicit_and_uses_public_model() -> Non
     assert settings.speechrail_api_key == "speechrail-test-key"
 
 
+def test_interaction_tts_loudness_config_is_bounded_and_mapped() -> None:
+    settings = InteractionSettings(
+        _env_file=None,
+        tts_loudness_target_dbfs=-18.0,
+        tts_loudness_peak_ceiling_dbfs=-2.0,
+        tts_loudness_max_gain_db=9.0,
+        tts_loudness_max_attenuation_db=-5.0,
+        tts_loudness_calibration_ms=300,
+        tts_loudness_attack_ms=200,
+        tts_loudness_release_ms=900,
+    )
+
+    config = settings.tts_loudness_config()
+
+    assert config.target_dbfs == -18.0
+    assert config.peak_ceiling_dbfs == -2.0
+    assert config.max_gain_db == 9.0
+    assert config.max_attenuation_db == -5.0
+    assert config.calibration_ms == 300
+    assert config.attack_ms == 200
+    assert config.release_ms == 900
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"tts_loudness_target_dbfs": -61.0},
+        {"tts_loudness_max_gain_db": 25.0},
+        {"tts_loudness_max_attenuation_db": 1.0},
+        {
+            "tts_loudness_peak_ceiling_dbfs": -20.0,
+            "tts_loudness_max_attenuation_db": -6.0,
+        },
+    ],
+)
+def test_interaction_rejects_unsafe_tts_loudness_config(kwargs: dict[str, object]) -> None:
+    with pytest.raises(ValidationError):
+        InteractionSettings(_env_file=None, **kwargs)
+
+
 def test_subtitle_speechrail_api_key_is_trimmed_and_optional() -> None:
     assert (
         SubtitleSettings(_env_file=None, speechrail_api_key="  subtitle-key  ").speechrail_api_key

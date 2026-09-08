@@ -9,18 +9,26 @@ import pytest
 from pipecat.frames.frames import TTSAudioRawFrame
 
 from sona.interaction.tts import SpeechRailTTSService
+from sona.speechrail.tts_loudness import Pcm16LoudnessConfig
 
 
 class FakeSpeechRailTTSClient:
-    def __init__(self, *, block_after_audio: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        audio_chunks: tuple[bytes, ...] = (b"\x01\x00",),
+        block_after_audio: bool = False,
+    ) -> None:
         self.requests: list[tuple[str, float]] = []
         self.cancelled = False
         self.closed = False
+        self._audio_chunks = audio_chunks
         self._block_after_audio = block_after_audio
 
     async def synthesize(self, text: str, *, speed: float) -> AsyncIterator[bytes]:
         self.requests.append((text, speed))
-        yield b"\x01\x00"
+        for chunk in self._audio_chunks:
+            yield chunk
         if not self._block_after_audio:
             return
         try:
@@ -91,4 +99,39 @@ async def test_speechrail_tts_service_propagates_pipeline_task_cancellation_to_c
 
     assert client.cancelled
     assert client.closed
+    await service.cleanup()
+
+
+async def test_speechrail_tts_service_forwards_loudness_config_and_keeps_frame_metadata() -> None:
+    client = FakeSpeechRailTTSClient(audio_chunks=(b"\x01\x00", b"\x02\x00"))
+    loudness_config = Pcm16LoudnessConfig(max_gain_db=3.0)
+    factory_calls: list[dict[str, object]] = []
+
+    def client_factory(**kwargs: object) -> FakeSpeechRailTTSClient:
+        factory_calls.append(kwargs)
+        return client
+
+    service = SpeechRailTTSService(
+        url="ws://speechrail.test/v1/realtime",
+        client_factory=client_factory,
+        loudness_config=loudness_config,
+        settings=SpeechRailTTSService.Settings(
+            model="speechrail/qwen3-tts", voice="warm", language="zh"
+        ),
+    )
+
+    frames = [frame async for frame in service.run_tts("测试", "turn-frames")]
+
+    assert factory_calls[0]["loudness_config"] is loudness_config
+    assert [frame.audio for frame in frames if isinstance(frame, TTSAudioRawFrame)] == [
+        b"\x01\x00",
+        b"\x02\x00",
+    ]
+    assert all(
+        isinstance(frame, TTSAudioRawFrame)
+        and frame.sample_rate == 24_000
+        and frame.num_channels == 1
+        and frame.context_id == "turn-frames"
+        for frame in frames
+    )
     await service.cleanup()

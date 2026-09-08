@@ -13,6 +13,7 @@ from sona.speechrail.transport import (
     SpeechRailProtocolError,
 )
 from sona.speechrail.tts import SpeechRailTTSClient
+from sona.speechrail.tts_loudness import Pcm16LoudnessConfig
 
 
 class FakeSpeechConnection:
@@ -213,13 +214,33 @@ def test_tts_client_applies_one_loudness_guard_across_audio_deltas() -> None:
 
 def test_tts_client_keeps_unannounced_builtin_voice_pcm_unchanged() -> None:
     async def scenario() -> None:
-        audio = _constant_pcm16(0.40, 1_920)
+        audio = _constant_pcm16(0.99, 1_920)
         connection = FakeSpeechConnection(audio_deltas=[audio])
         client = SpeechRailTTSClient(
             url=connection.uri,
             model="speechrail/qwen3-tts",
             voice="warm",
             language="zh",
+            connection_factory=lambda _: _immediate(connection),
+        )
+
+        chunks = [chunk async for chunk in client.synthesize("测试")]
+
+        assert chunks == [audio]
+
+    asyncio.run(scenario())
+
+
+def test_tts_client_uses_injected_loudness_config() -> None:
+    async def scenario() -> None:
+        audio = _constant_pcm16(0.05, 1_920)
+        connection = FakeSpeechConnection(audio_deltas=[audio])
+        client = SpeechRailTTSClient(
+            url=connection.uri,
+            model="speechrail/qwen3-tts",
+            voice="clone-test",
+            language="zh",
+            loudness_config=Pcm16LoudnessConfig(max_gain_db=0.0),
             connection_factory=lambda _: _immediate(connection),
         )
 

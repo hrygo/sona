@@ -97,6 +97,7 @@ def default_pipeline_factories(settings: InteractionSettings) -> PipelineFactori
         return SpeechRailTTSService(
             url=settings.speechrail_realtime_url,
             api_key=settings.speechrail_api_key,
+            loudness_config=settings.tts_loudness_config(),
             fast_first_clause=settings.tts_fast_first_clause,
             first_clause_min_chars=settings.tts_first_clause_min_chars,
             settings=SpeechRailTTSService.Settings(

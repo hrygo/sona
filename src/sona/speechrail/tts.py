@@ -21,6 +21,7 @@ from sona.speechrail.transport import (
 )
 from sona.speechrail.tts_loudness import (
     LoudnessMode,
+    Pcm16LoudnessConfig,
     StreamingPcm16LoudnessGuard,
 )
 
@@ -57,6 +58,7 @@ class SpeechRailTTSClient:
         language: str = "auto",
         api_key: str | None = None,
         connection_factory: ConnectionFactory | None = None,
+        loudness_config: Pcm16LoudnessConfig | None = None,
     ) -> None:
         if not model.strip():
             raise ValueError("model must not be blank")
@@ -70,6 +72,7 @@ class SpeechRailTTSClient:
         self._language = language.strip() or "auto"
         self._api_key = api_key
         self._connection_factory = connection_factory
+        self._loudness_config = loudness_config or Pcm16LoudnessConfig()
         self._transport: SpeechRailOpenAITransport | None = None
         self._active_response_id: str | None = None
         self._audio_loudness_profile: str | None = None
@@ -94,7 +97,11 @@ class SpeechRailTTSClient:
             api_key=self._api_key,
             connection_factory=self._connection_factory,
         )
-        loudness_guard = StreamingPcm16LoudnessGuard(sample_rate=24_000)
+        loudness_guard = StreamingPcm16LoudnessGuard(
+            sample_rate=24_000,
+            config=self._loudness_config,
+        )
+        apply_loudness_guard = True
         self._audio_loudness_profile = None
         self._transport = transport
         try:
@@ -129,10 +136,12 @@ class SpeechRailTTSClient:
                 if event_type == "session.created":
                     profile = _audio_loudness_profile(event)
                     self._audio_loudness_profile = profile
-                    mode = _resolve_loudness_mode(profile)
-                    if profile is None and self._voice.lower() in SPEECHRAIL_TTS_VOICE_IDS:
-                        mode = "safety"
-                    loudness_guard.set_mode(mode)
+                    apply_loudness_guard = _should_apply_loudness_guard(
+                        profile=profile,
+                        voice=self._voice,
+                    )
+                    if apply_loudness_guard:
+                        loudness_guard.set_mode(_resolve_loudness_mode(profile))
                 elif event_type == "response.created":
                     response_id = _response_id(event.get("response"))
                     if self._active_response_id is not None:
@@ -140,7 +149,8 @@ class SpeechRailTTSClient:
                     self._active_response_id = response_id
                 elif event_type == "response.audio.delta":
                     self._ensure_active(event.get("response_id"))
-                    yield loudness_guard.process(decode_pcm16(event.get("delta")))
+                    pcm = decode_pcm16(event.get("delta"))
+                    yield loudness_guard.process(pcm) if apply_loudness_guard else pcm
                 elif event_type == "response.done":
                     self._active_response_id = None
                     status = _response_status(event.get("response"))
@@ -205,6 +215,11 @@ def _resolve_loudness_mode(profile: object) -> LoudnessMode:
     if profile == _STABLE_LOUDNESS_PROFILE:
         return "safety"
     return "compatibility"
+
+
+def _should_apply_loudness_guard(*, profile: str | None, voice: str) -> bool:
+    """Keep legacy built-in streams byte-compatible until a profile is declared."""
+    return profile is not None or voice.lower() not in SPEECHRAIL_TTS_VOICE_IDS
 
 
 def _audio_loudness_profile(event: dict[str, object]) -> str | None:

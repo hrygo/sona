@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -15,6 +17,9 @@ from sona.config.validators import (
 )
 from sona.interaction.context_memory import ContextCompactionConfig
 from sona.lm_studio import DEFAULT_LM_STUDIO_API_KEY
+
+if TYPE_CHECKING:
+    from sona.speechrail.tts_loudness import Pcm16LoudnessConfig
 
 
 class InteractionSettings(BaseSettings):
@@ -119,6 +124,48 @@ class InteractionSettings(BaseSettings):
         description="SpeechRail TTS preset；alloy 仅兼容到 2026-10-31",
     )
     tts_language: str = Field(default="auto", description="SpeechRail TTS 语言或 auto")
+    tts_loudness_target_dbfs: float = Field(
+        default=-20.0,
+        ge=-60.0,
+        le=0.0,
+        description="兼容 TTS 响度目标（dBFS）",
+    )
+    tts_loudness_peak_ceiling_dbfs: float = Field(
+        default=-1.0,
+        ge=-60.0,
+        le=0.0,
+        description="TTS PCM16 峰值上限（dBFS）",
+    )
+    tts_loudness_max_gain_db: float = Field(
+        default=12.0,
+        ge=0.0,
+        le=24.0,
+        description="兼容 TTS 最大增益（dB）",
+    )
+    tts_loudness_max_attenuation_db: float = Field(
+        default=-6.0,
+        ge=-24.0,
+        le=0.0,
+        description="兼容 TTS 最大衰减（dB）",
+    )
+    tts_loudness_calibration_ms: int = Field(
+        default=240,
+        ge=40,
+        le=2_000,
+        description="兼容 TTS 前导校准窗口（毫秒）",
+    )
+    tts_loudness_attack_ms: int = Field(
+        default=250,
+        ge=20,
+        le=2_000,
+        description="兼容 TTS 增益衰减响应时间（毫秒）",
+    )
+    tts_loudness_release_ms: int = Field(
+        default=800,
+        ge=20,
+        le=5_000,
+        description="兼容 TTS 增益恢复响应时间（毫秒）",
+    )
     speechrail_api_key: str | None = Field(
         default=None,
         description="SpeechRail 可选 API key；仅通过 HTTP/WebSocket Authorization header 发送",
@@ -301,6 +348,12 @@ class InteractionSettings(BaseSettings):
             raise ValueError("上下文 token 水位必须满足 target < soft < hard")
         return self
 
+    @model_validator(mode="after")
+    def _validate_tts_loudness_bounds(self) -> InteractionSettings:
+        if self.tts_loudness_max_attenuation_db > self.tts_loudness_peak_ceiling_dbfs:
+            raise ValueError("TTS 响度最大衰减必须覆盖 peak ceiling")
+        return self
+
     def context_compaction_config(self) -> ContextCompactionConfig:
         """映射为不依赖 pydantic-settings 的运行时压缩配置。"""
         return ContextCompactionConfig(
@@ -314,6 +367,20 @@ class InteractionSettings(BaseSettings):
             summary_max_output_tokens=self.context_summary_max_output_tokens,
             summary_timeout_seconds=self.context_summary_timeout_seconds,
             capacity_ratio=self.context_capacity_ratio,
+        )
+
+    def tts_loudness_config(self) -> Pcm16LoudnessConfig:
+        """映射为 TTS PCM guard 配置，供每个交互管道实例注入。"""
+        from sona.speechrail.tts_loudness import Pcm16LoudnessConfig
+
+        return Pcm16LoudnessConfig(
+            target_dbfs=self.tts_loudness_target_dbfs,
+            peak_ceiling_dbfs=self.tts_loudness_peak_ceiling_dbfs,
+            max_gain_db=self.tts_loudness_max_gain_db,
+            max_attenuation_db=self.tts_loudness_max_attenuation_db,
+            calibration_ms=self.tts_loudness_calibration_ms,
+            attack_ms=self.tts_loudness_attack_ms,
+            release_ms=self.tts_loudness_release_ms,
         )
 
     _validate_local_urls = field_validator(

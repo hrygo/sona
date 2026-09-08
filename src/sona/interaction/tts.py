@@ -15,6 +15,7 @@ from sona.config import normalize_speechrail_tts_voice
 from sona.interaction.fast_clause_aggregator import ChineseClauseTextAggregator
 from sona.speechrail.transport import SpeechRailProtocolError
 from sona.speechrail.tts import SpeechRailTTSClient
+from sona.speechrail.tts_loudness import Pcm16LoudnessConfig
 
 
 @dataclass
@@ -42,12 +43,14 @@ class SpeechRailTTSService(TTSService):
         client_factory: Callable[..., SpeechRailTTSClient] | None = None,
         fast_first_clause: bool = True,
         first_clause_min_chars: int = 8,
+        loudness_config: Pcm16LoudnessConfig | None = None,
         settings: SpeechRailTTSSettings | None = None,
         **kwargs: Any,
     ) -> None:
         self._url = url
         self._api_key = api_key
         self._client_factory = client_factory or SpeechRailTTSClient
+        self._loudness_config = loudness_config
         configured = settings or self.Settings(
             model="speechrail/qwen3-tts", voice="default", language="auto"
         )
@@ -81,12 +84,17 @@ class SpeechRailTTSService(TTSService):
             yield ErrorFrame(error=str(exc))
             return
 
+        client_kwargs: dict[str, Any] = {
+            "url": self._url,
+            "model": model,
+            "voice": voice,
+            "language": language,
+            "api_key": self._api_key,
+        }
+        if self._loudness_config is not None:
+            client_kwargs["loudness_config"] = self._loudness_config
         client = self._client_factory(
-            url=self._url,
-            model=model,
-            voice=voice,
-            language=language,
-            api_key=self._api_key,
+            **client_kwargs,
         )
         try:
             await self.start_tts_usage_metrics(text)
