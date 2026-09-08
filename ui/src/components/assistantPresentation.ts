@@ -36,6 +36,20 @@ export const VOICE_CONFIGS: Record<string, { label: string; tag: string }> = {
   calm: { label: "沉稳专业", tag: "严谨" },
 };
 
+export function getVoiceDisplayName(voiceId: string, voiceItem?: VoiceCatalogItem): string {
+  const configuredLabel = VOICE_CONFIGS[voiceId]?.label;
+  if (configuredLabel) return configuredLabel;
+
+  const catalogName = voiceItem?.name.trim();
+  if (catalogName && catalogName !== voiceId) return catalogName;
+
+  if (voiceItem && !voiceItem.is_system) {
+    return resolveVoiceMode(voiceItem) === "clone" ? "克隆音色" : "自定义音色";
+  }
+
+  return voiceItem?.is_system ? "系统预设音色" : "当前音色";
+}
+
 export function formatMetric(value: number | null): string {
   return value === null ? "—" : `${value}ms`;
 }

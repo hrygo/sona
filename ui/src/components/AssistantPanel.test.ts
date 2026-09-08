@@ -13,6 +13,7 @@ import AssistantPanel, {
   getAssistantPhaseTransitionDelay,
   getDuplexModeFeedback,
   getDuplexToggleMode,
+  getVoiceDisplayName,
 } from "./AssistantPanel";
 import { createAssistantSnapshot, useAssistantStore } from "../stores/assistantStore";
 import { useUISettingsStore } from "../stores/uiSettingsStore";
@@ -120,6 +121,39 @@ describe("assistant phase presentation", () => {
     expect(presentation.label).toBe("实时字幕占用音频");
     expect(presentation.detail).toContain("助手未接收麦克风语音");
   });
+});
+
+describe("voice audition presentation", () => {
+  it("uses readable names for system and clone voices", () => {
+    expect(getVoiceDisplayName("warm", {
+      id: "warm",
+      name: "warm",
+      is_system: true,
+      mode: "system",
+    })).toBe("温暖磁性");
+
+    expect(getVoiceDisplayName("clone_7f3c", {
+      id: "clone_7f3c",
+      name: "温柔中文女声",
+      is_system: false,
+      mode: "clone",
+    })).toBe("温柔中文女声");
+
+    expect(getVoiceDisplayName("clone_7f3c", {
+      id: "clone_7f3c",
+      name: "clone_7f3c",
+      is_system: false,
+      mode: "clone",
+    })).toBe("克隆音色");
+
+    expect(getVoiceDisplayName("vendor_system", {
+      id: "vendor_system",
+      name: "vendor_system",
+      is_system: true,
+      mode: "system",
+    })).toBe("系统预设音色");
+  });
+
 });
 
 describe("voice workshop microphone lease", () => {

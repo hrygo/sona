@@ -35,6 +35,7 @@ import {
   getDuplexModeFeedback,
   getDuplexToggleMode,
   getTelemetryBadge,
+  getVoiceDisplayName,
   PHASE_CONFIG,
   TELEMETRY_HELP_STEPS,
   type VoiceModelCapabilities,
@@ -83,6 +84,7 @@ export {
   getDuplexModeFeedback,
   getDuplexToggleMode,
   getTelemetryBadge,
+  getVoiceDisplayName,
   TELEMETRY_HELP_STEPS,
 } from "./assistantPresentation";
 
@@ -405,7 +407,8 @@ export default function AssistantPanel({
     async (v: string) => {
       if (isPreviewPlaying) return;
       setIsPreviewPlaying(true);
-      showToast(`🔊 正在生成音色 [${v}] 试听...`, "info");
+      const voiceItem = availableVoices.find((item) => item.id === v);
+      showToast(`🔊 正在生成「${getVoiceDisplayName(v, voiceItem)}」试听...`, "info");
 
       let blob: Blob;
       try {
@@ -433,7 +436,7 @@ export default function AssistantPanel({
         setIsPreviewPlaying(false);
       }
     },
-    [isPreviewPlaying],
+    [availableVoices, isPreviewPlaying],
   );
 
   /** 执行删除自定义音色真实操作 */
