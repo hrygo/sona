@@ -122,9 +122,14 @@ class StreamingPcm16LoudnessGuard:
             self._config.max_gain_db,
         )
         previous_gain_db = self._gain_db
+        ramp_start_gain_db = previous_gain_db
+        if self._mode == "compatibility" and not any(
+            abs(value) >= _SILENCE_GATE_LINEAR for value in values
+        ):
+            ramp_start_gain_db = min(ramp_start_gain_db, 0.0)
         output = _apply_gain(
             values,
-            previous_gain_db=previous_gain_db,
+            previous_gain_db=ramp_start_gain_db,
             target_gain_db=desired_gain_db,
             ceiling_gain_db=self._config.peak_ceiling_dbfs - peak_dbfs,
             sample_rate=self._sample_rate,

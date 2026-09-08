@@ -30,6 +30,16 @@ def test_compatibility_mode_does_not_amplify_near_silence() -> None:
     assert guard.process(chunk) == chunk
 
 
+def test_compatibility_mode_does_not_carry_gain_into_near_silence() -> None:
+    guard = StreamingPcm16LoudnessGuard(sample_rate=24_000)
+    voice = _constant_pcm16(0.05, 1_920)
+    noise = _constant_pcm16(0.0005, 1_920)
+
+    guard.process(voice)
+
+    assert guard.process(noise) == noise
+
+
 def test_compatibility_mode_smooths_alternating_levels() -> None:
     guard = StreamingPcm16LoudnessGuard(sample_rate=24_000)
     low = _constant_pcm16(0.05, 1_920)
