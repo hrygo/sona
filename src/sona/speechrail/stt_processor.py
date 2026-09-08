@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 from collections import deque
@@ -34,6 +35,10 @@ from sona.speechrail.transport import SpeechRailProtocolError, SpeechRailRealtim
 
 logger = logging.getLogger(__name__)
 
+# 单次 receive 的最大等待。SpeechRail 假活（TCP 存活但服务无响应）时 websockets
+# 的 ping/pong 无法探测，必须在应用层设 deadline，否则整条交互管线在此永久阻塞。
+COMMIT_RECEIVE_TIMEOUT_SECS = 10.0
+
 __all__ = [
     "ClientFactory",
     "SpeechRailConversationSTTFactory",
@@ -64,6 +69,8 @@ class SpeechRailConversationSTTProcessor(FrameProcessor):
         self._language = language
         self._client_factory = client_factory
         self._client: _SpeechRailClient | None = None
+        # 预卷预算：10 × 32ms（512 采样 @16k）= 320ms，覆盖 vad_start_secs=0.2s
+        # 的起音确认窗并保留前置余量，确保 VAD 确认时回合起点不被裁字。
         self._preroll: deque[bytes] = deque(maxlen=10)
         self._appended_bytes_in_turn = 0
 
@@ -132,7 +139,7 @@ class SpeechRailConversationSTTProcessor(FrameProcessor):
         try:
             await client.commit()
             while True:
-                event = await client.receive()
+                event = await self._receive_event(client)
                 try:
                     decoded = decode_transcription_event(event)
                 except SpeechRailProtocolError:
@@ -183,6 +190,13 @@ class SpeechRailConversationSTTProcessor(FrameProcessor):
             self._client = None
             self._appended_bytes_in_turn = 0
             logger.debug("交互 STT: SpeechRail 实时会话已关闭 (语言 %s)", self._language)
+
+    async def _receive_event(self, client: _SpeechRailClient) -> dict[str, object]:
+        """带 deadline 的单次 receive；超时按可恢复错误上抛（finally 会关闭会话）。"""
+        try:
+            return await asyncio.wait_for(client.receive(), COMMIT_RECEIVE_TIMEOUT_SECS)
+        except TimeoutError:
+            raise RuntimeError("SPEECHRAIL_COMMIT_TIMEOUT") from None
 
     async def _close_turn(self) -> None:
         self._preroll.clear()

@@ -32,7 +32,9 @@ dependencies = [
 [project.optional-dependencies]
 # 交互管道 (Pipecat: SpeechRail STT + LLM + SpeechRail TTS + AudioHub 采集) — 重型依赖，独立组
 interaction = [
-    "pipecat-ai[silero,openai,soundfile,websocket,local]>=1.0",
+    # 锁定 1.7.x：calculate_audio_volume 在 1.x 间由 RMS 改为 EBU R128 响度，
+    # vad_min_volume 量纲随版本漂移，升级前须重新校准（见 config/interaction.py 描述）。
+    "pipecat-ai[silero,openai,soundfile,websocket,local]>=1.7,<1.8",
     "torch>=2.5",
     "torchaudio>=2.5",
     "pyaudio>=0.2.14",

@@ -140,10 +140,6 @@ class HangoverUserMuteStrategy(BaseUserMuteStrategy):
         self._echo_state = echo_state or EchoState()
         self._suppression_checker = suppression_checker
 
-    @property
-    def _hangover_until(self) -> float:
-        return self._echo_state.last_speaking_stop_time + self._tail_hangover_secs
-
     async def process_frame(self, frame: Frame) -> bool:
         await super().process_frame(frame)
         now = time.monotonic()
@@ -311,10 +307,6 @@ class EchoSuppressionProcessor(FrameProcessor):
     @_suppressing.setter
     def _suppressing(self, val: bool) -> None:
         self._barge_in_active = not val
-
-    @property
-    def _hangover_until(self) -> float:
-        return self._echo_state.last_speaking_stop_time + self._tail_hangover_secs
 
     async def process_frame(
         self, frame: Frame, direction: FrameDirection = FrameDirection.DOWNSTREAM

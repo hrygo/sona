@@ -4,6 +4,10 @@ import {
   voiceService,
 } from "../services/voiceService";
 import { playAudioBlob } from "../utils/audioPlayback";
+import {
+  normalizeRecordingForClone,
+  SilentRecordingError,
+} from "../utils/audioNormalize";
 import { showToast } from "./Toast";
 import { SoundWaveAnimatedIcon } from "./Icons";
 import {
@@ -190,6 +194,22 @@ export function VoiceStudioModal({
   const [isDesignSubmitting, setIsDesignSubmitting] = useState(false);
   const [designError, setDesignError] = useState("");
 
+  // 打开声音工坊时立即静音麦克风，退出声音工坊时恢复
+  useEffect(() => {
+    let cancelled = false;
+    assistantMuteActiveRef.current = onStartRecordingVoice !== undefined;
+    if (onStartRecordingVoice) {
+      Promise.resolve(onStartRecordingVoice()).catch(() => {
+        if (!cancelled) {
+          showToast("语音助手麦克风静音失败，请检查控制连接", "error");
+        }
+      });
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [onStartRecordingVoice]);
+
   // 加载精选引导文案库
   useEffect(() => {
     let cancelled = false;
@@ -281,19 +301,14 @@ export function VoiceStudioModal({
     setCloneError("");
     try {
       cleanupRecording();
-      await releaseAssistantMute();
-
-      // 先暂停 sona 的交互管道，再申请浏览器麦克风，避免用户点击后立即朗读
-      // 的开头落入 AudioHub -> assistant 的输入队列。
-      assistantMuteActiveRef.current = onStartRecordingVoice !== undefined;
-      await onStartRecordingVoice?.();
-
-      if (!isMountedRef.current || recordingAttemptRef.current !== attempt) return;
 
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
-          echoCancellation: true,
+          // 声音工坊打开期间语音助手已被租约暂停，无自播回声风险；
+          // 浏览器 AEC/AGC 的自适应增益是"录音前响后轻"的根因，克隆采集必须关闭以保真音色电平。
+          echoCancellation: false,
           noiseSuppression: true,
+          autoGainControl: false,
           sampleRate: 24000,
         },
       });
@@ -331,7 +346,6 @@ export function VoiceStudioModal({
       recorder.onstop = () => {
         const fullBlob = new Blob(audioChunksRef.current, { type: mimeType });
         cleanupRecording();
-        void releaseAssistantMute();
         if (!isMountedRef.current) return;
         setRecordedBlob(fullBlob);
         const url = URL.createObjectURL(fullBlob);
@@ -409,7 +423,6 @@ export function VoiceStudioModal({
       }
     } catch (err) {
       if (!isMountedRef.current || recordingAttemptRef.current !== attempt) return;
-      await releaseAssistantMute();
       const msg = err instanceof Error ? err.message : "无法开启麦克风，请检查浏览器权限";
       setCloneError(`麦克风采集失败: ${msg}`);
       setCloneStage("ready");
@@ -474,8 +487,26 @@ export function VoiceStudioModal({
     setCloneStage("submitting");
 
     try {
+      // 克隆的是音色而不是音量：提交前统一响度并转无损 WAV，
+      // 标准化失败（除近静音外）降级提交原始录音，保证功能可用。
+      let uploadBlob = recordedBlob;
+      let uploadFilename = "recording.webm";
+      try {
+        const normalized = await normalizeRecordingForClone(recordedBlob);
+        uploadBlob = normalized.blob;
+        uploadFilename = "recording.wav";
+      } catch (err) {
+        if (err instanceof SilentRecordingError) {
+          setCloneError(err.message);
+          setCloneStage("recorded");
+          showToast(err.message, "error");
+          return;
+        }
+        showToast("录音响度标准化失败，将按原始录音提交", "info");
+      }
+
       const formData = new FormData();
-      formData.append("audio", recordedBlob, "recording.webm");
+      formData.append("audio", uploadBlob, uploadFilename);
       formData.append("ref_text", activePrompt.script.trim());
       formData.append("name", cloneName.trim());
 

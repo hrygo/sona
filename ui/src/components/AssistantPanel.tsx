@@ -219,11 +219,13 @@ export default function AssistantPanel({
   const currentVoiceItem = availableVoices.find((v) => v.id === voice);
 
   const commandReady = commandSocket.ready;
-  const sendControlCommand = commandSocket.sendCommand;
+  const commandSocketRef = useRef(commandSocket);
+  commandSocketRef.current = commandSocket;
 
   const restoreVoiceRecordingMic = useCallback(async () => {
-    await voiceRecordingMicLeaseRef.current!.restore(commandReady, sendControlCommand);
-  }, [commandReady, sendControlCommand]);
+    const { ready, sendCommand } = commandSocketRef.current;
+    await voiceRecordingMicLeaseRef.current!.restore(ready, sendCommand);
+  }, []);
 
   useEffect(() => {
     if (!commandReady || !voiceRecordingMicLeaseRef.current?.needsRestore) return;
@@ -232,21 +234,29 @@ export default function AssistantPanel({
     });
   }, [commandReady, restoreVoiceRecordingMic]);
 
-  const handleVoiceRecordingStart = useCallback(async () => {
+  // 声音工坊开启即静音麦克风，避免试听或录音前误触助手输入
+  useEffect(() => {
+    if (!showVoiceStudioModal) return;
     const mutedBefore = useUISettingsStore.getState().micMuted;
     const lease = voiceRecordingMicLeaseRef.current!;
     lease.begin(mutedBefore);
-    if (mutedBefore) return;
-    if (!commandReady) {
-      lease.cancel();
-      throw new Error("控制端连接中，请稍候后再开始录音");
+
+    if (!mutedBefore && commandSocketRef.current.ready) {
+      void commandSocketRef.current.sendCommand({ cmd: "set_mic_muted", muted: true });
     }
-    await sendControlCommand({ cmd: "set_mic_muted", muted: true });
-  }, [commandReady, sendControlCommand]);
+
+    return () => {
+      void restoreVoiceRecordingMic().catch(() => {});
+    };
+  }, [showVoiceStudioModal, restoreVoiceRecordingMic]);
+
+  const handleVoiceRecordingStart = useCallback(async () => {
+    // 声音工坊打开时已全局持有静音租约，录音时无需重复申请，仅作兼容占位
+  }, []);
 
   const handleVoiceRecordingStop = useCallback(async () => {
-    await restoreVoiceRecordingMic();
-  }, [restoreVoiceRecordingMic]);
+    // 录音结束不恢复麦克风，直到工坊关闭
+  }, []);
 
   // 打断插话动效监听
   useEffect(() => {

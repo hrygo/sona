@@ -11,6 +11,8 @@ rename semantics are preserved.
 from __future__ import annotations
 
 import asyncio
+import logging
+from collections import deque
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import replace
 
@@ -43,6 +45,8 @@ from sona.speechrail.transport import (
     SpeechRailRealtimeClient,
 )
 
+logger = logging.getLogger(__name__)
+
 __all__ = ["ConnectionFactory", "SpeechRailRealtimeClient", "SpeechRailStreamingTranscriber"]
 
 _BYTES_PER_MS = 32_000 / 1_000  # 16 kHz mono s16le bytes per millisecond
@@ -53,6 +57,9 @@ UNKNOWN_SPEAKER_KEY = "unknown"
 
 # 扩展模式逐连接跟踪的归属单元状态上限（协议要求的有界缓存）。
 _MAX_TRACKED_UNITS = 8_192
+
+# 扩展模式已完成 item_id 的防重放登记上限（completed 不可变，重复即协议异常）。
+_MAX_TRACKED_ITEM_IDS = 64
 
 
 class SpeechRailStreamingTranscriber:
@@ -109,6 +116,7 @@ class SpeechRailStreamingTranscriber:
         self._diarization_requested = context.purpose == "meeting"
         self._extensions_requested = bool(diarization_extensions)
         self._extensions_negotiated = False
+        self._finalized_item_ids: deque[str] = deque(maxlen=_MAX_TRACKED_ITEM_IDS)
         # 扩展模式协议状态：归属单元修订连续性与分人健康（停止分人保留正文）。
         self._unit_updates: dict[str, tuple[int, tuple[object, ...], int]] = {}
         self._diarization_broken = False
@@ -262,6 +270,19 @@ class SpeechRailStreamingTranscriber:
                     else:
                         self._diagnostics.record_empty_completed()
                     if self._extensions_negotiated:
+                        # 扩展模式 item_id 全局唯一；重复 completed（服务端 commit
+                        # 嵯套重放）属于协议异常，直接忽略，防止同内容正文双写。
+                        # legacy 模式 item_id 逐回合复用，不做 id 判重。
+                        if decoded.item_id and decoded.item_id in self._finalized_item_ids:
+                            logger.warning(
+                                "SpeechRail 重复 completed (item_id=%s, transcript=%r)，已忽略",
+                                decoded.item_id,
+                                decoded.transcript,
+                            )
+                            self._diagnostics.record_protocol_error()
+                            continue
+                        if decoded.item_id:
+                            self._finalized_item_ids.append(decoded.item_id)
                         # 扩展模式：completed 携带 attribution_units，一个单元一个
                         # 不可变正文段；样本区间换算会议时间，不再叠加 VAD onset/
                         # item offset。不再接收 legacy .segment（解码层拒绝）。
@@ -281,8 +302,10 @@ class SpeechRailStreamingTranscriber:
                             offset_ms=self._context.offset_ms,
                         )
                         self._last_window = final_window
-                        self._last_confirmed_window = final_window
                         if segments:
+                            # 空 closed-loop（含服务端嵯套重放）不得把已确认窗口
+                            # 回退为空；与 legacy 分支的 `if segments:` 守护对齐。
+                            self._last_confirmed_window = final_window
                             self._last_confirmed_end_ms = max(
                                 segment.end_ms for segment in segments
                             )

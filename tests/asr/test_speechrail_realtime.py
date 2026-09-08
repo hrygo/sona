@@ -1453,3 +1453,133 @@ def test_extensions_mode_ws_disconnect_terminates_events() -> None:
             await anext(events)
 
     asyncio.run(scenario())
+
+
+def test_extensions_mode_ignores_duplicate_completed_item() -> None:
+    """服务端 commit 嵯套重放同 item completed 时不产生第二个 final。"""
+
+    async def scenario() -> None:
+        connection = FakeConnection()
+        diagnostics = ASRDiagnostics()
+        connection._messages = [
+            *_extensions_session_events(),
+            _extensions_completed(
+                "你好",
+                sequence=4,
+                item_id="item-1",
+                start_sample=48000,
+                end_sample=56000,
+                units=[
+                    _unit("s1", text_start=0, text_end=2,
+                          start_sample=48000, end_sample=56000)
+                ],
+            ),
+            _extensions_completed(
+                "你好",
+                sequence=5,
+                item_id="item-1",
+                start_sample=48000,
+                end_sample=56000,
+                units=[
+                    _unit("s1", text_start=0, text_end=2,
+                          start_sample=48000, end_sample=56000)
+                ],
+            ),
+        ]
+        client = SpeechRailRealtimeClient(
+            url=connection.uri,
+            connection_factory=lambda _: _immediate(connection),
+        )
+        adapter = SpeechRailStreamingTranscriber(
+            client=client,
+            context=ASRSessionContext(
+                source_epoch=3,
+                offset_ms=0,
+                purpose="meeting",
+                diarization_group_id="b" * 64,
+            ),
+            language="zh",
+            diarization_extensions=True,
+            diagnostics=diagnostics,
+        )
+
+        await adapter.connect()
+        assert adapter.extensions_negotiated is True
+        events = adapter.events()
+        await _drain_ready(events)
+
+        final = await anext(events)
+        assert final.kind == "final"
+        assert final.window is not None
+        assert [segment.text for segment in final.window.segments] == ["你好"]
+
+        # 消息耗尽即断连，驱动消费队列中的重复 completed 事件。
+        import websockets
+
+        async def _recv_exhausting() -> str:
+            if not connection._messages:
+                raise websockets.ConnectionClosed(None, None)
+            return json.dumps(connection._messages.pop(0))
+
+        connection.recv = _recv_exhausting  # type: ignore[method-assign]
+        with pytest.raises(websockets.ConnectionClosed):
+            await anext(events)
+
+        # 重复 completed 仅记协议异常，不推送第二个 final、不重复登记单元。
+        assert diagnostics.protocol_errors == 1
+        assert list(adapter._finalized_item_ids) == ["item-1"]  # type: ignore[attr-defined]
+
+    asyncio.run(scenario())
+
+
+def test_extensions_mode_empty_closed_loop_keeps_confirmed_window() -> None:
+    """嵯套后的空闭环 completed 不把已确认窗口回退为空（与 legacy 分支对齐）。"""
+
+    async def scenario() -> None:
+        connection = FakeConnection()
+        connection._messages = [
+            *_extensions_session_events(),
+            _extensions_completed(
+                "你好",
+                sequence=4,
+                item_id="item-1",
+                start_sample=48000,
+                end_sample=56000,
+                units=[
+                    _unit("s1", text_start=0, text_end=2,
+                          start_sample=48000, end_sample=56000)
+                ],
+            ),
+            # SpeechRail 嵯套 commit 的外层空闭环：新 item_id、空 transcript、无单元。
+            _extensions_completed(
+                "",
+                sequence=5,
+                item_id="item-2",
+                start_sample=56000,
+                end_sample=56000,
+                units=[],
+            ),
+        ]
+        adapter, _ = _extensions_adapter(connection)
+
+        await adapter.connect()
+        events = adapter.events()
+        await _drain_ready(events)
+
+        first = await anext(events)
+        assert first.kind == "final"
+        assert first.window is not None
+        assert [segment.text for segment in first.window.segments] == ["你好"]
+
+        second = await anext(events)
+        assert second.kind == "final"
+        assert second.window is not None
+        assert second.window.segments == ()
+
+        # 空闭环只清空 partial 展示；confirmed 窗口保留最近真实正文。
+        assert adapter._last_confirmed_window is not None  # type: ignore[attr-defined]
+        assert [  # type: ignore[attr-defined]
+            segment.text for segment in adapter._last_confirmed_window.segments  # type: ignore[attr-defined]
+        ] == ["你好"]
+
+    asyncio.run(scenario())

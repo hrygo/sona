@@ -34,9 +34,20 @@ vi.mock("./AssistantWaveform", () => ({
 
 vi.mock("./VoiceStudioModal", () => ({
   VoiceStudioModal: (props: {
+    isOpen?: boolean;
+    onClose?: () => void;
     onStartRecordingVoice?: () => void | Promise<void>;
     onStopRecordingVoice?: () => void | Promise<void>;
   }) => createElement("div", { "data-testid": "voice-studio-modal" }, [
+    createElement(
+      "button",
+      {
+        key: "close",
+        className: "test-studio-close",
+        onClick: () => props.onClose?.(),
+      },
+      "close",
+    ),
     createElement(
       "button",
       {
@@ -127,10 +138,6 @@ describe("voice workshop microphone lease", () => {
       root.render(createElement(AssistantPanel, { commandSocket: connectedSocket }));
     });
     act(() => container.querySelector<HTMLButtonElement>(".btn-voice-studio-btn")?.click());
-    await act(async () => {
-      container.querySelector<HTMLButtonElement>(".test-record-start")?.click();
-      await Promise.resolve();
-    });
 
     expect(sendCommand).toHaveBeenCalledWith({ cmd: "set_mic_muted", muted: true });
 
@@ -139,7 +146,7 @@ describe("voice workshop microphone lease", () => {
       root.render(createElement(AssistantPanel, { commandSocket: disconnectedSocket }));
     });
     await act(async () => {
-      container.querySelector<HTMLButtonElement>(".test-record-stop")?.click();
+      container.querySelector<HTMLButtonElement>(".test-studio-close")?.click();
       await Promise.resolve();
     });
 

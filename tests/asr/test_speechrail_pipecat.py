@@ -373,3 +373,35 @@ def test_pipecat_processor_forwards_audio_and_flushes_preroll() -> None:
             )
 
     asyncio.run(scenario())
+
+
+def test_pipecat_processor_commit_receive_times_out_when_speechrail_hangs() -> None:
+    """SpeechRail 假活（连接未断但无响应）时 commit receive 必须超时释放管线。"""
+
+    class HangingClient(FakeSpeechRailClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self._events = iter(())
+
+        async def receive(self) -> dict[str, object]:
+            await asyncio.Event().wait()
+
+    async def scenario() -> None:
+        client = HangingClient()
+        processor = SpeechRailConversationSTTProcessor(
+            language="zh",
+            client_factory=lambda: client,
+        )
+        await processor._open_turn()
+
+        with (
+            patch("sona.speechrail.stt_processor.COMMIT_RECEIVE_TIMEOUT_SECS", 0.05),
+            pytest.raises(RuntimeError, match="SPEECHRAIL_COMMIT_TIMEOUT"),
+        ):
+            await processor._commit_turn()
+
+        assert client.commits == 1
+        assert client.closed is True
+        assert processor._client is None
+
+    asyncio.run(scenario())

@@ -25,6 +25,7 @@ from sona.speechrail.transport import (
     SpeechRailProtocolError,
     SpeechRailRealtimeClient,
     build_server_vad_config,
+    resolve_server_vad_config,
 )
 from sona.speechrail.tts import SpeechRailTTSClient
 
@@ -46,4 +47,5 @@ __all__ = [
     "TranscriptionSegment",
     "build_server_vad_config",
     "decode_transcription_event",
+    "resolve_server_vad_config",
 ]

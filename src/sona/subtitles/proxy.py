@@ -20,7 +20,7 @@ from sona.speechrail import (
     ConnectionFactory,
     SpeechRailRealtimeClient,
     SpeechRailStreamingTranscriber,
-    build_server_vad_config,
+    resolve_server_vad_config,
 )
 from sona.subtitles.archive import SrtArchive
 from sona.subtitles.clients import ClientSender, SubtitleClientHub
@@ -165,15 +165,10 @@ class SubtitleProxy:
             extensions = (
                 self._diarization_extensions_enabled and context.purpose == "meeting"
             )
-            silence_ms = (
-                (1_000 if extensions else 900)
-                if context.purpose == "meeting"
-                else (600 if extensions else 400)
-            )
-            turn_detection = build_server_vad_config(
+            turn_detection = resolve_server_vad_config(
+                purpose=context.purpose,
+                extensions=extensions,
                 threshold=self._settings.vad_threshold,
-                silence_duration_ms=silence_ms,
-                prefix_padding_ms=300,
             )
             return SpeechRailStreamingTranscriber(
                 client=SpeechRailRealtimeClient(

@@ -70,7 +70,16 @@ function renderStudio(
   });
 }
 
+interface RecordingStub {
+  state: RecordingState;
+  ondataavailable: ((event: BlobEvent) => void) | null;
+  onstop: (() => void) | null;
+  start(): void;
+  stop(): void;
+}
+
 function stubRecordingEnvironment(events: string[]) {
+  const recorders: RecordingStub[] = [];
   const getUserMedia = vi.fn(async () => {
     events.push("getUserMedia");
     return {
@@ -89,7 +98,9 @@ function stubRecordingEnvironment(events: string[]) {
       ondataavailable: ((event: BlobEvent) => void) | null = null;
       onstop: (() => void) | null = null;
 
-      constructor(_stream: MediaStream, _options: MediaRecorderOptions) {}
+      constructor(_stream: MediaStream, _options: MediaRecorderOptions) {
+        recorders.push(this as unknown as RecordingStub);
+      }
 
       start() {
         events.push("recorder.start");
@@ -100,7 +111,7 @@ function stubRecordingEnvironment(events: string[]) {
         this.state = "inactive";
         this.onstop?.();
       }
-    },
+    } as unknown as typeof MediaRecorder,
   );
   vi.stubGlobal(
     "AudioContext",
@@ -127,7 +138,7 @@ function stubRecordingEnvironment(events: string[]) {
   );
   vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(() => null);
 
-  return { getUserMedia };
+  return { getUserMedia, recorders };
 }
 
 it("renders voice atelier with voice deck and clone forge tabs", () => {
@@ -322,7 +333,7 @@ it("hides unsupported forge tabs when the active model exposes no creation capab
   expect(container.textContent).toContain("当前 TTS 模型不支持声音创设");
 });
 
-it("mutes the assistant before opening the browser recording stream and releases it after stop", async () => {
+it("mutes the assistant when the studio modal opens and releases it after closing", async () => {
   const events: string[] = [];
   let confirmMute!: () => void;
   const muteConfirmed = new Promise<void>((resolve) => {
@@ -341,11 +352,7 @@ it("mutes the assistant before opening the browser recording stream and releases
     },
   });
 
-  const startButton = container.querySelector<HTMLButtonElement>(".btn-record-primary")!;
-  act(() => {
-    startButton.click();
-  });
-
+  // 弹窗打开即触发静音申请，无需点击录音
   await Promise.resolve();
   expect(events).toEqual(["assistant.mute.requested"]);
 
@@ -353,50 +360,77 @@ it("mutes the assistant before opening the browser recording stream and releases
   await act(async () => {
     await Promise.resolve();
     await Promise.resolve();
-    await Promise.resolve();
   });
 
-  expect(events.slice(0, 3)).toEqual([
+  expect(events).toEqual([
     "assistant.mute.requested",
     "assistant.mute.confirmed",
-    "getUserMedia",
   ]);
 
-  const unmuteCountBeforeRerender = events.filter((event) => event === "assistant.unmute").length;
-  renderStudio("default", undefined, {
-    onStartRecordingVoice: async () => {
-      events.push("assistant.mute.replaced");
-    },
-    onStopRecordingVoice: async () => {
-      events.push("assistant.unmute.replaced");
-    },
+  // 关闭/卸载弹窗时恢复麦克风
+  act(() => {
+    root.unmount();
   });
-  expect(container.querySelector(".btn-record-stop")).not.toBeNull();
-  expect(events.filter((event) => event === "assistant.unmute")).toHaveLength(unmuteCountBeforeRerender);
-
-  const stopButton = container.querySelector<HTMLButtonElement>(".btn-record-stop")!;
   await act(async () => {
-    stopButton.click();
     await Promise.resolve();
   });
 
-  expect(events).toContain("assistant.unmute.replaced");
+  expect(events).toContain("assistant.unmute");
 });
 
-it("ignores a second start while assistant mute confirmation is pending", async () => {
+it("ignores a second start click while recording setup is in flight", async () => {
   const events: string[] = [];
-  let confirmMute!: () => void;
-  const muteConfirmed = new Promise<void>((resolve) => {
-    confirmMute = resolve;
+  let confirmStream!: (stream: MediaStream) => void;
+  const streamPromise = new Promise<MediaStream>((resolve) => {
+    confirmStream = resolve;
   });
-  const { getUserMedia } = stubRecordingEnvironment(events);
-  const onStartRecordingVoice = vi.fn(async () => {
-    events.push("assistant.mute.requested");
-    await muteConfirmed;
+  const getUserMedia = vi.fn(async () => {
+    events.push("getUserMedia");
+    return streamPromise;
   });
+  vi.stubGlobal("navigator", { mediaDevices: { getUserMedia } });
+  vi.stubGlobal("URL", {
+    createObjectURL: vi.fn(() => "blob:voice-recording"),
+    revokeObjectURL: vi.fn(),
+  });
+  vi.stubGlobal(
+    "MediaRecorder",
+    class {
+      state: RecordingState = "inactive";
+      ondataavailable: ((event: BlobEvent) => void) | null = null;
+      onstop: (() => void) | null = null;
+      start() {
+        this.state = "recording";
+      }
+      stop() {
+        this.state = "inactive";
+        this.onstop?.();
+      }
+    },
+  );
+  vi.stubGlobal(
+    "AudioContext",
+    class {
+      state: AudioContextState = "running";
+      createMediaStreamSource() {
+        return { connect: vi.fn() };
+      }
+      createAnalyser() {
+        return {
+          fftSize: 256,
+          frequencyBinCount: 2,
+          getByteFrequencyData: (data: Uint8Array) => data.fill(0),
+        };
+      }
+      close() {
+        this.state = "closed";
+        return Promise.resolve();
+      }
+    },
+  );
 
   renderStudio("default", undefined, {
-    onStartRecordingVoice,
+    onStartRecordingVoice: vi.fn(),
     onStopRecordingVoice: vi.fn(),
   });
 
@@ -411,13 +445,14 @@ it("ignores a second start while assistant mute confirmation is pending", async 
     await Promise.resolve();
   });
 
-  expect(onStartRecordingVoice).toHaveBeenCalledTimes(1);
   expect(startButton.disabled).toBe(true);
+  expect(getUserMedia).toHaveBeenCalledTimes(1);
 
-  confirmMute();
+  confirmStream({
+    getTracks: () => [],
+  } as unknown as MediaStream);
+
   await act(async () => {
-    await Promise.resolve();
-    await Promise.resolve();
     await Promise.resolve();
     await Promise.resolve();
   });
@@ -437,4 +472,195 @@ it("keeps design creation available while disabling preview when the model forbi
   const previewButton = container.querySelector<HTMLButtonElement>(".btn-design-preview");
   expect(previewButton?.disabled).toBe(true);
   expect(container.textContent).toContain("当前模型不支持自然语言试听");
+});
+
+/* ====================== 克隆提交流程（响度标准化） ====================== */
+
+function setInputNativeValue(input: HTMLInputElement, value: string) {
+  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+  setter?.call(input, value);
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+interface CloneFetchResult {
+  cloneBodies: FormData[];
+  fetchMock: ReturnType<typeof vi.fn>;
+}
+
+function stubCloneFetch(): CloneFetchResult {
+  const cloneBodies: FormData[] = [];
+  const fetchMock = vi.fn(async (url: unknown, init?: RequestInit) => {
+    const path = String(url);
+    if (path.includes("/v1/voices/clone") && init?.method === "POST") {
+      cloneBodies.push(init.body as FormData);
+      return {
+        ok: true,
+        json: async () => ({ id: "cloned_voice", name: "测试音色", is_system: false, mode: "clone" }),
+      };
+    }
+    return { ok: true, json: async () => ({ object: "list", data: [] }) };
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  return { cloneBodies, fetchMock };
+}
+
+/** 驱动录音流程至"已录制"阶段（recordingSeconds ≥ 3），随后恢复真实计时器。 */
+async function recordSampleAudio(events: string[], recorders: RecordingStub[]) {
+  vi.useFakeTimers();
+  renderStudio("default", { supports_clone: true });
+  const startButton = container.querySelector<HTMLButtonElement>(".btn-record-primary")!;
+  await act(async () => {
+    startButton.click();
+    await vi.advanceTimersByTimeAsync(50);
+  });
+  expect(events).toContain("recorder.start");
+
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(3100);
+  });
+  const recorder = recorders[0]!;
+  await act(async () => {
+    recorder.ondataavailable?.({
+      data: new Blob(["fake-webm"], { type: "audio/webm" }),
+    } as unknown as BlobEvent);
+  });
+  const stopButton = container.querySelector<HTMLButtonElement>(".btn-record-stop")!;
+  await act(async () => {
+    stopButton.click();
+  });
+  expect(container.querySelector(".btn-submit-clone")).not.toBeNull();
+
+  // 提交流程依赖异步读取录音，切回真实计时器避免 jsdom FileReader 被 fake 定时器阻塞。
+  vi.useRealTimers();
+}
+
+async function submitCloneWith(name: string) {
+  const nameInput = container.querySelector<HTMLInputElement>(".clone-name-input")!;
+  await act(async () => {
+    setInputNativeValue(nameInput, name);
+  });
+  const submitButton = container.querySelector<HTMLButtonElement>(".btn-submit-clone")!;
+  await act(async () => {
+    submitButton.click();
+    await Promise.resolve();
+  });
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+}
+
+it("submits loudness-normalized WAV audio when cloning a recorded voice", async () => {
+  const events: string[] = [];
+  const { recorders } = stubRecordingEnvironment(events);
+  // 交替 ±0.5 的归一化源信号（RMS 0.5，应衰减至 0.1 的目标响度）。
+  const decoded = new Float32Array(2000);
+  for (let i = 0; i < decoded.length; i++) {
+    decoded[i] = i % 2 === 0 ? 0.5 : -0.5;
+  }
+  vi.stubGlobal("AudioContext", class {
+    state: AudioContextState = "running";
+    createMediaStreamSource() {
+      return { connect: vi.fn() };
+    }
+    createAnalyser() {
+      return {
+        fftSize: 256,
+        frequencyBinCount: 2,
+        getByteFrequencyData: (data: Uint8Array) => data.fill(0),
+      };
+    }
+    decodeAudioData() {
+      return Promise.resolve({
+        sampleRate: 48000,
+        numberOfChannels: 1,
+        length: decoded.length,
+        getChannelData: () => decoded,
+      } as unknown as AudioBuffer);
+    }
+    close() {
+      this.state = "closed";
+      return Promise.resolve();
+    }
+  } as unknown as typeof AudioContext);
+  const { cloneBodies } = stubCloneFetch();
+
+  try {
+    await recordSampleAudio(events, recorders);
+    await submitCloneWith("我的测试音色");
+  } finally {
+    vi.useRealTimers();
+  }
+
+  expect(cloneBodies).toHaveLength(1);
+  const audio = cloneBodies[0]!.get("audio") as File;
+  expect(audio.name).toBe("recording.wav");
+  expect(audio.type).toBe("audio/wav");
+  expect(cloneBodies[0]!.get("name")).toBe("我的测试音色");
+  expect(cloneBodies[0]!.get("ref_text")).toContain("白日依山尽");
+  expect(onVoiceCreated).toHaveBeenCalledWith(
+    expect.objectContaining({ id: "cloned_voice", name: "测试音色" }),
+  );
+});
+
+it("falls back to uploading the raw recording when loudness normalization fails", async () => {
+  const events: string[] = [];
+  // stubRecordingEnvironment 提供的 AudioContext 没有 decodeAudioData，标准化必然失败。
+  const { recorders } = stubRecordingEnvironment(events);
+  const { cloneBodies } = stubCloneFetch();
+
+  try {
+    await recordSampleAudio(events, recorders);
+    await submitCloneWith("我的测试音色");
+  } finally {
+    vi.useRealTimers();
+  }
+
+  expect(cloneBodies).toHaveLength(1);
+  const audio = cloneBodies[0]!.get("audio") as File;
+  expect(audio.name).toBe("recording.webm");
+  expect(onVoiceCreated).toHaveBeenCalledWith(
+    expect.objectContaining({ id: "cloned_voice" }),
+  );
+});
+
+it("blocks the clone submission and asks for a re-record when the recording is silent", async () => {
+  const events: string[] = [];
+  const { recorders } = stubRecordingEnvironment(events);
+  vi.stubGlobal("AudioContext", class {
+    state: AudioContextState = "running";
+    createMediaStreamSource() {
+      return { connect: vi.fn() };
+    }
+    createAnalyser() {
+      return {
+        fftSize: 256,
+        frequencyBinCount: 2,
+        getByteFrequencyData: (data: Uint8Array) => data.fill(0),
+      };
+    }
+    decodeAudioData() {
+      return Promise.resolve({
+        sampleRate: 48000,
+        numberOfChannels: 1,
+        length: 2000,
+        getChannelData: () => new Float32Array(2000),
+      } as unknown as AudioBuffer);
+    }
+    close() {
+      this.state = "closed";
+      return Promise.resolve();
+    }
+  } as unknown as typeof AudioContext);
+  const { cloneBodies } = stubCloneFetch();
+
+  try {
+    await recordSampleAudio(events, recorders);
+    await submitCloneWith("我的测试音色");
+  } finally {
+    vi.useRealTimers();
+  }
+
+  expect(cloneBodies).toHaveLength(0);
+  expect(container.textContent).toContain("录音几乎无声");
+  expect(onVoiceCreated).not.toHaveBeenCalled();
 });

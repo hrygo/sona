@@ -163,7 +163,11 @@ class InteractionSettings(BaseSettings):
         default=0.65,
         ge=0.1,
         le=1.0,
-        description="VAD 最小音量能量门槛（过滤环境微弱杂音/按键声/呼吸声）",
+        description=(
+            "VAD 最小响度门（pipecat>=1.7 为 EBU R128 归一化响度：实测约 -50dBFS "
+            "以下的数字静音级底噪才会被拦截，按键声/呼吸声实际由 vad_confidence "
+            "承担；环境噪声治理应使用上游降噪，勿按能量门语义调此参数）"
+        ),
     )
     echo_barge_in_gain: float = Field(
         default=2.5,
@@ -175,7 +179,7 @@ class InteractionSettings(BaseSettings):
         default=3,
         ge=1,
         le=20,
-        description="插话判定所需连续超阈帧数（~32ms/帧 @16k/512B）",
+        description="插话判定所需连续超阈帧数（~32ms/帧 @16k，512 采样）",
     )
     echo_text_window_secs: float = Field(
         default=10.0,

@@ -162,6 +162,15 @@ _SESSION_UPDATED_TIMEOUT_SECS = 10.0
 
 DEFAULT_SERVER_VAD_THRESHOLD = 0.65
 
+# (purpose, extensions) -> server_vad 静音窗毫秒；proxy 与 fallback 预设共用，
+# 静音窗调优只改这里这一处。
+_SERVER_VAD_SILENCE_MS: dict[tuple[str, bool], int] = {
+    ("subtitle", False): 400,
+    ("subtitle", True): 600,
+    ("meeting", False): 900,
+    ("meeting", True): 1_000,
+}
+
 
 def build_server_vad_config(
     *,
@@ -178,28 +187,41 @@ def build_server_vad_config(
     }
 
 
-DEFAULT_SERVER_VAD: dict[str, object] = build_server_vad_config(
-    threshold=DEFAULT_SERVER_VAD_THRESHOLD,
-    silence_duration_ms=400,
-    prefix_padding_ms=300,
+def resolve_server_vad_config(
+    *,
+    purpose: str,
+    extensions: bool,
+    threshold: float = DEFAULT_SERVER_VAD_THRESHOLD,
+) -> dict[str, object]:
+    """按会话用途与分人扩展协商结果解析 server_vad 配置。
+
+    会议模式对自然短停顿更宽容（更长静音窗），避免将连续发言切成大量孤立的
+    填充词；分人扩展协商成功后再放宽一档。字幕等其余用途保持通用窗口。
+    """
+    key_purpose = "meeting" if purpose == "meeting" else "subtitle"
+    return build_server_vad_config(
+        threshold=threshold,
+        silence_duration_ms=_SERVER_VAD_SILENCE_MS[(key_purpose, extensions)],
+        prefix_padding_ms=300,
+    )
+
+
+DEFAULT_SERVER_VAD: dict[str, object] = resolve_server_vad_config(
+    purpose="subtitle",
+    extensions=False,
 )
 # 扩展模式推荐的 server VAD（Rail 规格 §5.1/Sona 设计 §3：silence 600ms）。
-DEFAULT_SERVER_VAD_EXTENSIONS: dict[str, object] = build_server_vad_config(
-    threshold=DEFAULT_SERVER_VAD_THRESHOLD,
-    silence_duration_ms=600,
-    prefix_padding_ms=300,
+DEFAULT_SERVER_VAD_EXTENSIONS: dict[str, object] = resolve_server_vad_config(
+    purpose="subtitle",
+    extensions=True,
 )
-# 会议助手对自然短停顿更宽容，避免将连续发言切成大量孤立的填充词。
-# 字幕仍使用上面的通用窗口，避免改变其他实时转录模式的断句行为。
-MEETING_SERVER_VAD: dict[str, object] = build_server_vad_config(
-    threshold=DEFAULT_SERVER_VAD_THRESHOLD,
-    silence_duration_ms=900,
-    prefix_padding_ms=300,
+MEETING_SERVER_VAD: dict[str, object] = resolve_server_vad_config(
+    purpose="meeting",
+    extensions=False,
 )
-MEETING_SERVER_VAD_EXTENSIONS: dict[str, object] = build_server_vad_config(
-    threshold=DEFAULT_SERVER_VAD_THRESHOLD,
-    silence_duration_ms=1_000,
-    prefix_padding_ms=300,
+MEETING_SERVER_VAD_EXTENSIONS: dict[str, object] = resolve_server_vad_config(
+    purpose="meeting",
+    extensions=True,
 )
 MANUAL_TURN_DETECTION: dict[str, object] = {"type": "manual"}
 
@@ -211,6 +233,10 @@ class SpeechRailRealtimeClient:
     the ``input_audio_transcription`` model/language and (optionally) enables
     the session-scoped ``diarization`` profile.  Audio is streamed in 16 kHz
     mono PCM16 base64 chunks and each turn is finalized with ``commit``.
+
+    线约束：追加块必须保持 512 采样（1024 字节）对齐。服务端 neural VAD 逐帧
+    打分且 commit 时对不足一帧的余数直接计分，非对齐流会累积余数并在 commit
+    时触发 ``backend_error``（本轮音频滞留）。
     """
 
     def __init__(
