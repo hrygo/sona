@@ -4,24 +4,31 @@ description: "会议采集、时钟、归属修订、人工映射、持久化、
 status: implemented
 type: technical_spec
 category: meeting
-version: "1.1.0"
+version: "1.2.0"
 date: 2026-09-05
-last_updated: 2026-09-06
+last_updated: 2026-09-08
 owners: [sona-core]
 tags: [speechrail, diarization, meeting]
 ---
 
 # Sona × SpeechRail 会议讲话人分离端到端设计
 
-> 设计编号 `SPK-E2E-1`，状态为已实施并验收通过。详见 [2026-09-06 联合验收报告](../operations/speaker-diarization-e2e-acceptance-2026-09-06.md)。
+> 设计编号 `SPK-E2E-1`，状态为已实施。针对已发布 SpeechRail v2.0.0 的验收证据见
+> [2026-09-08 联合验收报告](../operations/speechrail-openai-diarization-integration-acceptance.md)。
 
-配套：[Sona 实施计划](../superpowers/plans/2026-09-05-speaker-diarization-e2e.md)。公共 SpeechRail 协议统一由 `SpeechRail/docs/architecture/speaker-diarization-e2e-design.md` 第 5 节定义；同级检出时打开 [SpeechRail 设计](../../../SpeechRail/docs/architecture/speaker-diarization-e2e-design.md)。实施时将其转成两仓各自的机器可读契约，禁止客户端自行补造服务端不存在的事件。
+配套：[Sona 实施计划](../superpowers/plans/2026-09-08-speechrail-openai-diarization-integration.md)。公共协议以
+[SpeechRail v2.0.0 发布版本](https://github.com/hrygo/SpeechRail/releases/tag/v2.0.0)及其
+[`contracts/realtime-openai.md`](../../../SpeechRail/contracts/realtime-openai.md)为准；同级检出时可打开
+[SpeechRail 设计](../../../SpeechRail/docs/architecture/speaker-diarization-e2e-design.md)。Sona 只消费已发布的
+OpenAI Realtime 基线和 `speechrail.diarization.*` 扩展，不补造服务端事件。
 
 ## 1. 目标与职责
 
 产品默认覆盖中文优先、1–4 位讲话人、两小时会议。用户首先看到字幕，稍后看到讲话人归属；不确定处可见且可人工更正。重叠讲话不承诺拆分成独立录音，也不凭上下文猜测待办负责人。
 
-Sona 只做音频采集、来源/时钟映射、会议状态、业务身份、持久化和 LLM 编排。ASR/TTS、Sortformer 和 CAM++ 继续由 SpeechRail 管理；不恢复 WhisperLiveKit、Sona 本地声纹库、跨会议身份识别或本地模型 fallback。PCM 仅在有界内存/IPC 中，数据库和 journal 不存音频/embedding。
+Sona 只做音频采集、来源/时钟映射、会议状态、业务身份、持久化和 LLM 编排。ASR/TTS 与 Sortformer
+由 SpeechRail 管理；不恢复 WhisperLiveKit、Sona 本地声纹库、跨会议身份识别或本地模型 fallback。
+PCM 仅在有界内存/IPC 中，数据库和 journal 不存音频/embedding；应用不启动第二个分人生产者。
 
 | 方案 | 结论 |
 |---|---|
@@ -31,20 +38,19 @@ Sona 只做音频采集、来源/时钟映射、会议状态、业务身份、�
 
 ## 2. 当前基线和风险
 
-2026-09-05 代码基线 Sona `54b34cf`、SpeechRail `eb66f86`。同日 22:05 CST 外部服务探针显示 SpeechRail 1.7.0/light、分人 readiness 为 true；本轮没有真人分人或会议数据库实测。源码与服务安装 wheel 的一致性未核验。
+协议基线为 SpeechRail v2.0.0（tag commit `33d4c316307b0d30faec726a0f72a7eb68c4196a`，
+2026-09-08 发布），其 Realtime 服务使用标准 OpenAI 会话握手，并通过显式命名空间 opt-in 开启分人。
+本次本地联合验收时服务报告为兼容的 v2.0.2；此前 v2.0.1 的运行时 preflight 限制及修复后的复验结果记录在验收报告中。
 
 | 当前事实 | 依据 | 新链路处理 |
 |---|---|---|
-| 会议请求 diarization，strict decoder 遇未知事件报错 | `speechrail/transport.py`、`transcription_events.py` | 显式能力协商，不向 legacy 连接发送新事件 |
-| EOF 使用 commit→clear acknowledgment | `speechrail/transcriber.py:finish/events` | 新模式在 clear 前等待分人 finalized 和持久化；旧模式原样保留 |
-| segment 缺失时合成兜底正文，speaker key 为 0 | `speechrail/transcriber.py:_synthesized_segment` | 保留文字，但展示“讲话人未确定”，不得创建“Speaker 0 真人” |
-| meeting group 中直接拼入服务 speaker label | `speechrail/transcriber.py:_speaker_key` | 新模式使用 session 级源键及稳定应用侧身份 |
-| overlay 默认启用，1800 秒以上丢最旧 PCM；span 没有被丢音频 offset | `config/meeting.py`、`meeting/diarization_overlay.py` | 先隔离危险回写，增量模式禁用自动 overlay |
-| `reconcile_window` 删除从窗口起点开始的历史后缀 | `meeting/repository.py` | 不用于 speaker-only patch；新增专用事务 |
-| remap 逐项更新并删除旧 speaker | `meeting/repository.py:apply_speaker_remapping` | 新链路不复用该算法处理交换映射/人工冲突 |
-| 平滑器可将短 A-B-A 的 B 改成 A，并合并段 | `meeting/diarization_smoother.py` | 分离事实层与阅读层，不破坏 source unit 和短插话 |
+| 标准 OpenAI Realtime 握手先于分人协商 | `speechrail/transport.py`、`transcription_events.py` | 先完成 `session.created`/标准 `session.updated`，只在显式设置开启时发送一次命名空间 opt-in |
+| 分人扩展使用独立事件流 | SpeechRail v2.0.0 contract | 只接受 `speechrail.diarization.updated/status/done`，旧字面量成为协议错误 |
+| completed 正文与分人归属分离 | `speechrail/transcriber.py`、`meeting/repository.py` | 正文按 item 不可变落库，更新只通过 `apply_speaker_patches` 原位修订元数据 |
+| EOF 由 `done` 作为分人终态 | `speechrail/transcriber.py:finish`、`meeting/session.py` | clear/关闭前等待 `done` 及仓储水位；缺失、超时或 degraded 均可见降级 |
+| 应用侧不再有第二分人生产者 | 已删除 batch overlay 与 batch transcriber | 不保存音频，不做会末批量回写，不把旧分人路径作为 fallback |
 
-代码图 Tier 2 与关键源码核验、coverage metadata_match 支持以上正向发现，不代表所有路径无缺陷。流式接线手册关于“无需改动”“会话内编号稳定”和 commit 延迟估计，只能作为旧里程碑说明；不能作为本方案的发布验收证据。
+以上事实由源码、契约测试及已记录的手工 turn loopback 支撑；服务版本、运行时健康和真实音频结果以验收报告的实测记录为准。
 
 ## 3. 采集与时钟
 
@@ -52,7 +58,7 @@ Sona 只做音频采集、来源/时钟映射、会议状态、业务身份、�
 
 新协议样本是 16 kHz mono s16le。应用累计样本再转换成毫秒，不逐包取整累加。每 source epoch 记录：
 
-扩展会议按 Rail 回显 `max_item_duration_ms=8000` 验证上限，默认请求 server VAD（threshold=0.5、prefix_padding_ms=300、silence_duration_ms=600）；每包 20–100 ms，最大 500 ms。服务自动硬切连续讲话，Sona 不再叠加独立定时 commit 造成重复空 item。UI 将“字幕出现”“等待断句”“讲话人确认”分开呈现，不承诺每个词都在 4 秒内最终归属；完整延迟门见 Rail 规格。
+扩展会议按 Rail 回显 `max_item_duration_ms=8000` 验证上限，默认请求 server VAD（threshold=0.65、prefix_padding_ms=300、silence_duration_ms=900）；每包 20–100 ms，最大 500 ms。服务自动硬切连续讲话，Sona 不再叠加独立定时 commit 造成重复空 item。UI 将“字幕出现”“等待断句”“讲话人确认”分开呈现，不承诺每个词都在 4 秒内最终归属；完整延迟门见 Rail 规格。若服务端 VAD preflight 缺少 `onnxruntime`，连接会显式失败并按外部部署问题处理，不在 Sona 侧静默切换引擎。
 
 ```text
 source_epoch: int
@@ -60,10 +66,11 @@ source_session_id: str
 meeting_start_sample: int
 replay_until_meeting_sample: int
 last_committed_meeting_sample: int
-group_generation: str | null
 ```
 
-`meeting_sample = meeting_start_sample + rail_session_sample`。新协议使用服务的 `audio_start_sample/audio_end_sample`，禁止再加 VAD onset/item_offset；legacy 路径继续原算法。样本换算单位以服务回显 `sample_rate=16000` 验证。
+`meeting_sample = meeting_start_sample + rail_session_sample`。当前协议使用服务的
+`audio_start_sample/audio_end_sample`，禁止再加 VAD onset/item_offset；样本换算单位以服务回显
+`sample_rate=16000` 验证。
 
 暂停、设备切换导致实际时钟跳变、来源故障或 WebSocket 重连时，必须结束旧 source epoch，记录准确 gap 和新起点。正常静音保持源时钟，不在音频中直接删掉。mute 是否继续输入零值 PCM 由当前音频产品语义决定；若当前语义为零吞吐，则 resume 必须新 epoch，不能伪装连续录音。
 
@@ -74,15 +81,23 @@ group_generation: str | null
 3. 新 epoch 的 meeting_start_sample 为重放后缀真实起点。回放期间仍按原速/受控速度接受服务背压，不同时把新 PCM 插入旧序列中间。
 4. replay 超过上限、旧 item 一部分已确认但源边界未知，或新结果跨越持久化 watermark：放弃该重叠部分并记录 gap，不做模糊文本去重。已有正文不能被覆盖。
 5. 已落库正文但 speaker 修订未完成时，不重跑其音频；断线后保留当前归属并将未冻结归属标为 unknown/connection_lost。声学状态不可从 journal 恢复。
-6. 新旧相同 `spk_01` 默认两位匿名人。只有服务显式 speaker_link、同 group_generation 且没有人工冲突，才进行身份关联。
+6. 不同 session 即使都返回 `A` 也默认是不同匿名来源；Sona 不跨 session 自动合并，也不根据声学标签推断真实身份。
 
 ## 4. 消费协议与事实模型
 
 ### 4.1 协商
 
-新增配置 `SONA_MEETING_DIARIZATION_EXTENSIONS_ENABLED=false`，只影响后续新会议。先读取 `session.created.capabilities`；包含 `speechrail.diarization.v1` 且开关 true 时，才请求相应 extensions。校验 session.updated 中版本、sample_rate、timebase 和 group_generation。
+配置 `SONA_MEETING_DIARIZATION_ENABLED=false` 只影响后续新会议。所有连接先完成
+`session.created`、标准 `session.update` 与 `session.updated`；标准回显不得包含 `speechrail`。
+显式开启时只发送一次：
 
-无能力时进入明确标注的 legacy 模式，不发送试探扩展，不自动启用 batch overlay。profile 本身缺失时会议 prepare 失败；用户可显式选择“仅转写”。会议中分人故障则继续保存文字，页面显示“分人不可用”，不把服务 error 当成一个新 speaker。
+```json
+{"type":"session.update","session":{"speechrail":{"diarization":{"enabled":true}}}}
+```
+
+随后必须收到精确的 `session.updated.session.speechrail.diarization` 回显
+`{"enabled":true,"version":1,"max_speakers":4}`。能力不可用、协商失败或运行时 degraded 时不试探其他协议，
+保留已确认正文并向 UI 暴露分人不可用原因。
 
 ### 4.2 两类事实独立
 
@@ -95,7 +110,6 @@ Sona 使用 `UUIDv5(meeting_id, source_session_id + ":" + segment_uid)` 生成�
 ```python
 @dataclass(frozen=True)
 class SpeakerPatch:
-    source_session_id: str
     segment_uid: str
     revision: int
     status: Literal["unknown", "tentative", "stable"]
@@ -105,13 +119,17 @@ class SpeakerPatch:
     candidates: tuple[tuple[str, float], ...]
 ```
 
-这是计划新增类型，不导入 SpeechRail 代码。source 字段是声学来源；应用侧 `speaker_key` 为会议内不透明 UUID 字符串，由持久化层生成；UI 不解析 key。legacy `speaker:0` 历史记录按 unknown 呈现，但不强制重写历史库。
+这是计划新增类型，不导入 SpeechRail 代码。`source_session_id` 属于外层
+`SpeakerPatchEvent`，而不是单个 patch。source 字段是声学来源；应用侧 `speaker_key` 为会议内不透明 UUID
+字符串，由持久化层生成；UI 不解析 key。历史行中的旧 `speaker:0` 值按 unknown 呈现，但不强制重写历史库。
 
 文本 confirmed 可以伴随 speaker tentative/unknown。算法 stable 不等于人工确认。`timing_quality=unavailable` 表示只有 item 粗时间范围，不能以词级精度驱动跳转或计算高精度说话时长。
 
 ### 4.3 新事件的严格处理
 
-新模式只新增三个 type：`speechrail.diarization.update`、`speechrail.diarization.status`、`speechrail.diarization.finalized`。字段限制以 Rail 规格为准；未知其他 type 仍拒绝，不能用“忽略所有未知事件”隐藏拼写和协议错误。
+新模式只接受三个 type：`speechrail.diarization.updated`、`speechrail.diarization.status`、
+`speechrail.diarization.done`。字段限制以 Rail 规格为准；未知其他 type 仍拒绝，不能用“忽略所有未知事件”
+隐藏拼写和协议错误。
 
 - update 只能引用本连接已落库 completed 的单位；同 revision 同内容重复忽略，同 revision 不同内容报冲突，revision 倒退忽略。
 - 同连接每 segment revision 必须连续；跳号/更新未知 UID 视为协议错误，停止分人、保留正文。WebSocket 正常保证顺序，因此不实现服务端事件无限补拉。
@@ -128,9 +146,9 @@ class SpeakerPatch:
 | 对象 | 拟新增内容 |
 |---|---|
 | `transcript_segments` | nullable `source_session_id`/`source_segment_uid`/`source_item_id`；`speaker_revision` 默认 0；`model_speaker_key` nullable；`speaker_override_key` nullable；`speaker_status` 默认 unknown；`speaker_frozen` 默认 false；`timing_quality` 默认 unavailable；`coverage_ratio/overlap_ratio` 默认 0；`speaker_candidates` JSONB 默认空数组（最多 4 项） |
-| `meetings` | `diarization_status`（legacy/active/complete/degraded）、`diarization_reason` nullable |
-| 新表 `meeting_transcription_sources` | meeting_id、source_epoch、session_id、meeting_start_sample、last_committed_meeting_sample、stable_through_sample、last_update_sequence、group_generation；每会议 session 唯一，stable_through_sample 保持 Rail session 时间域 |
-| 新表 `meeting_speaker_sources` | meeting_id、session_id、source_speaker、group_generation、application_speaker_key；源标签唯一 |
+| `meetings` | `diarization_status`（off/active/complete/degraded）、`diarization_reason` nullable |
+| 新表 `meeting_transcription_sources` | meeting_id、source_epoch、session_id、meeting_start_sample、last_committed_meeting_sample、stable_through_sample、last_update_sequence；每会议 session 唯一，水位保持 Rail session 时间域 |
+| 新表 `meeting_speaker_sources` | meeting_id、session_id、source_speaker、application_speaker_key；源标签仅在 session 内唯一 |
 | 新表 `meeting_source_events` | meeting_id、session_id、event_id、canonical_payload_hash；唯一组合用于去重，不存音频/embedding/原始消息 |
 
 为有 source UID 的 segment 建 `(meeting_id,source_session_id,source_segment_uid)` 唯一索引；旧行 nullable，保持旧查询可用。未知显示使用保留 key `unknown`，不得出现在实名候选列表；它不是 UUID 身份。模型主 speaker 有值时解析到应用 UUID；对 legacy 字段的兼容输出由 presenter 负责。
@@ -141,14 +159,19 @@ class SpeakerPatch:
 
 新增 port：`append_completed_item(meeting_id, item: CompletedItem) -> TranscriptReconcileResult` 与 `apply_speaker_patches(meeting_id, source_event: SpeakerPatchEvent) -> SpeakerPatchResult`，由 repository 实现。
 
-`CompletedItem` 包含 session/item ID、顶层 event_id/sequence、session sample 区间、canonical text、immutable units 和 source epoch。`SpeakerPatchEvent` 包含 session/event ID/sequence、group_generation、stable_through_sample、patches 和 links。`SpeakerPatchResult` 包含 changed_segment_ids、transcript_revision、content_revision、diarization_status。各类型放 `meeting/models.py` 或新增 `meeting/speaker_attribution.py`，transport 类型先经显式转换，不能把未校验 dict 送入 repository。
+`CompletedItem` 包含 session/item ID、顶层 event_id/sequence、session sample 区间、canonical text、immutable units
+和 source epoch。`SpeakerPatchEvent` 包含 session/event ID/sequence、stable_through_sample 与 patches；候选只作为证据，
+不参与身份合并。`SpeakerPatchResult` 包含 changed_segment_ids、transcript_revision、content_revision、
+diarization_status。各类型先经显式转换，不能把未校验 dict 送入 repository。
 
 speaker-only 事务步骤：
 
 1. 锁 meeting 行；只接受 RECORDING/FINALIZING（自动修订），验证 source session 属于该 meeting。
 2. 检查 source event 唯一键和内容哈希；相同 event 重放不增加版本，不新增事件。
 3. 按 source UID 定位全部目标，验证 revision、不可变字段以及 watermark；任何非法目标整批拒绝，不半批写入。
-4. 更新模型归属、revision、status、coverage/overlap 和候选；以 source watermark 更新 `speaker_frozen`，并在同事务推进 source 的 last_update_sequence。没有人工 override 时更新既有 `speaker_key`；有 override 保留用户结果，模型值仅供可追溯查看。
+4. 更新模型归属、revision、status、coverage/overlap 和候选；只有 patch 状态为 `stable` 时置位
+   `speaker_frozen`，并在同事务推进 source 的 `last_update_sequence`。没有人工 override 时更新既有
+   `speaker_key`；有 override 保留用户结果，模型值仅供可追溯查看。
 5. 仅当有效结果变化时递增 meeting 的 transcript_revision 和 content_revision，写既有 meeting_events，并提交去重凭证；一次事务一次版本。
 6. 对外广播完整一致的结果；失败则全部回滚。禁止 DELETE transcript 后缀、禁止改 text/start/end/id，也不全量重写会议。
 
@@ -192,7 +215,7 @@ DB 恢复后严格按 completed→patch→finalize 回放，利用同一唯一�
 stateDiagram-v2
     RECORDING --> FINALIZING: 停止新采集并提交最后 PCM
     FINALIZING --> DRAINING: ASR completed 已持久化
-    DRAINING --> SAVING: 分人 finalized 或明确超时
+    DRAINING --> SAVING: 分人 done 或明确超时
     SAVING --> COMPLETED: 无缺口且归属正常封存
     SAVING --> DEGRADED: 分人失败但文字已保存
     SAVING --> INTERRUPTED: 音频缺口或 ASR 尾部失败
@@ -200,9 +223,10 @@ stateDiagram-v2
 
 DRAINING/SAVING/DEGRADED 是 UI/应用内部阶段，不擅自增加旧 MeetingStatus 枚举。持久状态继续 COMPLETED/INTERRUPTED，分人单独用 diarization_status 区分。仅分人失败可 `MeetingStatus.COMPLETED + diarization_status=degraded`；ASR 尾部超时使用现有 interrupted/finalization_timeout。
 
-扩展模式顺序：停止采集→commit→所有 completed 落库→发送分人 finalize→消费直至 last_update_sequence 对应更新均持久化→保存 complete/degraded→clear/关闭→封存会议→创建纪要任务。总体等待上限 30 秒，不能每个步骤单独重新获得 30 秒。
-
-legacy 模式继续 commit→clear acknowledgment，不等待不存在的 session.completed。新模式 timeout 不伪造 finalized；保留已落库正文并记录原因。自动 overlay 全程关闭，不能用 batch 推理掩盖分人终态失败。
+分人模式顺序：停止采集→commit→所有 completed 落库→消费 `updated/status`→等待 `done` 及
+`last_update_sequence` 对应更新持久化→保存 complete/degraded→clear/关闭→封存会议→创建纪要任务。
+总体等待上限 30 秒，不能每个步骤单独重新获得 30 秒。未开启分人时直接按标准 ASR 终态关闭，不等待分人事件。
+超时不伪造 `done`；保留已落库正文并记录原因。
 
 ### 6.3 纪要和内心 OS
 
@@ -210,22 +234,20 @@ legacy 模式继续 commit→clear acknowledgment，不等待不存在的 sessio
 
 生成期间人工命名/归属改变会递增 content_revision。返回时若 source revision 过期，结果标为 stale，用户看到更新提示；不得将旧姓名摘要覆盖当前版本。内心 OS 可以读取临时信息，但必须携带不确定状态且保持既有会后即焚边界。本期沿用当前 LLM provider/model，不修改 LM Studio 配置。
 
-## 7. Overlay 收敛和迁移
+## 7. 单一分人生产者与迁移
 
-S0 先将自动 overlay 默认关闭，并阻断对已可靠分人的词盲目覆盖。保留旧开关只用于明确选择的 legacy 诊断：`diarization_overlay_enabled=true` 且无新扩展时才允许会末单次调用；streaming lease 必须先释放。
-
-诊断模式若保留：buffer 改为样本索引 ring，维护起点；输出 span 加 start_sample offset，只允许修改被缓冲音频完整覆盖的 segment，跨裁剪边界段不改。必须先测试所有实际请求层限制，不能以 1800 秒缓冲参数推断服务能接收。裁剪、超限、batch 失败均 visible，不能 silent return [] 后显示分人完成；其 batch labels 使用独立 source_session_id，不与实时同名 label 自动合并。
-
-扩展启用后，即使旧 overlay 开关残留 true 也不调用 batch。此项必须有 spy 测试。一个发布周期内保留诊断回退；删除诊断实现是独立清理任务，不属于本次方案必须范围。
+当前实现只把 SpeechRail v2 Realtime 分人事件转换为 speaker-only patch。旧 batch overlay、旧 batch
+transcriber、旧协议字段和旧运行时开关均不在当前路径；历史迁移仅保留读取旧行所需的数据库结构。
+因此不存在会末重新读取音频、覆盖实时结果或绕过人工更正的第二分人生产者。
 
 ## 8. 联合验收与发布
 
-质量数据与目标统一采用 Rail 规格第 7 节；Sona 不维护第二套冲突阈值。额外硬门：
+质量数据与目标统一采用 SpeechRail v2.0.0 contract；Sona 不维护第二套冲突阈值。必须验证：
 
 | 用例 | 必须成立 |
 |---|---|
 | 第二个 commit、静音后恢复 | 时间不回零、不双加 offset、不覆盖历史 |
-| 45 分钟 legacy overlay 诊断 | 最后 30 分钟只影响对应区间，前 15 分钟完全不变 |
+| 真实短会议与字幕链路 | 标准握手、显式 opt-in、completed、updated/status/done 顺序和脱敏结果成立 |
 | replay/重复 event | 正文无重复、UUID 稳定、版本只加一次 |
 | 迟到 speaker patch | 正文、时间、人工 override 保持，局部归属正确变化 |
 | 同 source ID 内容变化/版本跳号 | 可见协议失败，不 silent overwrite |
@@ -233,14 +255,20 @@ S0 先将自动 overlay 默认关闭，并阻断对已可靠分人的词盲目�
 | 人工名称冲突与 A↔B 交换 | 不合并两个人，不丢姓名与原始身份 |
 | DB 故障与 journal 回放 | 单次逻辑提交，文本和修订顺序正确，封存不提前 |
 | finalize 丢失、延迟或 native timeout | 30 秒内可见降级/中断，不假 completed |
-| 旧/新 Rail × 旧/新 Sona | 四组合明确结果，旧 decoder 不收到新事件 |
-| 扩展会议 | batch transcriber 调用次数恒为 0 |
+| 未开启分人 | 不发送 `speechrail` opt-in，不处理分人事件 |
+| 扩展会议 | 不存在第二分人生产者；正文与 speaker patch 分离 |
 | 摘要过程中人工纠错 | 旧 revision 的纪要标 stale，负责人不被错误归属 |
 
-实施顺序：S0 风险隔离→S1 协议适配（开关关）→S2 加法数据迁移/幂等事务→S3 UI/EOF/纪要→S4 联合验收。依赖 Rail R2/R3 的机器契约，不能靠 mock 猜未实现接口。
+实施顺序：协议适配→加法数据迁移/幂等事务→UI/EOF/纪要→联合验收。依赖已发布 SpeechRail v2.0.0
+机器契约，不能靠 mock 猜未实现接口。
 
-发布：先部署兼容双方的新 decoder/presenter 与加法 schema，再启用新能力；受控非敏感会议通过后改默认。每个运行态步骤遵循项目流程，本文不执行这些操作。回退时先结束录音→关闭扩展开关→保留新数据列及 journal→恢复旧兼容行为；不删除数据，不自动恢复批量 overlay，不把未知改成默认某个人。若要降级至旧 Sona 二进制，必须先验证其读取加法 schema 的兼容性。
+发布：SpeechRail v2.0.0 已发布；Sona 默认仍关闭分人，按会议/字幕设置显式开启。回退时结束录音、关闭
+当前设置并保留新数据列及 journal；不删除数据、不把未知改成某个人，也不恢复已删除的 batch 路径。
 
 ## 9. 本次文档交付边界
 
-本轮仅新增设计/实施计划和导航，并给旧对接手册增加基线更正说明。代码、数据库、模型、运行配置均未修改。源码风险还需失败测试和真实会议验收；文档中的性能门与阈值均为目标。实施计划中的文件若执行时已发生其他任务改动，先按符号复核、只改目标范围，不覆盖未知修改。
+本轮已完成 SpeechRail v2.0.0 对接实施、协议/事务/UI 测试和手工 turn meeting loopback smoke；完整门禁、
+真实服务版本、字幕停止链路结果与限制条件见联合验收报告。SpeechRail 当前 v2.0.2 已报告 VAD runtime ready，
+默认 server-side VAD meeting smoke 已通过；字幕 clean tail 仍有上游事件交付对账问题。这属于已反馈给 SpeechRail
+维护者的外部问题，Sona 不修改其仓库，也不以 bounded degraded stop 结果掩盖该限制。若后续运行时再次缺少
+`onnxruntime`，请求 server-side VAD 仍应显式 preflight 失败，不在 Sona 侧静默切换引擎。

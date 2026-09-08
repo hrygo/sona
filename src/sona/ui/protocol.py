@@ -142,7 +142,6 @@ class RuntimeCapabilities(BaseModel):
     inner_os_enabled: bool = False
     inner_os_analysis_enabled: bool = False
     inner_os_channel: Literal["loopback_only"] = "loopback_only"
-    diarization_overlay_enabled: bool = False
     physical_output_enabled: bool = False
 
 

@@ -6,8 +6,8 @@ import {
   toSRT,
   toMarkdownNotes,
   useSubtitleStore,
+  isSubtitleSnapshotPayload,
   type SubtitleLine,
-  type SubtitleSnapshot,
 } from "../stores/subtitleStore";
 import { useUISettingsStore } from "../stores/uiSettingsStore";
 import type { PCMOwner, RuntimeMode } from "../contracts/meetingContract";
@@ -157,7 +157,14 @@ export default function SubtitleStream({
   onNavigateMeeting,
   commandSocket,
 }: SubtitleStreamProps) {
-  const { lines, partial, connected, starredIndices, toggleStar } = useSubtitleStore();
+  const {
+    lines,
+    partial,
+    connected,
+    diarization,
+    starredIndices,
+    toggleStar,
+  } = useSubtitleStore();
   const teleprompterSettings = useUISettingsStore((s) => s.teleprompterSettings);
   const setTeleprompterSettings = useUISettingsStore((s) => s.setTeleprompterSettings);
   const micMuted = useUISettingsStore((s) => s.micMuted);
@@ -250,7 +257,9 @@ export default function SubtitleStream({
       }
       return;
     }
-    useSubtitleStore.getState().applySnapshot(payload as Partial<SubtitleSnapshot>);
+    if (isSubtitleSnapshotPayload(payload)) {
+      useSubtitleStore.getState().applySnapshot(payload);
+    }
   }, []);
 
   const { state } = useEventSocket(runtimeConfig.subtitlesWsUrl, handleMessage);
@@ -291,11 +300,11 @@ export default function SubtitleStream({
     return () => cancelAnimationFrame(frame);
   }, [lines, partial, isScrolledUp]);
 
-  // Available unique speakers (归一化非负说话人，避免出现 -1)
+  // Available unique anonymous speaker labels.
   const availableSpeakers = useMemo(() => {
-    const set = new Set<number>();
-    lines.forEach((l) => set.add(l.speaker >= 0 ? l.speaker : 0));
-    return Array.from(set).sort((a, b) => a - b);
+    const set = new Set<string>();
+    lines.forEach((l) => set.add(l.speaker));
+    return Array.from(set).sort((a, b) => a.localeCompare(b, "zh-CN"));
   }, [lines]);
 
   // Filter logic
@@ -306,8 +315,7 @@ export default function SubtitleStream({
         if (speakerFilter === "starred") {
           if (!starredIndices.has(originalIndex)) return false;
         } else if (speakerFilter !== "all") {
-          const spk = String(line.speaker >= 0 ? line.speaker : 0);
-          if (spk !== speakerFilter) return false;
+          if (line.speaker !== speakerFilter) return false;
         }
 
         const q = searchQuery.trim().toLowerCase();
@@ -453,6 +461,18 @@ export default function SubtitleStream({
               <span className={`subtitle-status-pill ${connected ? "connected" : ""}`}>
                 <span className="subtitle-status-dot" />
                 {connected ? "SpeechRail 已连接" : "等待连接"}
+              </span>
+              <span
+                className={`subtitle-diarization-state is-${diarization.status}`}
+                role="status"
+                title={diarization.reason ?? undefined}
+              >
+                说话人分离：{diarization.status === "active"
+                  ? "已启用"
+                  : diarization.status === "degraded"
+                    ? "已降级"
+                    : "未启用"}
+                {diarization.reason ? ` · ${diarization.reason}` : ""}
               </span>
               <span
                 className="subtitle-mode-pill"

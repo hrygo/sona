@@ -179,6 +179,8 @@ class SpeakerRecord(_FrozenModel):
 class DiarizationStatus(StrEnum):
     """会议分人扩展的独立生命周期状态（不改变 MeetingStatus 枚举）。"""
 
+    OFF = "off"
+    # 仅用于读取迁移前历史行；新运行时不会选择该协议路径。
     LEGACY = "legacy"
     ACTIVE = "active"
     COMPLETE = "complete"
@@ -198,7 +200,7 @@ class MeetingRecord(_FrozenModel):
     transcript_revision: int = Field(default=0, ge=0)
     content_revision: int = Field(default=0, ge=0)
     interruption_reason: str | None = Field(default=None, max_length=128)
-    diarization_status: DiarizationStatus = DiarizationStatus.LEGACY
+    diarization_status: DiarizationStatus = DiarizationStatus.OFF
     diarization_reason: str | None = Field(default=None, max_length=128)
     metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=_utc_now)

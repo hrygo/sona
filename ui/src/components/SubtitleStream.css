@@ -167,6 +167,25 @@
   box-shadow: 0 0 6px var(--color-green-glow);
 }
 
+.subtitle-diarization-state {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  margin-top: 6px;
+  color: var(--text-secondary);
+  font-size: 0.68rem;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.subtitle-diarization-state.is-active {
+  color: var(--color-green);
+}
+
+.subtitle-diarization-state.is-degraded {
+  color: var(--color-yellow);
+}
+
 .subtitle-mode-pill {
   display: inline-flex;
   align-items: center;

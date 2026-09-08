@@ -21,7 +21,6 @@ from sona.interaction.ownership import InteractionOwnership
 from sona.interaction.pipeline import build_pipeline
 from sona.interaction.pipeline_dependencies import default_pipeline_factories
 from sona.interaction.session import InteractionSession
-from sona.meeting.diarization_overlay import overlay_gate_for_runtime
 from sona.meeting.models import PCMOwner, RuntimeMode, StorageHealth
 from sona.meeting.runtime_mode import (
     ModeConflictError,
@@ -94,7 +93,7 @@ class UIRuntime:
         self.subtitle_proxy = SubtitleProxy(
             settings.subtitles,
             readiness_probe=_speechrail_readiness_probe(settings),
-            diarization_extensions_enabled=settings.meeting.diarization_extensions_enabled,
+            meeting_diarization_enabled=settings.meeting.diarization_enabled,
         )
         factories = default_pipeline_factories(settings.interaction)
         if conversation_stt_factory is not None:
@@ -274,10 +273,6 @@ class UIRuntime:
                 inner_os_enabled=self._settings.meeting.inner_os_enabled,
                 inner_os_analysis_enabled=self._settings.meeting.inner_os_analysis_enabled,
                 inner_os_channel="loopback_only",
-                diarization_overlay_enabled=overlay_gate_for_runtime(
-                    overlay_enabled=self._settings.meeting.diarization_overlay_enabled,
-                    extensions_enabled=self._settings.meeting.diarization_extensions_enabled,
-                ),
             ),
             audio_levels=AudioLevelsSnapshot(
                 microphone=audio_levels.microphone,

@@ -32,13 +32,13 @@
             ├─► SubtitleProxy ──PCM WS──► SpeechRail Realtime (/v1/realtime) [实时字幕模式]
             └─► MeetingSession (双通道解耦 / 水位屏障 / Journal) [会议助手模式]
                     │
-                    ├─► [文本通道] response.audio_transcript.done ──► 不可变正文 (append_completed_item) ──► PostgreSQL
+                    ├─► [文本通道] conversation.item.input_audio_transcription.completed ──► 不可变正文 (append_completed_item) ──► PostgreSQL
                     │
-                    ├─► [分人通道] diarization.speaker_map/segment ──► 平滑器 (DiarizationSmoother) ──► 原子修订 (apply_speaker_patches) ──► PostgreSQL
-                    │                                                   (短片段滤波 / 相邻合并)          (人工更正绝对优先防覆盖)
+                    ├─► [分人通道] speechrail.diarization.updated ──► typed decoder ──► 原子修订 (apply_speaker_patches) ──► PostgreSQL
+                    │                                                   (speaker-only，人工更正绝对优先防覆盖)
                     │
-                    ├─► [EOF 屏障] commit EOF ──► diarization.finalized ──► 水位对齐 ──► 会议封存 ──► MeetingSummary (LM Studio)
-                    │                             (legacy 未协商扩展流直接封存)
+                    ├─► [EOF 屏障] commit EOF ──► speechrail.diarization.done ──► 水位对齐 ──► 会议封存 ──► MeetingSummary (LM Studio)
+                    │                             (未启用或明确降级时保留正文并快速封存)
                     │
                     └─► [会中伴侣] Inner OS (会前底牌 / 局势研判 / 事实核查 / 回应草稿 / 会后即焚) ──► LM Studio
 ```
@@ -61,8 +61,8 @@
 | 模块 | 职责与核心功能 | 关键文件 |
 |---|---|---|
 | `sona.asr` | ASR 领域契约与呈现模型：厂商无关协议定义、音频窗口模型与结果呈现 | `contracts.py`<br>`models.py`<br>`profiles.py`<br>`presenters.py` |
-| `sona.meeting` | 会议助手核心：会话状态机、双通道转录解耦、PostgreSQL 持久化、持续分人平滑与原位修订、人工更正保护、EOF 水位屏障、崩溃恢复 journal、异步 AI 纪要生成、内心 OS、REST API 与 WebSocket 实时网关 | `session.py`<br>`repository.py`<br>`speaker_attribution.py`<br>`diarization_smoother.py`<br>`finalization.py`<br>`persistence.py`<br>`diarization_overlay.py`<br>`asr_mapping.py`<br>`summary/`<br>`inner_os/`<br>`recovery.py`<br>`runtime_mode.py`<br>`api.py`<br>`events.py`<br>`models.py`<br>`migrations.py` |
-| `sona.speechrail` | SpeechRail 基础设施客户端与统一适配层：Realtime 流式 ASR 转录器、OpenAI Realtime 协议及分人扩展事件解析、Pipecat STT 处理器、TTS 客户端与传输层 | `transcriber.py`<br>`transcription_events.py`<br>`stt_processor.py`<br>`transport.py`<br>`tts.py`<br>`batch_transcriber.py` |
+| `sona.meeting` | 会议助手核心：会话状态机、双通道转录解耦、PostgreSQL 持久化、分人原位修订、人工更正保护、EOF 水位屏障、崩溃恢复 journal、异步 AI 纪要生成、内心 OS、REST API 与 WebSocket 实时网关 | `session.py`<br>`repository.py`<br>`speaker_attribution.py`<br>`finalization.py`<br>`persistence.py`<br>`asr_mapping.py`<br>`summary/`<br>`inner_os/`<br>`recovery.py`<br>`runtime_mode.py`<br>`api.py`<br>`events.py`<br>`models.py`<br>`migrations.py` |
+| `sona.speechrail` | SpeechRail 基础设施客户端与统一适配层：Realtime 流式 ASR 转录器、OpenAI Realtime 协议及 `speechrail.diarization.*` 分人事件解析、Pipecat STT 处理器、TTS 客户端与传输层 | `transcriber.py`<br>`transcription_events.py`<br>`stt_processor.py`<br>`transport.py`<br>`tts.py` |
 | `sona.ui` | 默认运行时主入口：`RuntimeModeCoordinator` 模式协调、严格控制协议网关（`request_id` ack）、助手桥接、FastAPI 与 WebSocket 传输端点 | `server.py`<br>`runtime.py`<br>`control.py`<br>`assistant_bridge.py`<br>`http_routes.py`<br>`websocket_routes.py`<br>`protocol.py` |
 | `sona.interaction` | 共享交互会话/所有权 + Pipecat 管道 + LM Studio 原生服务 + 双层回声防线 + 滚动记忆压缩 (ADR-003) 与 NLTK 依赖自愈 | `session.py`<br>`ownership.py`<br>`pipeline.py`<br>`reasoning.py`<br>`context_memory.py`<br>`runner.py`<br>`nltk_data.py` |
 | `sona.subtitles` | 实时字幕与流式转录核心领域：`SubtitleProxy`（带 PCM 重连快照与 `session.completed` 优雅停机）、`SrtArchive`、会话状态机与客户端广播池 | `proxy.py`<br>`archive.py`<br>`sessions.py`<br>`clients.py` |
@@ -98,7 +98,7 @@
 
 ### 3. 会议数据边界与 SPK-E2E-1 持久化公理
 - **不可变正文单元**：转录完成的 `CompletedItem` 经 `append_completed_item` 写入 PostgreSQL，文字内容、开始结束时间戳是不可变事实。
-- **分人原位原子修订**：分人事件（`speechrail.diarization.speaker_map` / `segment`）仅通过 `apply_speaker_patches` 按时间区间原子更新 `speaker_id` 与 `speaker_label`，同时记录修订历史并推进 `diarization_watermark_ms`。
+- **分人原位原子修订**：SpeechRail v2 的 `speechrail.diarization.updated` 仅通过 `apply_speaker_patches` 按不可变 `segment_uid` 原子更新说话人元数据，同时记录修订历史并推进分人水位。
 - **人工更正绝对优先 (Override Precedence)**：用户会中或会后手动指定说话人时，数据库置位 `manually_corrected = true`。后续任何自动分人 patch、平滑算法或 EOF 冲刷均必须跳过已更正段落，严禁覆盖用户人工结果。
 - **零音频持久化**：PostgreSQL 是会议元数据、confirmed 转录、speaker 映射与 AI 纪要的**唯一事实源**；**绝对不保存音频**；会议采集不写 `runtime/subtitles/current.srt`。
 - **故障恢复 Journal**：`runtime/meetings/recovery/*.jsonl` 目录权限 `0700`、文件权限 `0600`，仅在数据库写入短暂失败时记录 confirmed 文本与 patch 操作，回放成功后删除。
@@ -109,14 +109,14 @@
 - 语音助手与会议助手**不可同时录音**。进入会议模式时主动挂起语音助手；会议结束后返回空闲态。
 
 ### 5. 字幕与会议 EOF 优雅冲刷与屏障隔离
-- **分人扩展协商屏障**：启用 `SONA_MEETING_DIARIZATION_EXTENSIONS_ENABLED=true` 时，会议结束通过 Realtime 发送 `input_audio_buffer.commit` 作为 EOF，屏障等待 `speechrail.diarization.finalized` 事件与仓储水位对齐（`RepositoryDiarizationGate.wait_persisted`）；超时则标记 `finalization_timeout`。
-- **Legacy 未协商流隔离**：若未协商扩展或使用旧版 SpeechRail，`MeetingSession._diarization_barrier` **严禁激活 `extensions_active`**，必须快速直接返回完成封存，避免在 `wait_persisted` 轮询中无谓挂起 30 秒超时。
+- **分人扩展协商屏障**：启用 `SONA_MEETING_DIARIZATION_ENABLED=true` 时，会议结束通过 Realtime 发送 `input_audio_buffer.commit` 作为 EOF，屏障等待 `speechrail.diarization.done` 与仓储水位对齐（`RepositoryDiarizationGate.wait_persisted`）；超时或服务降级则保留正文并标记分人降级。
+- **未协商流隔离**：未启用分人或服务未回显 opt-in 时，`MeetingSession._diarization_barrier` 快速结束，不等待不存在的分人终态；当前代码不选择旧协议或 batch overlay 回退。
 - `SubtitleProxy` 支持重连期间重放 PCM 活跃快照，保证断线重连后转录文本不丢字。
 
-### 6. 分人事件处理与时序平滑数据守恒
+### 6. 分人事件处理与正文数据守恒
 - **字典载荷解包**：`MeetingSession._on_diarization_event` 对字典载荷必须使用 `parse_speechrail_event` 或 Pydantic 模型解析，严禁裸访问字典属性。
 - **降级容错**：收到 `DiarizationStatusEvent(status="degraded")` 时，必须立即记录并调用 `repository.finalize_diarization(reason="degraded")`，安全解除屏障等待。
-- **平滑器数据守恒**：`DiarizationSmoother.smooth_window` 在进行短片段滤波和相邻发言人合并时，构造新 `TranscriptWindow` **必须显式保留 `completed=window.completed`**，严禁丢失已确认正文。
+- **正文数据守恒**：`speechrail.diarization.updated` 只更新 speaker 元数据，不重建或改写 `completed` 正文单元；构造新的 `TranscriptWindow` 时必须显式保留 `completed=window.completed`，严禁丢失已确认正文。
 
 ### 7. HTTP / 控制 WebSocket 测试与边界
 - `httpx.AsyncClient.stream()` 的请求体关键字参数是 **`json=`**（不是 `body=`）；测试 mock 必须同名，否则测试端报错 `KeyError: 'model'`。

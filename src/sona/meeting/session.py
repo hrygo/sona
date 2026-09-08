@@ -11,8 +11,6 @@ from datetime import UTC, datetime
 from typing import Any, cast
 from uuid import UUID
 
-from sona.meeting.diarization_overlay import MeetingDiarizationOverlay, meeting_diarization_group_id
-from sona.meeting.diarization_smoother import DiarizationSmoother
 from sona.meeting.finalization import (
     DiarizationGateState,
     MeetingFinalizer,
@@ -27,7 +25,6 @@ from sona.meeting.models import (
 )
 from sona.meeting.persistence import RecoveryJournalPort, TranscriptPersistence
 from sona.meeting.ports import (
-    AudioListener,
     CaptureGap,
     CaptureLease,
     MeetingCaptureGateway,
@@ -40,6 +37,11 @@ from sona.meeting.speaker_attribution import (
     SpeakerPatchEvent,
 )
 from sona.meeting.speaker_labels import speaker_display_label
+from sona.speechrail.transcription_events import (
+    DiarizationDoneEvent,
+    DiarizationStatusEvent,
+    DiarizationUpdatedEvent,
+)
 
 WindowListener = Callable[[TranscriptWindow], Awaitable[None]]
 EventPublisher = Callable[[str, UUID, object], Awaitable[None]]
@@ -89,8 +91,6 @@ class MeetingSession:
         finalization_timeout_secs: float = 30.0,
         recovery_journal: RecoveryJournalPort | None = None,
         event_publisher: EventPublisher | None = None,
-        diarization_smoother: DiarizationSmoother | None = None,
-        diarization_overlay: MeetingDiarizationOverlay | None = None,
     ) -> None:
         if gateway is None:
             gateway = subtitle_proxy
@@ -106,8 +106,6 @@ class MeetingSession:
         self.finalization_timeout_secs = finalization_timeout_secs
         self.recovery_journal = recovery_journal
         self.event_publisher = event_publisher
-        self.diarization_smoother = diarization_smoother
-        self.diarization_overlay = diarization_overlay
         self._lock = asyncio.Lock()
         self._active_meeting_id: UUID | None = None
         self._record: MeetingRecord | None = None
@@ -123,14 +121,10 @@ class MeetingSession:
             transcripts=repository,
             minutes_store=repository,
             timeout_secs=finalization_timeout_secs,
-            diarization_overlay=diarization_overlay,
             diarization_gate=RepositoryDiarizationGate(
                 repository, self._diarization_gate_state
             ),
         )
-        self._audio_listener: AudioListener | None = None
-        if diarization_overlay is not None:
-            self._audio_listener = diarization_overlay.push_pcm
         # SPK-E2E-1：分人扩展的 patch 持久化监听器与 EOF 屏障。
         with contextlib.suppress(AttributeError):
             self.gateway.add_diarization_listener(self._on_diarization_event)
@@ -190,6 +184,7 @@ class MeetingSession:
             self._record = record
             self._storage_degraded = False
             self._speaker_names = {}
+            self._diarization_gate_state.reset()
             listener = self._on_window
             self._listener = listener
             try:
@@ -198,7 +193,6 @@ class MeetingSession:
                 capture = await self.gateway.prepare_capture(
                     f"meeting:{record.id}",
                     timeout_secs=5.0,
-                    speaker_count_hint=max_speakers,
                 )
             except BaseException as exc:
                 logger.warning(
@@ -217,7 +211,6 @@ class MeetingSession:
                 self._preparation = None
                 self._active_meeting_id = None
                 raise
-            self._activate_overlay(record.id)
             preparation = MeetingPreparation(record=record, capture=capture)
             self._preparation = preparation
             return preparation
@@ -335,6 +328,7 @@ class MeetingSession:
         self._preparation = None
         self._committed_preparation = None
         self._speaker_names = {}
+        self._diarization_gate_state.reset()
         await self._resume_summary_worker()
 
     @staticmethod
@@ -458,65 +452,33 @@ class MeetingSession:
             return self._speaker_names
 
     async def _on_diarization_event(self, payload: Any) -> None:
-        """分人扩展事件 → SpeakerPatchEvent → speaker-only 事务（journal 兜底）。"""
+        """把已校验的 SpeechRail v2 事件转换为 speaker-only 事务。"""
         meeting_id = self._active_meeting_id
         if meeting_id is None or payload is None:
             return
 
-        if isinstance(payload, dict):
-            event_obj = payload.get("event", payload)
-            session_id = str(
-                payload.get("session_id")
-                or getattr(event_obj, "_session_id", "")
-                or getattr(event_obj, "session_id", "")
-                or ""
-            )
-            event_id = str(
-                payload.get("event_id")
-                or getattr(event_obj, "_event_id", "")
-                or getattr(event_obj, "event_id", "")
-                or ""
-            )
-            sequence = int(
-                payload.get("sequence")
-                or getattr(event_obj, "_sequence", 0)
-                or getattr(event_obj, "sequence", 0)
-                or 0
-            )
-        else:
-            event_obj = payload
-            session_id = str(
-                getattr(payload, "_session_id", None)
-                or getattr(payload, "session_id", "")
-                or ""
-            )
-            event_id = str(
-                getattr(payload, "_event_id", None)
-                or getattr(payload, "event_id", "")
-                or ""
-            )
-            sequence = int(
-                getattr(payload, "_sequence", 0)
-                or getattr(payload, "sequence", 0)
-                or 0
-            )
-
-        updates = getattr(event_obj, "updates", None)
-        if updates is None:
-            # status 事件直接记录降级终态；finalized 由 EOF 屏障消费
-            status = getattr(event_obj, "status", None)
-            if status == "degraded":
-                reason = getattr(event_obj, "reason", None)
+        if isinstance(payload, DiarizationStatusEvent):
+            with contextlib.suppress(Exception):
+                await self.repository.finalize_diarization(
+                    meeting_id, status="degraded", reason=payload.reason
+                )
+            return
+        if isinstance(payload, DiarizationDoneEvent):
+            if payload.status == "degraded":
                 with contextlib.suppress(Exception):
                     await self.repository.finalize_diarization(
-                        meeting_id, status="degraded", reason=reason
+                        meeting_id,
+                        status="degraded",
+                        reason=payload.reason or "degraded",
                     )
             return
-        if not session_id:
-            logger.warning("MeetingSession: 分人修订缺少 session id，跳过")
+        if not isinstance(payload, DiarizationUpdatedEvent):
+            logger.warning("MeetingSession: 丢弃未识别的 typed 分人事件")
+            with contextlib.suppress(Exception):
+                await self.repository.finalize_diarization(
+                    meeting_id, status="degraded", reason="protocol_error"
+                )
             return
-        if not event_id:
-            event_id = f"evt_patch_{sequence}"
 
         patches = tuple(
             SpeakerPatch(
@@ -534,14 +496,13 @@ class MeetingSession:
                     for candidate in update.candidates
                 ),
             )
-            for update in updates
+            for update in payload.updates
         )
         event = SpeakerPatchEvent(
-            source_session_id=session_id,
-            event_id=event_id,
-            sequence=sequence,
-            group_generation=getattr(event_obj, "group_generation", None),
-            stable_through_sample=int(getattr(event_obj, "stable_through_sample", 0) or 0),
+            source_session_id=payload.session_id,
+            event_id=payload.event_id,
+            sequence=payload.sequence,
+            stable_through_sample=payload.stable_through_sample,
             patches=patches,
         )
         try:
@@ -561,36 +522,65 @@ class MeetingSession:
             )
 
     async def _diarization_barrier(self, stream: Any, deadline: float) -> None:
-        """EOF 屏障：Rail finalized 后等 watermark 持久化，再记录分人终态。"""
+        """EOF 屏障：SpeechRail done 后等 last_update_sequence 落库。"""
         meeting_id = self._active_meeting_id
         if meeting_id is None:
             return
-        extensions_negotiated = bool(getattr(stream, "extensions_negotiated", False))
-        finalized = getattr(stream, "diarization_finalized", None)
-        if not extensions_negotiated and finalized is None:
-            # 未协商扩展流且未收到 finalized：保持 legacy 模式，不激活屏障等待
+        if not getattr(stream, "diarization_requested", False):
             return
-        self._diarization_gate_state.extensions_active = True
-        if finalized is None:
-            # 协商了扩展但未收到 finalized（服务端中断或未发送）：交由 gate 兜底超时降级
-            return
-        session_id = getattr(stream, "session_id", None) or ""
-        if finalized.status == "degraded":
+        self._diarization_gate_state.active = True
+        unavailable_reason = getattr(stream, "diarization_unavailable_reason", None)
+        degraded_reason = getattr(stream, "diarization_degraded_reason", None)
+        if unavailable_reason:
             with contextlib.suppress(Exception):
                 await self.repository.finalize_diarization(
-                    meeting_id, status="degraded", reason=finalized.reason
+                    meeting_id,
+                    status="degraded",
+                    reason=unavailable_reason,
                 )
             return
+
+        if not getattr(stream, "diarization_enabled", False):
+            with contextlib.suppress(Exception):
+                await self.repository.finalize_diarization(
+                    meeting_id, status="degraded", reason="diarization_not_available"
+                )
+            return
+
+        done = getattr(stream, "diarization_done", None)
+        if not isinstance(done, DiarizationDoneEvent):
+            with contextlib.suppress(Exception):
+                await self.repository.finalize_diarization(
+                    meeting_id,
+                    status="degraded",
+                    reason=degraded_reason or "finalization_timeout",
+                )
+            return
+        session_id = stream.session_id or ""
+        if done.session_id != session_id:
+            with contextlib.suppress(Exception):
+                await self.repository.finalize_diarization(
+                    meeting_id, status="degraded", reason="session_mismatch"
+                )
+            return
+
+        terminal_status = "degraded" if done.status == "degraded" or degraded_reason else "complete"
+        terminal_reason = (
+            done.reason
+            or degraded_reason
+            or ("degraded" if terminal_status == "degraded" else None)
+        )
         loop = asyncio.get_running_loop()
-        margin_secs = 1.0
-        while loop.time() < deadline - margin_secs:
+        while loop.time() < deadline:
             watermark = await self.repository.get_diarization_watermark(
                 meeting_id, session_id
             )
-            if watermark >= finalized.last_update_sequence:
+            if watermark >= done.last_update_sequence:
                 with contextlib.suppress(Exception):
                     await self.repository.finalize_diarization(
-                        meeting_id, status="complete", reason=None
+                        meeting_id,
+                        status=terminal_status,
+                        reason=terminal_reason,
                     )
                 return
             await asyncio.sleep(0.1)
@@ -604,8 +594,6 @@ class MeetingSession:
         meeting_id = self._active_meeting_id
         if meeting_id is None:
             return
-        if self.diarization_smoother is not None:
-            window = self.diarization_smoother.smooth_window(window)
         completed_items = tuple(
             item for item in window.completed if item.canonical_text.strip()
         )
@@ -787,23 +775,6 @@ class MeetingSession:
         if self._preparation is not preparation:
             raise RuntimeError("无效或已消费的 meeting preparation")
 
-    def _activate_overlay(self, meeting_id: UUID) -> None:
-        """在会议采集启动后激活分人 overlay 的 PCM 缓冲与音频监听。"""
-        overlay = self.diarization_overlay
-        if overlay is None or self._audio_listener is None:
-            return
-        overlay.start(group_id=meeting_diarization_group_id(f"meeting:{meeting_id}"))
-        with contextlib.suppress(Exception):
-            self.gateway.add_audio_listener(self._audio_listener)
-
-    def _deactivate_overlay(self) -> None:
-        overlay = self.diarization_overlay
-        if overlay is None or self._audio_listener is None:
-            return
-        with contextlib.suppress(Exception):
-            self.gateway.remove_audio_listener(self._audio_listener)
-        overlay.clear()
-
     async def _release_listener(self) -> None:
         listener = self._listener
         self._listener = None
@@ -812,7 +783,6 @@ class MeetingSession:
                 self.gateway.remove_event_listener(listener)
         with contextlib.suppress(Exception):
             self.gateway.remove_gap_listener(self._on_gap)
-        self._deactivate_overlay()
 
     async def _resume_summary_worker(self) -> None:
         with contextlib.suppress(Exception):

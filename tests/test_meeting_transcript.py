@@ -36,7 +36,6 @@ def test_speechrail_segments_use_epoch_and_sample_offset() -> None:
     segment = _segment(
         _decode_segments(),
         ASRSessionContext(source_epoch=2, offset_ms=30_000, purpose="meeting"),
-        require_speaker=False,
     )
 
     assert segment.start_ms == 31_000
@@ -53,13 +52,13 @@ def test_speechrail_segment_ids_change_when_text_changes() -> None:
     first = to_transcript_window(
         ASRWindow(
             source_epoch=1,
-            segments=(_segment(_decode_segments("第一版"), context, require_speaker=False),),
+            segments=(_segment(_decode_segments("第一版"), context),),
         )
     )
     revised = to_transcript_window(
         ASRWindow(
             source_epoch=1,
-            segments=(_segment(_decode_segments("修订版"), context, require_speaker=False),),
+            segments=(_segment(_decode_segments("修订版"), context),),
         )
     )
 

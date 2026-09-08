@@ -5,7 +5,7 @@ status: accepted
 type: decision_record
 category: architecture
 date: 2026-08-31
-last_updated: 2026-09-01
+last_updated: 2026-09-08
 author: "Voice Realtime Core Team"
 owners:
   - "sona-core"
@@ -53,12 +53,12 @@ SpeechRail 已提供本机 loopback 的 OpenAI-compatible REST 与 `/v1/realtime
 
 历史设计、评测和 ADR 仍保留为不可变证据；它们不描述当前部署方式。
 
-## 当前实现补充（2026-09-01）
+## 当前实现补充（2026-09-08）
 
-- `SpeechRailStreamingTranscriber` 已支持会议 diarization：请求 `diarization`、`speaker_count_hint`
-  与会议作用域 `group_id`，接收匿名 speaker segments 和 commit 后的 `transcription.diarization.completed` mapping。
-- `MeetingSession` 将 mapping 作为原子 remap 应用，并由 `DiarizationSmoother` 处理短片段/时序平滑；
-  本仓库不再运行本地 CAM++、AHC 或 voiceprint worker。
+- `SpeechRailStreamingTranscriber` 按已发布 SpeechRail v2.0.0 的 OpenAI Realtime contract 工作：先完成标准握手，
+  仅在显式设置开启时发送一次 `speechrail.diarization` opt-in，并消费 typed `updated/status/done` 事件。
+- `MeetingSession` 将更新转换为 speaker-only 原子事务；confirmed 正文不可变，人工更正优先，且不运行第二个分人生产者。
+  SpeechRail 负责 ASR、TTS 和 diarization profile，本仓库不运行本地 CAM++、AHC 或 voiceprint worker。
 - 语音助手使用 `SpeechRailConversationSTTProcessor`；字幕和会议使用 `SpeechRailStreamingTranscriber`。
 - SpeechRail `/v1/realtime` 会话不可透明恢复，应用重连时创建新 session/source epoch，并在窗口层记录 gap/对账边界。
 
@@ -66,6 +66,6 @@ SpeechRail 已提供本机 loopback 的 OpenAI-compatible REST 与 `/v1/realtime
 
 - ASR 进程与模型仅由 SpeechRail 管理；启动 `sona` 前必须确认 SpeechRail ready。
 - 应用无需安装、下载或启动 ASR 模型，减少重复占用内存与网络行为。
-- 当前 SpeechRail adapter 已支持会议所需的匿名多说话人标签与最终 mapping；身份仍是会议内匿名
-  group，不等同于跨会议真实声纹识别。
+- 当前 SpeechRail adapter 已支持会议所需的 session-scoped 匿名 speaker patch 与 `done` 终态；身份仍是会议内匿名
+  来源，不等同于跨会议真实声纹识别。
 - 这是破坏性配置变更：旧 ASR 环境变量与 `vr-subtitles` / `vr-asr-benchmark` 命令不再存在。

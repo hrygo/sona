@@ -12,7 +12,7 @@ import logging
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
-from typing import Any, cast
+from typing import Any, Literal, cast
 from uuid import UUID, uuid4
 
 from psycopg.rows import tuple_row
@@ -728,7 +728,10 @@ class PostgresMeetingRepository:
                         meeting_id=meeting_id,
                         transcript_revision=meeting.transcript_revision,
                         content_revision=meeting.content_revision,
-                        diarization_status=meeting.diarization_status.value,
+                        diarization_status=cast(
+                            Literal["off", "active", "complete", "degraded"],
+                            meeting.diarization_status.value,
+                        ),
                     )
 
                 source_cursor = await connection.execute(
@@ -765,7 +768,6 @@ class PostgresMeetingRepository:
                             meeting_id,
                             event.source_session_id,
                             patch.source_speaker,
-                            event.group_generation,
                         )
                         if patch.source_speaker is not None
                         else None
@@ -816,26 +818,24 @@ class PostgresMeetingRepository:
                     UPDATE {self._schema}.meeting_transcription_sources
                     SET stable_through_sample = GREATEST(stable_through_sample, %s),
                         last_update_sequence = GREATEST(last_update_sequence, %s),
-                        group_generation = coalesce(%s, group_generation),
                         updated_at = now()
                     WHERE meeting_id = %s AND session_id = %s
                     """,
                     (
                         event.stable_through_sample,
                         event.sequence,
-                        event.group_generation,
                         meeting_id,
                         event.source_session_id,
                     ),
                 )
 
                 current_status = meeting.diarization_status
-                if changed:
+                if changed or current_status in {DiarizationStatus.OFF, DiarizationStatus.LEGACY}:
                     transcript_revision = meeting.transcript_revision + 1
                     content_revision = meeting.content_revision + 1
                     next_status: DiarizationStatus = (
                         DiarizationStatus.ACTIVE
-                        if current_status is DiarizationStatus.LEGACY
+                        if current_status in {DiarizationStatus.OFF, DiarizationStatus.LEGACY}
                         else current_status
                     )
                     await connection.execute(
@@ -853,19 +853,20 @@ class PostgresMeetingRepository:
                             meeting_id,
                         ),
                     )
-                    await self._insert_event(
-                        connection,
-                        meeting_id,
-                        "speaker_patched",
-                        {
-                            "session_id": event.source_session_id,
-                            "event_id": event.event_id,
-                            "sequence": event.sequence,
-                            "changed_count": len(changed),
-                            "transcript_revision": transcript_revision,
-                            "content_revision": content_revision,
-                        },
-                    )
+                    if changed:
+                        await self._insert_event(
+                            connection,
+                            meeting_id,
+                            "speaker_patched",
+                            {
+                                "session_id": event.source_session_id,
+                                "event_id": event.event_id,
+                                "sequence": event.sequence,
+                                "changed_count": len(changed),
+                                "transcript_revision": transcript_revision,
+                                "content_revision": content_revision,
+                            },
+                        )
                 else:
                     transcript_revision = meeting.transcript_revision
                     content_revision = meeting.content_revision
@@ -888,7 +889,10 @@ class PostgresMeetingRepository:
                     changed_segment_ids=tuple(changed),
                     transcript_revision=transcript_revision,
                     content_revision=content_revision,
-                    diarization_status=next_status.value,
+                    diarization_status=cast(
+                        Literal["off", "active", "complete", "degraded"],
+                        next_status.value,
+                    ),
                     segments=suffix_segments,
                 )
 
@@ -968,20 +972,18 @@ class PostgresMeetingRepository:
         meeting_id: UUID,
         session_id: str,
         source_speaker: str,
-        group_generation: str | None,
     ) -> str:
         """解析/登记 (session, 匿名标签) → 会议内不透明应用身份。"""
         application_key = speaker_source_key(meeting_id, session_id, source_speaker)
         await connection.execute(
             f"""
             INSERT INTO {self._schema}.meeting_speaker_sources
-                (meeting_id, session_id, source_speaker, group_generation,
-                 application_speaker_key)
-            VALUES (%s, %s, %s, %s, %s)
+                (meeting_id, session_id, source_speaker, application_speaker_key)
+            VALUES (%s, %s, %s, %s)
             ON CONFLICT (meeting_id, session_id, source_speaker) DO UPDATE SET
                 updated_at = now()
             """,
-            (meeting_id, session_id, source_speaker, group_generation, application_key),
+            (meeting_id, session_id, source_speaker, application_key),
         )
 
         epoch_cursor = await connection.execute(
@@ -1153,7 +1155,7 @@ class PostgresMeetingRepository:
                 await self._insert_event(
                     connection,
                     meeting_id,
-                    "diarization_finalized",
+                    "diarization_terminal",
                     {"status": status, "reason": reason},
                 )
                 return _meeting_from_row(row)

@@ -100,6 +100,29 @@ class ShortLivedTranscriber(FakeTranscriber):
         self._end_stream = True
 
 
+class GracefulDiarizationTranscriber(FakeTranscriber):
+    """普通字幕 opt-in EOF drain 的最小可观测 fake。"""
+
+    diarization_requested = True
+    diarization_enabled = True
+    diarization_status = "active"
+    diarization_degraded_reason = None
+    diarization_unavailable_reason = None
+
+    def __init__(self, *, source_epoch: int) -> None:
+        super().__init__(source_epoch=source_epoch)
+        self.order: list[str] = []
+        self._finish_result = ASRWindow(source_epoch=source_epoch)
+
+    async def send_audio(self, chunk: bytes) -> None:
+        await super().send_audio(chunk)
+        self.order.append("send")
+
+    async def finish(self) -> ASRWindow:
+        self.order.append("finish")
+        return await super().finish()
+
+
 def _flapping_proxy(
     tmp_path: Path,
     *,
@@ -488,6 +511,26 @@ async def test_standard_subtitle_reconnect_preserves_confirmed_history(
     await proxy.stop()
 
 
+async def test_opt_in_subtitle_close_drains_pcm_before_finish(tmp_path: Path) -> None:
+    """停止时必须先排空已入队 PCM，再发送且只发送一次 EOF finish。"""
+    transcriber = GracefulDiarizationTranscriber(source_epoch=1)
+    proxy = SubtitleProxy(
+        _settings(tmp_path),
+        transcriber_factory=lambda _ctx: transcriber,
+    )
+    await proxy.start()
+    preparation = await proxy.prepare_browser_capture(timeout_secs=1.0)
+    proxy.commit_browser_capture(preparation)
+
+    pcm = b"\x00\x00" * 1600
+    await proxy.push_audio(pcm)
+    await proxy.stop()
+
+    assert transcriber.order == ["send", "finish"]
+    assert transcriber.sent_audio == [pcm]
+    assert transcriber.commits == 1
+
+
 async def test_standard_subtitle_reconnect_context_keeps_absolute_audio_time(
     tmp_path: Path,
 ) -> None:
@@ -614,7 +657,10 @@ async def test_standard_subtitle_history_resets_on_clear_and_new_epoch(
         )
     )
     await proxy.clear_subtitles()
-    assert proxy._last_payload == {"lines": [], "buffer_transcription": ""}
+    assert proxy._last_payload is not None
+    assert proxy._last_payload["lines"] == []
+    assert proxy._last_payload["buffer_transcription"] == ""
+    assert proxy._last_payload["diarization"] == {"status": "off", "reason": None}
 
     await proxy._subtitle_session._handle_stream_event(
         ASREvent(
@@ -1127,18 +1173,14 @@ async def test_standard_subtitle_session_drops_standalone_filler_and_preserves_r
 def test_build_server_vad_config_defaults_to_calibrated_threshold() -> None:
     from sona.speechrail.transport import (
         DEFAULT_SERVER_VAD,
-        DEFAULT_SERVER_VAD_EXTENSIONS,
         DEFAULT_SERVER_VAD_THRESHOLD,
         MEETING_SERVER_VAD,
-        MEETING_SERVER_VAD_EXTENSIONS,
         build_server_vad_config,
     )
 
     assert DEFAULT_SERVER_VAD_THRESHOLD == 0.65
     assert DEFAULT_SERVER_VAD["threshold"] == 0.65
-    assert DEFAULT_SERVER_VAD_EXTENSIONS["threshold"] == 0.65
     assert MEETING_SERVER_VAD["threshold"] == 0.65
-    assert MEETING_SERVER_VAD_EXTENSIONS["threshold"] == 0.65
 
     custom = build_server_vad_config(threshold=0.75, silence_duration_ms=800)
     assert custom["threshold"] == 0.75

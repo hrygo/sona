@@ -1,0 +1,16 @@
+{
+  "type": "session.updated",
+  "event_id": "evt_example_su",
+  "session_id": "sess_example",
+  "sequence": 3,
+  "session": {
+    "id": "sess_example",
+    "speechrail": {
+      "diarization": {
+        "enabled": true,
+        "version": 1,
+        "max_speakers": 4
+      }
+    }
+  }
+}

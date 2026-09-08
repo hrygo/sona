@@ -27,7 +27,7 @@ related_documents:
 # Qwen3-ASR 实时语音转文字开发对接手册
 
 > ⚠️ 本文已归档，不是当前接口基线。旧的 `172.18.24.62:8001/asr`、二进制 WebSocket、空字节 EOF
-> 和 `lines` 快照协议均已废弃。请阅读当前的 [SpeechRail OpenAI Realtime 功能需求交割单](../operations/SpeechRail-OpenAI标准协议功能需求交割单.md)。
+> 和 `lines` 快照协议均已废弃。请阅读当前的 [SpeechRail v2 Realtime 分人手册](SpeechRail-流式说话人分离对接手册.md)。
 
 > 本手册用于指导外部客户端接入 **Qwen3-ASR 1.7B 语音识别服务**，实现**实时流式音频识别（低延迟字字上屏）**与**录音文件转文字**。
 

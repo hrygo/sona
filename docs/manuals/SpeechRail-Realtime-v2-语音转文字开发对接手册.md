@@ -6,7 +6,7 @@ type: manual
 category: asr
 version: "v2.0.0"
 date: 2026-09-01
-last_updated: 2026-09-02
+last_updated: 2026-09-08
 author: "Voice Realtime Core Team"
 owners:
   - "sona-subtitles"
@@ -23,16 +23,20 @@ scope:
 related_documents:
   - "docs/architecture/系统总体架构与详细设计方案.md"
   - "docs/architecture/实时语音交互与字幕-方案与最佳实践.md"
-  - "SpeechRail repository: contracts/realtime-v2.md (external sibling project)"
+  - "SpeechRail repository: contracts/realtime-openai.md (external sibling project)"
 ---
 
 # SpeechRail Realtime v2 语音转文字开发对接手册
 
-> ⚠️ **本文档已归档（`archived`）**：sona 已迁移到 SpeechRail OpenAI 兼容 `WS /v1/realtime`，
-> 流式 ASR、实时说话人分离（`conversation.item.input_audio_transcription.segment.speaker`）、流式 TTS
-> 与取消/EOF 全部由 OpenAI 标准事件承载。**当前对接基线见**
-> [`SpeechRail-OpenAI标准协议功能需求交割单`](../operations/SpeechRail-OpenAI标准协议功能需求交割单.md)
-> 与 SpeechRail 最终实现的 `/v1/realtime` 契约；本 v2 手册仅供参考，不再作为实现依据。
+> **历史归档（不作为当前实现依据）：** 本文记录发布前的旧对接草案。当前 Sona 以已发布的
+> [SpeechRail v2.0.0](https://github.com/hrygo/SpeechRail/releases/tag/v2.0.0) 和
+> [`SpeechRail-流式说话人分离对接手册.md`](SpeechRail-流式说话人分离对接手册.md)为准；当前协议为
+> OpenAI `/v1/realtime` 标准握手加显式 `speechrail.diarization.*` 扩展。
+
+> ⚠️ **本文档已归档（`archived`）**：本文只保留历史文件名和服务基础信息。Sona 当前以 SpeechRail OpenAI 兼容
+> `WS /v1/realtime` 为准；流式 ASR、可选实时说话人分离与 EOF 采用当前标准事件。**当前对接基线见**
+> [`SpeechRail-流式说话人分离对接手册`](SpeechRail-流式说话人分离对接手册.md)
+> 与 [SpeechRail v2 联合验收报告](../operations/speechrail-openai-diarization-integration-acceptance.md)；本 v2 手册仅供参考，不再作为实现依据。
 >
 > 原 `Qwen3-ASR-实时语音转文字开发对接手册.md` 文件名保留为兼容入口，但其中的旧直连地址和
 > 二进制 WebSocket 协议已废弃。
@@ -51,43 +55,34 @@ related_documents:
 SpeechRail 当前契约仍需通过实际部署完成后端 worker smoke/e2e 验收；服务返回
 `backend_not_ready` 时，客户端应报告依赖未就绪，不得静默切换到本地模型。
 
-## 2. Realtime v2 公共协议
+## 2. 当前标准协议索引
 
-连接后，客户端必须首先发送一次 `session.update`，选择 `transcription` 会话。服务端先返回
-`session.created`，之后才能发送音频。每个服务端事件都带有 `type`、`event_id`、`session_id`、
-`request_id` 和单调递增的 `sequence`；客户端应校验同一 session 的顺序与身份。
-
-### 2.1 创建转写会话
+连接后，客户端先接收 `session.created`，完成不含 `speechrail` 的标准 ASR `session.update` 与
+`session.updated`。仅在业务开关显式开启时，首个 PCM 前再发送一次命名空间 opt-in：
 
 ```json
 {
   "type": "session.update",
   "session": {
-    "type": "transcription",
-    "model": "speechrail/qwen3-asr-1.7b",
-    "language": "zh",
-    "audio_format": {
-      "type": "audio/pcm",
-      "rate": 16000,
-      "channels": 1,
-      "sample_width": 2
-    },
-    "endpointing": {"mode": "manual"},
-    "diarization": {
-      "enabled": true,
-      "finalize": true,
-      "speaker_count_hint": 4,
-      "group_id": "application-owned-opaque-group-id"
-    }
+    "input_audio_transcription": {"model": "speechrail/qwen3-asr-1.7b", "language": "zh"},
+    "turn_detection": {"type": "server_vad"}
   }
 }
 ```
 
-`diarization` 为会议等多说话人场景的可选配置。`group_id` 必须是客户端生成的 16–128 字符不透明
-标识；它不是会议 ID、账号或真实身份。未配置相应 SpeechRail profile 时，服务应返回
-`diarization_not_available`，不得伪造 speaker label。
+启用分人时追加的唯一请求为：
 
-### 2.2 追加 PCM 与读取事件
+```json
+{
+  "type": "session.update",
+  "session": {"speechrail": {"diarization": {"enabled": true}}}
+}
+```
+
+服务必须回显 `{"enabled": true, "version": 1, "max_speakers": 4}`。opt-in 只能发送一次；拒绝、未回显或
+profile/runtime 不可用时必须公开 `degraded`，不得试探旧协议或启动第二个分人器。
+
+### 2.1 追加 PCM 与读取事件
 
 实时音频不是 WebSocket 二进制帧，而是 JSON 中的 Base64 字段：
 
@@ -102,25 +97,26 @@ SpeechRail 当前契约仍需通过实际部署完成后端 worker smoke/e2e 验
 
 | 事件 | 客户端处理 |
 |---|---|
-| `transcription.delta` | 同一 `item_id` 的可替换快照；只展示最新 `revision`，不持久化为确认文本 |
-| `transcription.completed` | 不可变的已确认片段；包含 `start_ms`、`end_ms`、`text`，启用分人时含 `speaker`/`speakers` |
-| `transcription.diarization.completed` | commit 后的一次匿名 label mapping；必须原子应用，不得当作真实身份 |
-| `input_audio_buffer.ack` | 可选背压诊断；`accepted_bytes` 不用于断线续传 |
+| `conversation.item.input_audio_transcription.completed` | 不可变的 confirmed item；启用分人时包含完整 `attribution_units` |
+| `speechrail.diarization.updated` | 对已完成 `segment_uid` 的 speaker-only patch；revision 必须连续 |
+| `speechrail.diarization.status` | 报告 `active`/`degraded` 及原因 |
+| `speechrail.diarization.done` | EOF 终态；包含 `finalization_id`、水位和 `last_update_sequence` |
 | `error` | 根据 `error.code` 与 `retryable` 决定报告或重试 |
 
 所有时间戳相对当前 SpeechRail session 首个已接受 PCM 字节。应用如果有自己的 source epoch 或
 窗口偏移，必须在 adapter 层转换；不能把不同 WebSocket 连接的 timestamp 直接混用。
 
-### 2.3 flush、commit、cancel
+### 2.2 flush、commit、cancel
 
-- `input_audio_buffer.flush`：强制确认当前非空 item，session 仍可继续追加。
-- `input_audio_buffer.commit`：停止接收新音频，冲刷剩余结果，正常终态为 `session.completed`。
+- `input_audio_buffer.commit`：提交最后 PCM 并冲刷标准 ASR 结果；启用分人时随后发送一次
+  `speechrail.diarization.finish`，继续消费 `updated/status/done`。
 - `session.cancel`：丢弃未确认输入和 partial，终态为 `session.cancelled`。
 - 断线不保证 terminal event。Realtime v2 不提供透明恢复；必须新建连接/session，并由应用记录
-  source epoch 与可能的 transcription gap。
+  source epoch 与可能的 gap。
 
-会议结束必须等待 `transcription.diarization.completed`（如启用分人）及 `session.completed`，再封存
-confirmed 转录和 speaker remap；超时应标记 `finalization_timeout`，不能假设空 PCM 二进制包等同 EOF。
+会议结束必须等待 `speechrail.diarization.done`（如启用分人）及其持久化水位，再封存 confirmed 转录和
+speaker patch；超时应标记 `finalization_timeout`。若 server-side VAD preflight 缺少 `onnxruntime`，
+服务会返回 `backend_not_ready`，这是 SpeechRail 部署问题，不在 Sona 侧回退。
 
 ## 3. Python 对接骨架
 
@@ -136,27 +132,42 @@ import websockets
 WS_URL = "ws://127.0.0.1:8201/v1/realtime"
 
 
-async def transcribe(pcm_chunks: list[bytes], api_key: str | None = None) -> None:
+async def transcribe(
+    pcm_chunks: list[bytes],
+    api_key: str | None = None,
+    diarization_enabled: bool = False,
+) -> None:
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
     async with websockets.connect(WS_URL, additional_headers=headers) as ws:
-        await ws.send(json.dumps({
-            "type": "session.update",
-            "session": {
-                "type": "transcription",
-                "model": "speechrail/qwen3-asr-1.7b",
-                "language": "zh",
-                "audio_format": {
-                    "type": "audio/pcm",
-                    "rate": 16000,
-                    "channels": 1,
-                    "sample_width": 2,
-                },
-                "endpointing": {"mode": "manual"},
-            },
-        }))
         created = json.loads(await ws.recv())
         if created["type"] != "session.created":
             raise RuntimeError(created)
+
+        await ws.send(json.dumps({
+            "type": "session.update",
+            "session": {
+                "input_audio_transcription": {
+                    "model": "speechrail/qwen3-asr-1.7b",
+                    "language": "zh",
+                },
+                "turn_detection": {"type": "manual"},
+            },
+        }))
+        updated = json.loads(await ws.recv())
+        if updated["type"] != "session.updated":
+            raise RuntimeError(updated)
+        if diarization_enabled:
+            await ws.send(json.dumps({
+                "type": "session.update",
+                "session": {"speechrail": {"diarization": {"enabled": True}}},
+            }))
+            diarization_echo = json.loads(await ws.recv())
+            if diarization_echo.get("session", {}).get("speechrail", {}).get("diarization") != {
+                "enabled": True,
+                "version": 1,
+                "max_speakers": 4,
+            }:
+                raise RuntimeError(diarization_echo)
 
         for chunk in pcm_chunks:
             if not chunk or len(chunk) % 2:
@@ -167,13 +178,22 @@ async def transcribe(pcm_chunks: list[bytes], api_key: str | None = None) -> Non
             }))
 
         await ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
+        if diarization_enabled:
+            await ws.send(json.dumps({
+                "type": "speechrail.diarization.finish",
+                "event_id": "client-finalize-1",
+            }))
+        else:
+            await ws.send(json.dumps({"type": "input_audio_buffer.clear"}))
         async for raw in ws:
             event = json.loads(raw)
-            if event["type"] == "transcription.completed":
-                print(event["segments"])
+            if event["type"] == "conversation.item.input_audio_transcription.completed":
+                pass  # persist canonical item; do not print or log transcript data
             elif event["type"] == "error":
                 raise RuntimeError(event["error"])
-            elif event["type"] == "session.completed":
+            elif event["type"] == "speechrail.diarization.done":
+                break
+            elif not diarization_enabled and event["type"] == "input_audio_buffer.cleared":
                 break
 
 
@@ -181,7 +201,7 @@ if __name__ == "__main__":
     asyncio.run(transcribe([]))
 ```
 
-`sona` 内部使用 `SpeechRailV2Transport` 统一校验 envelope、session、request 和 sequence；
+`sona` 内部使用 `SpeechRailRealtimeClient` 与 `SpeechRailStreamingTranscriber` 统一校验 envelope、session、request 和 sequence；
 优先复用对应 adapter，而不是在业务模块中重复实现协议解析。
 
 ## 4. REST 文件转写（非实时）
@@ -203,5 +223,5 @@ curl --fail --silent http://127.0.0.1:8201/v1/audio/transcriptions \
 1. `backend_not_ready`：检查 SpeechRail worker、model snapshot 和 profile 就绪状态；不要联网隐式下载。
 2. `invalid_event_order` / `sequence` 错误：确认首个客户端事件是 `session.update`，并且只消费当前 session 的递增事件。
 3. 没有文字：确认是 JSON + Base64 PCM、16kHz mono int16，且在结束时发送 `commit`。
-4. 没有 speaker：确认请求了 diarization、`group_id` 合法且 SpeechRail 已配置对应 profile。
+4. 没有 speaker：确认已收到精确 opt-in echo，并检查 SpeechRail profile readiness 和 `degraded` 原因。
 5. 断线丢字：这是不可恢复 session；为新连接创建新 source epoch，并在应用层记录 gap/对账边界。

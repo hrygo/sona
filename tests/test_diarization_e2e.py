@@ -6,7 +6,7 @@
 3. 人工改名与手动更正优先（自动 patch 不覆盖人工 override）；
 4. 数据库写入暂时失败触发 recovery journal 记录，回放后成功落库，校验事实一致性与权限；
 5. Finalize 屏障、watermark 等待与重试幂等性；
-6. 新旧 Rail × 新旧 Sona 四组合协议兼容矩阵。
+6. SpeechRail v2.0.0 namespaced opt-in、正常 ASR 控制路径与不可用降级。
 """
 
 from __future__ import annotations
@@ -673,7 +673,7 @@ async def test_diarization_e2e_finalize_barrier_and_idempotency(
     meeting_id = meeting.id
 
     gate_state = DiarizationGateState()
-    gate_state.extensions_active = True
+    gate_state.active = True
     gate = RepositoryDiarizationGate(e2e_repo, gate_state, poll_interval_secs=0.01)
 
     # 1. 达到 complete 时 wait_persisted 返回 complete
@@ -703,7 +703,7 @@ async def test_diarization_e2e_finalize_timeout_degrades_gracefully(
 
     # 模拟分人 watermark 滞后，超时触发
     gate_state = DiarizationGateState()
-    gate_state.extensions_active = True
+    gate_state.active = True
     gate = RepositoryDiarizationGate(e2e_repo, gate_state, poll_interval_secs=0.01)
 
     # timeout_secs=0.01 立即触发超时降级
@@ -718,7 +718,7 @@ async def test_diarization_e2e_finalize_timeout_degrades_gracefully(
 
 
 # ---------------------------------------------------------------------------
-# 6. 新旧 Rail × 新旧 Sona 四组合协议兼容矩阵
+# 6. SpeechRail v2.0.0 bootstrap / control paths
 # ---------------------------------------------------------------------------
 
 
@@ -744,99 +744,123 @@ async def _conn_factory(conn: _FakeWSConnection) -> _FakeWSConnection:
 
 
 @pytest.mark.asyncio
-async def test_diarization_e2e_four_combinations_matrix() -> None:
-    """验证新旧 Rail 与新旧 Sona 的协商兼容性矩阵。"""
-    from sona.speechrail.transport import (
-        DIARIZATION_EXTENSION_CAPABILITY,
-        SpeechRailRealtimeClient,
-    )
+async def test_v2_disabled_bootstrap_sends_only_standard_asr_configuration() -> None:
+    from sona.speechrail.transport import SpeechRailRealtimeClient
 
-    # 1. New Rail + New Sona -> 协商成功，握手 diarization_contract
-    conn1 = _FakeWSConnection([
-        {
-            "type": "session.created",
-            "session_id": "sess_combo_1",
-            "sequence": 1,
-            "session": {"capabilities": [DIARIZATION_EXTENSION_CAPABILITY]},
-        },
-        {
-            "type": "session.updated",
-            "session_id": "sess_combo_1",
-            "sequence": 2,
-            "session": {
-                "diarization_contract": {
-                    "version": 1,
-                    "timebase": "session_samples",
-                    "sample_rate": 16000,
-                    "max_speakers": 4,
-                    "max_item_duration_ms": 30000,
-                    "max_revision_delay_ms": 10000,
-                }
+    connection = _FakeWSConnection(
+        [
+            {
+                "type": "session.created",
+                "session_id": "sess-control-off",
+                "sequence": 1,
+                "session": {"id": "sess-control-off"},
             },
-        },
-    ])
-    client1 = SpeechRailRealtimeClient(
+            {
+                "type": "session.updated",
+                "session_id": "sess-control-off",
+                "sequence": 2,
+                "session": {"id": "sess-control-off"},
+            },
+        ]
+    )
+    client = SpeechRailRealtimeClient(
         url="ws://fake/v1/realtime",
-        connection_factory=lambda _: _conn_factory(conn1),
+        connection_factory=lambda _: _conn_factory(connection),
     )
-    await client1.connect(
-        language="zh",
-        diarization_extensions=True,
-        speaker_count_hint=3,
-    )
-    assert client1.diarization_contract is not None
-    assert client1.diarization_contract["version"] == 1
-    sent_update1 = conn1.sent[0]["session"]["input_audio_transcription"]["diarization"]
-    assert sent_update1["extensions"] == [DIARIZATION_EXTENSION_CAPABILITY]
 
-    # 2. New Rail + Legacy Sona -> Sona 扩展关闭，走 legacy session.update
-    conn2 = _FakeWSConnection([])
-    client2 = SpeechRailRealtimeClient(
-        url="ws://fake/v1/realtime",
-        connection_factory=lambda _: _conn_factory(conn2),
-    )
-    await client2.connect(
-        language="zh",
-        diarization=True,
-        diarization_extensions=False,
-    )
-    assert client2.diarization_contract is None
-    sent_update2 = conn2.sent[0]["session"]["input_audio_transcription"]["diarization"]
-    assert "extensions" not in sent_update2
+    await client.connect(language="zh", diarization_enabled=False)
 
-    # 3. Legacy Rail + New Sona -> Rail 缺 capabilities，Sona 安全回退 legacy
-    conn3 = _FakeWSConnection([
-        {
-            "type": "session.created",
-            "session_id": "sess_combo_3",
-            "sequence": 1,
-            "session": {"capabilities": []},
-        },
-    ])
-    client3 = SpeechRailRealtimeClient(
-        url="ws://fake/v1/realtime",
-        connection_factory=lambda _: _conn_factory(conn3),
-    )
-    await client3.connect(
-        language="zh",
-        diarization=True,
-        diarization_extensions=True,
-    )
-    assert client3.diarization_contract is None
-    sent_update3 = conn3.sent[0]["session"]["input_audio_transcription"]["diarization"]
-    assert "extensions" not in sent_update3
+    assert len(connection.sent) == 1
+    assert connection.sent[0]["session"].get("speechrail") is None
+    assert client.diarization_enabled is False
 
-    # 4. Legacy Rail + Legacy Sona -> 双端纯旧协议
-    conn4 = _FakeWSConnection([])
-    client4 = SpeechRailRealtimeClient(
+
+@pytest.mark.asyncio
+async def test_v2_enabled_bootstrap_sends_one_exact_namespaced_opt_in() -> None:
+    from sona.speechrail.transport import SpeechRailRealtimeClient
+
+    connection = _FakeWSConnection(
+        [
+            {
+                "type": "session.created",
+                "session_id": "sess-control-on",
+                "sequence": 1,
+                "session": {"id": "sess-control-on"},
+            },
+            {
+                "type": "session.updated",
+                "session_id": "sess-control-on",
+                "sequence": 2,
+                "session": {"id": "sess-control-on"},
+            },
+            {
+                "type": "session.updated",
+                "session_id": "sess-control-on",
+                "sequence": 3,
+                "session": {
+                    "id": "sess-control-on",
+                    "speechrail": {
+                        "diarization": {
+                            "enabled": True,
+                            "version": 1,
+                            "max_speakers": 4,
+                        }
+                    },
+                },
+            },
+        ]
+    )
+    client = SpeechRailRealtimeClient(
         url="ws://fake/v1/realtime",
-        connection_factory=lambda _: _conn_factory(conn4),
+        connection_factory=lambda _: _conn_factory(connection),
     )
-    await client4.connect(
-        language="zh",
-        diarization=True,
-        diarization_extensions=False,
+
+    await client.connect(language="zh", diarization_enabled=True)
+
+    assert connection.sent[1] == {
+        "type": "session.update",
+        "session": {"speechrail": {"diarization": {"enabled": True}}},
+    }
+    assert client.diarization_enabled is True
+
+
+@pytest.mark.asyncio
+async def test_v2_unavailable_opt_in_keeps_standard_asr_available() -> None:
+    from sona.speechrail.transport import SpeechRailRealtimeClient
+
+    connection = _FakeWSConnection(
+        [
+            {
+                "type": "session.created",
+                "session_id": "sess-control-degraded",
+                "sequence": 1,
+                "session": {"id": "sess-control-degraded"},
+            },
+            {
+                "type": "session.updated",
+                "session_id": "sess-control-degraded",
+                "sequence": 2,
+                "session": {"id": "sess-control-degraded"},
+            },
+            {
+                "type": "error",
+                "session_id": "sess-control-degraded",
+                "sequence": 3,
+                "event_id": "evt-control-degraded",
+                "error": {
+                    "code": "diarization_not_available",
+                    "message": "diarization_not_available",
+                },
+            },
+        ]
     )
-    assert client4.diarization_contract is None
-    sent_update4 = conn4.sent[0]["session"]["input_audio_transcription"]["diarization"]
-    assert "extensions" not in sent_update4
+    client = SpeechRailRealtimeClient(
+        url="ws://fake/v1/realtime",
+        connection_factory=lambda _: _conn_factory(connection),
+    )
+
+    await client.connect(language="zh", diarization_enabled=True)
+
+    assert client.diarization_enabled is False
+    assert client.diarization_unavailable_reason == "diarization_not_available"
+    assert len(connection.sent) == 2

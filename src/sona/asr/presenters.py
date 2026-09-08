@@ -4,15 +4,25 @@ from __future__ import annotations
 
 from typing import Any
 
-from sona.asr.models import ASRWindow
+from sona.asr.models import ASRSegment, ASRWindow
+
+UNKNOWN_SUBTITLE_SPEAKER = "未识别说话人"
 
 
-def _raw_speaker(speaker_key: str) -> int | str:
-    raw = speaker_key.rpartition(":")[2]
-    try:
-        return int(raw)
-    except ValueError:
-        return raw
+def _subtitle_speaker(segment: ASRSegment) -> str:
+    """把不透明 ASR speaker key 映射为 session/epoch 作用域的展示字符串。"""
+
+    key = segment.speaker_key.strip()
+    if key == "unknown":
+        return UNKNOWN_SUBTITLE_SPEAKER
+    if key.startswith("session:"):
+        _, epoch, label = key.split(":", 2)
+        return f"会话 {epoch} · {label}"
+    if key.startswith("epoch:"):
+        parts = key.split(":")
+        if len(parts) >= 4:
+            return f"会话 {parts[1]} · {parts[-1]}"
+    return f"说话人 {key}"
 
 
 def _legacy_timestamp(timestamp_ms: int) -> str:
@@ -34,7 +44,7 @@ def legacy_subtitle_payload(window: ASRWindow) -> dict[str, Any]:
         "buffer_transcription": window.partial,
         "lines": [
             {
-                "speaker": _raw_speaker(segment.speaker_key),
+                "speaker": _subtitle_speaker(segment),
                 "text": segment.text,
                 "start": _legacy_timestamp(segment.start_ms),
                 "end": _legacy_timestamp(segment.end_ms),
@@ -43,4 +53,11 @@ def legacy_subtitle_payload(window: ASRWindow) -> dict[str, Any]:
             }
             for segment in window.segments
         ],
+        "diarization": {
+            "status": window.diarization_status,
+            "reason": window.diarization_reason,
+        },
     }
+
+
+__all__ = ["UNKNOWN_SUBTITLE_SPEAKER", "legacy_ready_payload", "legacy_subtitle_payload"]

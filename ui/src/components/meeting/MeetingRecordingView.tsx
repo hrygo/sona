@@ -94,9 +94,8 @@ export function MeetingRecordingView({
   const toggleInnerOS = useInnerOSStore((s) => s.togglePanel);
   const queryStatus = useInnerOSStore((s) => s.queryStatus);
   const isGenerating = queryStatus === "generating" || queryStatus === "accepted";
-  // 服务端能力位：InnerOS 未启用时隐藏入口并拦截快捷键，分人修正开启时提示会后归属
+  // 服务端能力位：InnerOS 未启用时隐藏入口并拦截快捷键
   const innerOSEnabled = useUISettingsStore((s) => s.innerOSEnabled);
-  const diarizationOverlayEnabled = useUISettingsStore((s) => s.diarizationOverlayEnabled);
 
   // Timer
   useEffect(() => {
@@ -321,14 +320,14 @@ export function MeetingRecordingView({
             <span className="recording-metric-label">识别分组</span>
           </div>
           {isCalibrating && <span className="recording-compact-state is-calibrating">校准中</span>}
-          {(diarizationOverlayEnabled || speakerGroupCounts.unrecognized > 0) && (
+          {speakerGroupCounts.unrecognized > 0 && (
             <span
               className="recording-compact-state is-diarization-hint"
               title={speakerGroupCounts.unrecognized > 0
                 ? "存在未识别说话人分组；当前计数只统计已识别分组，可能合并或拆分，不等于真实参会人数"
                 : "流式转写的说话人分组可能待校准；当前计数只统计已识别分组，不等于真实参会人数"}
             >
-              {speakerGroupCounts.unrecognized > 0 ? "含未识别分组，待识别" : "说话人分组待校准"}
+              含未识别分组，待识别
             </span>
           )}
           {starredIds.size > 0 && (

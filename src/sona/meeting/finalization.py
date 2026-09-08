@@ -8,21 +8,15 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import logging
 from dataclasses import dataclass
 from typing import Protocol
 from uuid import UUID
 
-from .diarization_overlay import (
-    MeetingDiarizationOverlay,
-    assign_speakers_by_overlap,
-)
 from .models import (
     DiarizationStatus,
     MeetingRecord,
     MeetingStatus,
     MinutesRecord,
-    NormalizedSegment,
     TranscriptWindow,
 )
 from .persistence import TranscriptPersistence
@@ -35,31 +29,12 @@ from .ports import (
     TranscriptStore,
 )
 
-logger = logging.getLogger(__name__)
-
-
-def _with_speaker(segment: NormalizedSegment, speaker_key: str) -> NormalizedSegment:
-    """返回一个替换 speaker_key 后的 segmement 拷贝（保持其余字段不变）。"""
-    if speaker_key == segment.speaker_key:
-        return segment
-    return NormalizedSegment(
-        id=segment.id,
-        order=segment.order,
-        source_epoch=segment.source_epoch,
-        speaker_key=speaker_key,
-        start_ms=segment.start_ms,
-        end_ms=segment.end_ms,
-        text=segment.text,
-        translation=segment.translation,
-        detected_language=segment.detected_language,
-    )
-
 
 class DiarizationFinalizationGate(Protocol):
     """分人终态持久化门：封存与纪要创建前必须通过。"""
 
     async def wait_persisted(self, meeting_id: UUID, *, timeout_secs: float) -> str:
-        """返回 legacy | complete | degraded | timeout。"""
+        """返回 off | complete | degraded | timeout。"""
         ...
 
 
@@ -67,10 +42,10 @@ class DiarizationGateState:
     """每个会议的分人扩展活动标志（barrier 运行时置位）。"""
 
     def __init__(self) -> None:
-        self.extensions_active = False
+        self.active = False
 
     def reset(self) -> None:
-        self.extensions_active = False
+        self.active = False
 
 
 class RepositoryDiarizationGate:
@@ -88,9 +63,8 @@ class RepositoryDiarizationGate:
         self._poll_interval_secs = poll_interval_secs
 
     async def wait_persisted(self, meeting_id: UUID, *, timeout_secs: float) -> str:
-        if not self._state.extensions_active:
-            # 本会议未使用扩展流：legacy 模式沿用 clear barrier。
-            return "legacy"
+        if not self._state.active:
+            return "off"
         loop = asyncio.get_running_loop()
         deadline = loop.time() + max(0.0, timeout_secs)
         while True:
@@ -133,7 +107,6 @@ class MeetingFinalizer:
         transcripts: TranscriptStore,
         minutes_store: MinutesStore,
         timeout_secs: float,
-        diarization_overlay: MeetingDiarizationOverlay | None = None,
         diarization_gate: DiarizationFinalizationGate | None = None,
     ) -> None:
         self._gateway = gateway
@@ -142,7 +115,6 @@ class MeetingFinalizer:
         self._transcripts = transcripts
         self._minutes_store = minutes_store
         self._timeout_secs = timeout_secs
-        self._diarization_overlay = diarization_overlay
         self._diarization_gate = diarization_gate
         self._capture_closed = False
         self._finalized_record: MeetingRecord | None = None
@@ -171,13 +143,11 @@ class MeetingFinalizer:
             self._capture_closed = True
             if final_window is not None:
                 await self._persistence.reconcile(meeting_id, final_window)
-            await self._apply_diarization_overlay(meeting_id)
             if final_window is not None and final_window.speaker_remap:
                 await self._speakers.apply_speaker_remapping(
                     meeting_id, dict(final_window.speaker_remap)
                 )
             if not timed_out and self._diarization_gate is not None:
-                # 扩展模式：分人终态持久化之前，会议不能 completed、纪要不能排队。
                 await self._diarization_gate.wait_persisted(
                     meeting_id, timeout_secs=self._timeout_secs
                 )
@@ -209,55 +179,6 @@ class MeetingFinalizer:
     async def _abort_capture(self) -> None:
         with contextlib.suppress(Exception):
             await self._gateway.abort_capture()
-
-    async def _apply_diarization_overlay(self, meeting_id: UUID) -> None:
-        # legacy 诊断：流式 confirmed 段说话人恒为 speaker:0；此处经非流式 diarize
-        # 按时间重叠修正其 speaker_key。只修改被缓冲音频完整覆盖的 segment；
-        # 分人是增强项，任何失败都不得中断会议封存。
-        overlay = self._diarization_overlay
-        if overlay is None:
-            return
-        try:
-            result = await overlay.finish()
-        except Exception:
-            logger.warning("MeetingFinalizer: diarization overlay 失败，跳过分人", exc_info=True)
-            return
-        if not result.spans:
-            return
-        covered_start = result.covered_start_ms
-        covered_end = result.covered_end_ms
-        try:
-            document = await self._transcripts.get_transcript(meeting_id)
-        except Exception:
-            logger.warning("MeetingFinalizer: 读取全量转录失败，跳过分人", exc_info=True)
-            return
-        segments = document.segments
-        if not segments or covered_start is None or covered_end is None:
-            return
-        covered = [
-            segment
-            for segment in segments
-            if segment.start_ms >= covered_start and segment.end_ms <= covered_end
-        ]
-        if not covered:
-            return
-        mapping = assign_speakers_by_overlap(covered, result.spans)
-        if not mapping:
-            return
-        corrected = tuple(
-            _with_speaker(segment, mapping.get(str(segment.id), segment.speaker_key))
-            for segment in segments
-        )
-        if corrected == segments:
-            return
-        corrected_window = TranscriptWindow(
-            source_epoch=max((segment.source_epoch for segment in segments), default=0),
-            segments=corrected,
-        )
-        try:
-            await self._persistence.reconcile(meeting_id, corrected_window)
-        except Exception:
-            logger.warning("MeetingFinalizer: 说话人修正写入失败，保留流式结果", exc_info=True)
 
 
 __all__ = ["MeetingFinalizationResult", "MeetingFinalizer"]

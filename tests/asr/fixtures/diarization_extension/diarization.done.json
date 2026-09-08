@@ -1,5 +1,5 @@
 {
-  "type": "speechrail.diarization.finalized",
+  "type": "speechrail.diarization.done",
   "event_id": "evt_example_4",
   "session_id": "sess_example",
   "sequence": 15,

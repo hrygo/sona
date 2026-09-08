@@ -1,12 +1,12 @@
 ---
 title: "SpeechRail 采用 OpenAI 标准协议功能需求交割单"
 description: "sona 向 SpeechRail 交割的功能需求：让 SpeechRail 的 OpenAI 兼容实时协议完整覆盖流式 ASR 分人、流式 TTS、取消与 EOF，从而支持弃用 /v2/realtime"
-status: completed
+status: archived
 type: technical_spec
 category: asr
 version: "v1.0.0"
 date: 2026-09-01
-last_updated: 2026-09-02
+last_updated: 2026-09-08
 author: "Voice Realtime Core Team"
 owners:
   - "sona-core"
@@ -32,6 +32,11 @@ related_documents:
 ---
 
 # SpeechRail 采用 OpenAI 标准协议功能需求交割单
+
+> **历史交割单（不作为当前事件契约）：** 本文记录 2026-09-02 交给 SpeechRail 的需求和当时的差距快照。
+> 当前已发布协议、Sona 实现和真实限制以 [SpeechRail v2 联合验收报告](speechrail-openai-diarization-integration-acceptance.md)、
+> [当前 Realtime 分人手册](../manuals/SpeechRail-流式说话人分离对接手册.md)及 SpeechRail v2.0.0 contract 为准。
+> 本文中的 `segment`、旧自定义事件和“缺失”结论均为历史记录，不表示当前运行时应继续使用这些字面量。
 
 ## 交割对象
 

@@ -102,14 +102,14 @@ async def test_proxy_broadcasts_domain_snapshot_through_legacy_presenter(
     payload = json.loads(client.await_args.args[0])
     assert payload["type"] == "full_update"
     assert payload["buffer_transcription"] == "下一句"
-    assert payload["lines"][0]["speaker"] == 2
+    assert payload["lines"][0]["speaker"] == "会话 1 · 2"
     assert preparation.generation == 1
     assert contexts == [ASRSessionContext(source_epoch=1, offset_ms=0, purpose="subtitles")]
     await proxy.stop()
 
 
-def test_extensions_flag_applies_only_to_meeting_purpose() -> None:
-    """分人扩展只在会议目的且显式开启时传给 transcriber。"""
+def test_diarization_setting_applies_only_to_matching_purpose() -> None:
+    """会议与字幕分别读取自己的显式分人开关。"""
     import pytest as _pytest
 
     _pytest.importorskip("sona.speechrail")
@@ -119,13 +119,13 @@ def test_extensions_flag_applies_only_to_meeting_purpose() -> None:
 
     proxy = SubtitleProxy(
         SubtitleSettings(_env_file=None),
-        diarization_extensions_enabled=True,
+        meeting_diarization_enabled=True,
     )
     factory = proxy._build_speechrail_transcriber(None)
 
     meeting_transcriber = factory(
         ASRSessionContext(
-            source_epoch=1, offset_ms=0, purpose="meeting", diarization_group_id="g" * 32
+            source_epoch=1, offset_ms=0, purpose="meeting"
         )
     )
     subtitle_transcriber = factory(
@@ -134,7 +134,7 @@ def test_extensions_flag_applies_only_to_meeting_purpose() -> None:
 
     assert isinstance(meeting_transcriber, SpeechRailStreamingTranscriber)
     assert isinstance(subtitle_transcriber, SpeechRailStreamingTranscriber)
-    meeting_flag = meeting_transcriber._extensions_requested
-    subtitle_flag = subtitle_transcriber._extensions_requested
+    meeting_flag = meeting_transcriber.diarization_requested
+    subtitle_flag = subtitle_transcriber.diarization_requested
     assert meeting_flag is True
     assert subtitle_flag is False

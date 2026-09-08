@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Literal, cast
 
 from sona.speechrail.transport import SpeechRailProtocolError
 
@@ -44,6 +45,7 @@ _TIMING_QUALITIES = frozenset({"aligned", "unavailable"})
 _PATCH_STATUSES = frozenset({"unknown", "tentative", "stable"})
 _DONE_STATUSES = frozenset({"complete", "degraded"})
 _ANONYMOUS_SPEAKERS = frozenset({"A", "B", "C", "D"})
+AnonymousSpeaker = Literal["A", "B", "C", "D"]
 
 _SESSION_NOOPS = frozenset(
     {
@@ -105,7 +107,7 @@ class AttributionUnit:
     text_end: int
     audio_start_sample: int
     audio_end_sample: int
-    timing_quality: str
+    timing_quality: Literal["aligned", "unavailable"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,8 +134,8 @@ class DiarizationUpdate:
 
     segment_uid: str
     revision: int
-    status: str
-    speaker: str | None
+    status: Literal["unknown", "tentative", "stable"]
+    speaker: AnonymousSpeaker | None
     coverage_ratio: float
     overlap_ratio: float
     candidates: tuple[DiarizationCandidate, ...]
@@ -153,7 +155,7 @@ class DiarizationStatusEvent:
     event_id: str
     session_id: str
     sequence: int
-    status: str
+    status: Literal["degraded"]
     reason: str
     since_sample: int
 
@@ -166,7 +168,7 @@ class DiarizationDoneEvent:
     finalization_id: str
     through_sample: int
     stable_through_sample: int
-    status: str
+    status: Literal["complete", "degraded"]
     reason: str | None
     last_update_sequence: int
 
@@ -340,10 +342,10 @@ def _decode_standard_speaker(value: object) -> str | None:
     return value
 
 
-def _decode_anonymous_speaker(value: object) -> str:
+def _decode_anonymous_speaker(value: object) -> AnonymousSpeaker:
     if not isinstance(value, str) or value not in _ANONYMOUS_SPEAKERS:
         raise SpeechRailProtocolError("SPEECHRAIL_DIARIZATION_PROTOCOL_ERROR")
-    return value
+    return cast(AnonymousSpeaker, value)
 
 
 def _decode_error(value: object) -> SpeechRailTranscriptionError:
@@ -470,12 +472,14 @@ def _decode_update(raw: object) -> DiarizationUpdate:
         or status not in _PATCH_STATUSES
     ):
         raise SpeechRailProtocolError("SPEECHRAIL_DIARIZATION_PROTOCOL_ERROR")
-    speaker = raw.get("speaker")
+    speaker: AnonymousSpeaker | None
+    raw_speaker = raw.get("speaker")
     if status == "unknown":
-        if speaker is not None:
+        if raw_speaker is not None:
             raise SpeechRailProtocolError("SPEECHRAIL_DIARIZATION_PROTOCOL_ERROR")
+        speaker = None
     else:
-        speaker = _decode_anonymous_speaker(speaker)
+        speaker = _decode_anonymous_speaker(raw_speaker)
     candidates = _decode_candidates(raw.get("candidates"))
     return DiarizationUpdate(
         segment_uid=uid,
@@ -564,7 +568,7 @@ def _decode_diarization_done(
         finalization_id=finalization_id,
         through_sample=through,
         stable_through_sample=stable_through,
-        status=status,
+        status=cast(Literal["complete", "degraded"], status),
         reason=reason,
         last_update_sequence=last_update_sequence,
     )

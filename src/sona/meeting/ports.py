@@ -85,7 +85,6 @@ class MeetingCaptureGateway(Protocol):
         owner: str,
         *,
         timeout_secs: float,
-        speaker_count_hint: int | None,
     ) -> CaptureLease: ...
 
     def commit_capture(self, preparation: CaptureLease) -> None: ...

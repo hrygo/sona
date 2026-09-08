@@ -23,7 +23,7 @@ const originalAnchorClick = HTMLAnchorElement.prototype.click;
 
 const sampleLines = [
   {
-    speaker: 0,
+    speaker: "会话 1 · A",
     text: "这是一条测试字幕",
     start: "00:00:01",
     end: "00:00:02",
@@ -141,9 +141,9 @@ describe("SubtitleStream workspace layout", () => {
       await Promise.resolve();
     });
 
-    expect(writeText).toHaveBeenCalledWith("说话人 0: 这是一条测试字幕");
+    expect(writeText).toHaveBeenCalledWith("会话 1 · A: 这是一条测试字幕");
     expect(copyButton.textContent).toContain("已复制");
-    expect(container.querySelector('[role="status"]')?.textContent).toContain("已复制");
+    expect(container.querySelector(".subtitle-action-status")?.textContent).toContain("已复制");
   });
 
   it("shows local feedback after starting an SRT download", () => {

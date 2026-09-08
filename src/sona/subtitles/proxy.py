@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import logging
 import time
 from collections.abc import Awaitable, Callable, Sequence
@@ -86,7 +87,7 @@ class SubtitleProxy:
         clock: Callable[[], float] = time.monotonic,
         readiness_probe: Callable[[], Awaitable[bool]] | None = None,
         stable_reset_after_secs: float | None = None,
-        diarization_extensions_enabled: bool = False,
+        meeting_diarization_enabled: bool = False,
     ) -> None:
         if not backoff_delays or any(delay <= 0 for delay in backoff_delays):
             raise ValueError("backoff_delays 必须包含正数")
@@ -94,7 +95,7 @@ class SubtitleProxy:
             raise ValueError("transcriber_factory 不能与 SpeechRail 连接工厂同时提供")
         self._settings = settings
         self._profile = settings.asr_profile
-        self._diarization_extensions_enabled = diarization_extensions_enabled
+        self._meeting_diarization_enabled = meeting_diarization_enabled
         self._asr_diagnostics = ASRDiagnostics()
         self._transcriber_factory = transcriber_factory or self._build_speechrail_transcriber(
             speechrail_connection_factory
@@ -150,7 +151,7 @@ class SubtitleProxy:
             readiness_probe=self._readiness_probe,
         )
         self._last_payload: dict[str, Any] | None = None
-        self._snapshot_signature: tuple[tuple[tuple[str, ...], ...], str] | None = None
+        self._snapshot_signature: tuple[object, ...] | None = None
         self._archive = SrtArchive(settings.output_dir)
         self._audio_listeners: list[AudioListener] = []
         self._last_event_at: float | None = None
@@ -162,12 +163,18 @@ class SubtitleProxy:
         self, connection_factory: ConnectionFactory | None
     ) -> TranscriberFactory:
         def create(context: ASRSessionContext) -> StreamingTranscriber:
-            extensions = (
-                self._diarization_extensions_enabled and context.purpose == "meeting"
+            diarization_enabled = (
+                self._meeting_diarization_enabled
+                if context.purpose == "meeting"
+                else self._settings.diarization_enabled
             )
+            if context.diarization_enabled != diarization_enabled:
+                context = dataclasses.replace(
+                    context, diarization_enabled=diarization_enabled
+                )
             turn_detection = resolve_server_vad_config(
                 purpose=context.purpose,
-                extensions=extensions,
+                diarization_enabled=diarization_enabled,
                 threshold=self._settings.vad_threshold,
             )
             return SpeechRailStreamingTranscriber(
@@ -181,8 +188,6 @@ class SubtitleProxy:
                 language=self._profile.language,
                 finish_timeout_secs=self._profile.final_timeout_secs,
                 diagnostics=self._asr_diagnostics,
-                # 分人扩展只在会议目的且显式开启时协商；普通字幕永远 legacy。
-                diarization_extensions=extensions,
                 turn_detection=turn_detection,
             )
 
@@ -436,7 +441,6 @@ class SubtitleProxy:
         owner: str,
         *,
         timeout_secs: float,
-        speaker_count_hint: int | None = None,
     ) -> CapturePreparation:
         """建立会议流并等待 ready，但不接收 PCM。"""
         owner = owner.strip()
@@ -444,8 +448,6 @@ class SubtitleProxy:
             raise ValueError("capture owner 不能为空")
         if timeout_secs <= 0:
             raise ValueError("timeout_secs 必须大于 0")
-        if speaker_count_hint is not None and not 1 <= speaker_count_hint <= 8:
-            raise ValueError("speaker_count_hint 必须在 1 到 8 之间")
         if self._capture_session.owner is not None:
             raise RuntimeError("已有会议采集租约")
         if not self._running:
@@ -458,7 +460,6 @@ class SubtitleProxy:
             preparation = await self._capture_session.prepare(
                 owner,
                 timeout_secs=timeout_secs,
-                speaker_count_hint=speaker_count_hint,
             )
         except TimeoutError as exc:
             await self._close_capture()
@@ -550,7 +551,15 @@ class SubtitleProxy:
 
     async def clear_subtitles(self) -> None:
         """清空当前字幕快照并重置服务端会话。"""
-        empty_payload = {"lines": [], "buffer_transcription": ""}
+        empty_payload = {
+            "type": "full_update",
+            "lines": [],
+            "buffer_transcription": "",
+            "diarization": {
+                "status": self._subtitle_session.diarization_status,
+                "reason": self._subtitle_session.diarization_reason,
+            },
+        }
         self._last_payload = empty_payload
         self._snapshot_signature = None
         self._archive.clear_current()
@@ -583,10 +592,16 @@ class SubtitleProxy:
 
     def _snapshot_key(
         self, payload: dict[str, Any]
-    ) -> tuple[tuple[tuple[str, ...], ...], str]:
+    ) -> tuple[object, ...]:
         confirmed = SrtArchive.confirmed_signature(payload)
         partial = str(payload.get("buffer_transcription") or "")
-        return confirmed, partial
+        diarization = payload.get("diarization")
+        if isinstance(diarization, dict):
+            status = str(diarization.get("status") or "off")
+            reason = str(diarization.get("reason") or "")
+        else:
+            status, reason = "off", ""
+        return confirmed, partial, status, reason
 
     async def _close_capture(self) -> None:
         await self._capture_session.close()

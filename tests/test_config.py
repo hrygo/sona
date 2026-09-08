@@ -295,11 +295,9 @@ def test_interaction_rejects_invalid_tts_request_timeout(value: float) -> None:
         InteractionSettings(speechrail_tts_request_timeout_secs=value)
 
 
-def test_meeting_diarization_smoothing_defaults() -> None:
+def test_meeting_diarization_is_disabled_by_default() -> None:
     settings = MeetingSettings(_env_file=None)
-    assert settings.diarization_smoothing_enabled is True
-    assert settings.diarization_min_duration_ms == 350
-    assert settings.diarization_hangover_gap_ms == 800
+    assert settings.diarization_enabled is False
 
 
 def test_meeting_summary_generation_defaults_are_bounded_for_long_reduce() -> None:

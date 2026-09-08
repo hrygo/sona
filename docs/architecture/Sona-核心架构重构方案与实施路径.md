@@ -131,8 +131,8 @@ src/sona/
 │   ├── session.py              # MeetingSession 状态机编排
 │   ├── runtime_mode.py         # RuntimeModeCoordinator 模式互斥协调
 │   ├── repository.py           # PostgreSQL 仓储与事务对账
-│   ├── diarization_smoother.py # 说话人时序平滑与匿名 group 映射
-│   ├── finalization.py         # EOF 冲刷与 session.completed 等待
+│   ├── speaker_attribution.py  # SpeechRail speaker patch 与匿名 key 映射
+│   ├── finalization.py         # EOF 冲刷与 done/水位等待
 │   ├── recovery.py             # 0600 本地 JSONL 崩溃容灾
 │   ├── api.py / events.py      # REST 路由与 WebSocket 事件广播
 │   ├── inner_os/               # 会中内心 OS 伴侣
@@ -236,7 +236,7 @@ flowchart LR
 3. **ADR-003 上下文滚动压缩**：
    - 软/硬/目标阈值（16384/32768/8192 tokens）受控预热换链；断链先自愈后重试。
 4. **会议事务对账与 EOF 优雅冲刷**：
-   - 结束会议时通过 SpeechRail Realtime 发送 `input_audio_buffer.commit` 并等待 `session.completed` 终结转录。
+   - 结束会议时通过 SpeechRail Realtime 发送 `input_audio_buffer.commit`；启用分人时再等待 `speechrail.diarization.done` 与持久化水位终结转录。
 5. **零音频落地与存储安全**：
    - 数据库与磁盘绝对不存储原始音频；
    - 故障恢复 Journal 目录 `0700`、文件 `0600`。

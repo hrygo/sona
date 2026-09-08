@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 __all__ = ["ASRAttributionUnitSpan", "ASRCompletedItem", "ASRSegment", "ASRWindow"]
 
@@ -26,6 +27,7 @@ class ASRSegment:
     # SPK-E2E-1 扩展模式：source session 内的不可变归属单元标识与时间质量。
     source_uid: str | None = None
     timing_quality: str | None = None
+    source_session_id: str | None = None
 
     def __post_init__(self) -> None:
         if self.order < 0:
@@ -86,7 +88,15 @@ class ASRWindow:
     completed_items: tuple[ASRCompletedItem, ...] = ()
     # 本窗口 source epoch 的会议时间起点（毫秒）；completed 换算 meeting 样本用。
     offset_ms: int = 0
+    diarization_status: Literal["off", "active", "degraded"] = "off"
+    diarization_reason: str | None = None
 
     def __post_init__(self) -> None:
         if self.source_epoch < 0:
             raise ValueError("source_epoch 必须非负")
+        if self.diarization_status == "off" and self.diarization_reason is not None:
+            raise ValueError("off 状态不能携带 diarization_reason")
+        if self.diarization_status == "degraded" and not (
+            self.diarization_reason or ""
+        ).strip():
+            raise ValueError("degraded 状态必须携带 diarization_reason")

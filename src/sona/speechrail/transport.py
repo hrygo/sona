@@ -265,17 +265,32 @@ class SpeechRailRealtimeClient:
             await self.negotiate_diarization()
 
     async def _receive_session_updated(self) -> dict[str, object]:
-        try:
-            event = await asyncio.wait_for(
-                self._transport.receive(), timeout=_SESSION_UPDATED_TIMEOUT_SECS
-            )
-        except TimeoutError:
-            raise SpeechRailProtocolError("SPEECHRAIL_SESSION_UPDATE_TIMEOUT") from None
-        if event.get("type") == "error":
-            raise _error_from_event(event)
-        if event.get("type") != "session.updated":
-            raise SpeechRailProtocolError("SPEECHRAIL_PROTOCOL_ERROR")
-        return event
+        deadline = asyncio.get_running_loop().time() + _SESSION_UPDATED_TIMEOUT_SECS
+        while True:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                raise SpeechRailProtocolError(
+                    "SPEECHRAIL_SESSION_UPDATE_TIMEOUT"
+                ) from None
+            try:
+                event = await asyncio.wait_for(
+                    self._transport.receive(), timeout=remaining
+                )
+            except TimeoutError:
+                raise SpeechRailProtocolError(
+                    "SPEECHRAIL_SESSION_UPDATE_TIMEOUT"
+                ) from None
+            if event.get("type") == "error":
+                raise _error_from_event(event)
+            # SpeechRail emits the standard OpenAI conversation.created
+            # notification between session.created and the first
+            # session.updated. It carries no ASR configuration and must not
+            # be mistaken for a failed baseline handshake.
+            if event.get("type") == "conversation.created":
+                continue
+            if event.get("type") != "session.updated":
+                raise SpeechRailProtocolError("SPEECHRAIL_PROTOCOL_ERROR")
+            return event
 
     @staticmethod
     def _validate_baseline_session(event: Mapping[str, object]) -> None:

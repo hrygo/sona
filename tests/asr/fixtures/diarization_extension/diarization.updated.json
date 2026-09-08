@@ -1,22 +1,20 @@
 {
-  "type": "speechrail.diarization.update",
+  "type": "speechrail.diarization.updated",
   "event_id": "evt_example_2",
   "session_id": "sess_example",
   "sequence": 13,
-  "group_generation": "generation_example",
   "stable_through_sample": 52800,
   "updates": [
     {
       "segment_uid": "seg_example_2_0",
       "revision": 1,
       "status": "stable",
-      "speaker": "spk_01",
+      "speaker": "A",
       "coverage_ratio": 0.95,
       "overlap_ratio": 0.0,
       "candidates": [
-        {"speaker": "spk_01", "support_ratio": 0.95}
+        {"speaker": "A", "support_ratio": 0.95}
       ]
     }
-  ],
-  "speaker_links": []
+  ]
 }

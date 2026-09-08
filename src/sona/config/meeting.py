@@ -90,41 +90,12 @@ class MeetingSettings(BaseSettings):
     finalization_timeout_secs: float = Field(default=30.0, ge=1.0, le=300.0)
     recovery_dir: Path = Field(default=Path("runtime/meetings/recovery"))
     summary_concurrency: int = Field(default=1, ge=1, le=8)
-    diarization_smoothing_enabled: bool = Field(
-        default=True,
-        description="是否启用会议说话人时序平滑与短片段杂音滤波",
-    )
-    diarization_min_duration_ms: int = Field(
-        default=350,
-        ge=50,
-        le=2000,
-        description="短片段过滤最小有效时长（毫秒）",
-    )
-    diarization_hangover_gap_ms: int = Field(
-        default=800,
-        ge=100,
-        le=5000,
-        description="同一说话人相邻段落合并最大时间间隙（毫秒）",
-    )
-    diarization_overlay_enabled: bool = Field(
+    diarization_enabled: bool = Field(
         default=False,
         description=(
-            "是否启用 legacy 诊断 overlay（封存时用非流式 diarize 按时间重叠修正"
-            " speaker_key）。默认关闭；新分人扩展启用时即使本开关为 true 也不会调用 batch"
+            "是否在会议 Realtime session 的首个 PCM 前启用 SpeechRail v2.0.0"
+            " namespaced diarization opt-in"
         ),
-    )
-    diarization_extensions_enabled: bool = Field(
-        default=False,
-        description=(
-            "是否对支持 speechrail.diarization.v1 能力的 SpeechRail 协商持续分人扩展；"
-            "关闭时保持 legacy 行为，绝不自动启用 batch overlay"
-        ),
-    )
-    diarization_overlay_max_buffer_secs: int = Field(
-        default=1800,
-        ge=60,
-        le=7200,
-        description="非流式分人 PCM 缓冲的最大时长（秒），超出丢最旧音频",
     )
     allowed_origins: list[str] = Field(
         default_factory=lambda: [

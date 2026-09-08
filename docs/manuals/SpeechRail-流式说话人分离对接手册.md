@@ -1,150 +1,124 @@
 ---
-title: "SpeechRail 流式说话人分离对接手册"
+title: "SpeechRail v2 Realtime 分人对接手册"
+description: "Sona 消费已发布 SpeechRail v2.0.0 OpenAI Realtime 分人协议的运行、事件与验收规范"
 status: active
-audience: "sona 工程团队（会议实时字幕与纪要消费方）"
-version: "1.0.2"
-date: 2026-09-05
+audience: "sona 工程团队（会议与实时字幕消费方）"
+version: "2.0.0"
+date: 2026-09-08
+last_updated: 2026-09-08
 ---
 
-# 🎙️ SpeechRail 流式说话人分离对接手册
+# SpeechRail v2 Realtime 分人对接手册
 
-> **2026-09-06 S0 更新：** 会议侧已按[逐任务计划](../superpowers/plans/2026-09-05-speaker-diarization-e2e.md) S0 隔离 legacy overlay 风险：`diarization_overlay_enabled` 默认改为 **false**，batch overlay 只保留为显式 legacy 诊断（且新分人扩展 `diarization_extensions_enabled` 开启时强制停用）；平滑器不再凭时长改写**有实质内容的短插话**与 unknown 段归属。本文正文中所有“无需改动”“无需额外改代码”均为 1.6.6 里程碑的历史表述，不代表当前默认行为。
+> 本文是当前生效的 Sona 对接手册。协议基线为已发布的
+> [SpeechRail v2.0.0](https://github.com/hrygo/SpeechRail/releases/tag/v2.0.0)，
+> 服务契约以 [`contracts/realtime-openai.md`](../../../SpeechRail/contracts/realtime-openai.md) 为准。
+> Sona 不加载 ASR、TTS 或 diarization 模型，模型生命周期由独立 SpeechRail 服务负责。
 
-> **2026-09-05 基线更正：** 本文下述内容记录 1.6.6 的流式接线里程碑，不证明跨 commit/重连编号稳定、讲话人修订已闭环或真实会议质量已验收。“无需改动”“会话内稳定”和额外延迟估计均不能作为验收结论。当前源码的时间戳来自二次解码，Sona 默认 batch overlay 仍存在，严格 decoder 也不接受未协商的新事件。后续实施以[端到端设计](../architecture/speaker-diarization-e2e-design.md)的事实核验和[逐任务计划](../superpowers/plans/2026-09-05-speaker-diarization-e2e.md)为准；现有公共 API 仍以 SpeechRail 当前契约为准，新设计的扩展尚未上线。
+## 1. 运行边界
 
-> 本手册说明 SpeechRail `/v1/realtime` 流式说话人分离从「永不生效」到「端到端可用」
-> 的变更（SpeechRail ADR-0010，版本 1.6.6 起），以及 sona 侧消费方式。
-> SpeechRail 侧协议事实以 [SpeechRail `contracts/realtime-openai.md`](../../../SpeechRail/contracts/realtime-openai.md)
-> 为准；本手册对照 sona 现有消费代码（`src/sona/speechrail/`）编写，供 sona 团队验收与联调。
+- 会议和实时字幕通过 `ws://127.0.0.1:8201/v1/realtime` 消费 OpenAI Realtime ASR。
+- 分人是显式会话能力，默认关闭；会议与字幕分别由自己的配置开关控制。
+- Sona 只保存 confirmed 文本、样本范围、匿名来源和 speaker 元数据，不保存 PCM、embedding 或 raw event。
+- SpeechRail Realtime 会话不可透明恢复。断线后创建新的 session/source epoch，应用侧按 session identity 对账。
 
----
+## 2. 配置与启动
 
-## 1. 背景：发生了什么变更
+```bash
+export SONA_MEETING_DIARIZATION_ENABLED='false'
 
-修复前 SpeechRail 流式路径的 `completed` 事件**硬编码空 segments**，导致
-`conversation.item.input_audio_transcription.segment` 事件（含 `speaker`）**从不下发**，
-sona 会议侧表现为「说话人恒为 `speaker:0`、历史被最新句覆盖」。
-
-SpeechRail 1.6.6（ADR-0010）修复后：
-
-- worker 在 commit 时对已累积音频做一次**词级强制对齐**，`completed` 携带真实
-  `segments`；
-- WS 层按 segment 粒度下发 `conversation.item.input_audio_transcription.segment`，
-  每项含匿名 `speaker`；
-- **因此 sona 无需再自行缓冲 PCM 做非流式分人回流**——实时分人与最终纪要分人
-  由同一条流式链路提供。
-
-## 2. SpeechRail 侧事实（协议面）
-
-### 2.1 启用方式
-
-分人能力按会话启用，两种方式（`session.update` 一处生效）：
-
-| 方式 | 配置 |
-|---|---|
-| 模型别名 | `session.update.session.model = "gpt-4o-transcribe-diarize"` |
-| 显式配置 | `session.update.session.diarization`（需 SpeechRail diarization profile 就绪） |
-
-sona 现有 `SpeechRailStreamingTranscriber.connect()` 已按 `purpose == "meeting"` 通过
-`diarization=True` + `speaker_count_hint` + `diarization_group_id` 启用——**无需改动**（此为
-1.6.6 里程碑表述；S0 未变更连接参数，仅将批路径 overlay 默认关闭，见文首 S0 更新）。
-
-### 2.2 事件顺序（commit 后）
-
-```text
-input_audio_buffer.committed
-conversation.item.created
-conversation.item.input_audio_transcription.segment   # 0..N 条（启用分人且对齐成功时）
-conversation.item.input_audio_transcription.completed  # 终态（streaming 全文）
+export SONA_SUBTITLE_SPEECHRAIL_URL='ws://127.0.0.1:8201/v1/realtime'
+export SONA_SUBTITLE_SPEECHRAIL_API_KEY=''
+export SONA_SUBTITLE_DIARIZATION_ENABLED='false'
 ```
 
-### 2.3 `.segment` 事件字段（与 sona 解码器逐字段对应）
+会议与字幕共用 `SONA_SUBTITLE_SPEECHRAIL_URL` / `SONA_SUBTITLE_SPEECHRAIL_API_KEY` 作为 Realtime 连接配置，
+会议另用 `SONA_MEETING_DIARIZATION_ENABLED` 控制是否 opt-in。API key 通过进程环境或本机安全配置注入，不写入仓库、日志和验收产物。启动 `sona-ui` 前确认 SpeechRail
+的 `/health` 与 `/readyz`，并确认所需 ASR/diarization profile 已由 SpeechRail 预加载。Sona 不隐式下载或启动模型。
+
+## 3. 会话协商
+
+每条连接都必须先完成标准 OpenAI Realtime 握手：
+
+1. 接收首个 `session.created`，记录服务分配的 `session_id`。
+2. 发送标准 `session.update`，配置 `input_audio_transcription`、语言和 turn detection。
+3. 等待 `session.updated`；标准回显不得包含 `speechrail` 扩展。
+4. 只有显式开启对应设置时，再发送一次以下命名空间 opt-in：
 
 ```json
 {
-  "type": "conversation.item.input_audio_transcription.segment",
-  "item_id": "item_sess_abc_input",
-  "content_index": 0,
-  "id": 0,
-  "text": "这个方案我们今天定下来",
-  "speaker": "spk_01",
-  "start": 0.0,
-  "end": 3.1
+  "type": "session.update",
+  "session": {"speechrail": {"diarization": {"enabled": true}}}
 }
 ```
 
-sona `transcription_events.py` 解码器约束（SpeechRail 发射格式**天然满足**，无需适配）：
+服务必须回显：
 
-| 字段 | 值/格式 | sona 解码器校验（`_decode_segment` / `_decode_speaker`） |
-|---|---|---|
-| `text` | 非空字符串（轻量 ITN 规整） | `isinstance(str)` 且 `strip()` 非空 |
-| `start` / `end` | **秒**（int/float，`end >= start >= 0`） | 非 bool 数字；解码后 `round(start*1000)` → `start_ms` |
-| `speaker` | 匿名 label `spk_01`/`spk_02`/… | 可选；存在则须 `str` 且以 `spk_` 开头、长度 ≤64 |
-| `id` | 当前为整数索引（官方为字符串 `seg_0001`） | 未校验（忽略） |
-| `item_id` / `content_index` | 字符串 / 0 | 未校验（忽略） |
+```json
+{"enabled": true, "version": 1, "max_speakers": 4}
+```
 
-> ⚠️ **秒制提醒**：sona 解码器按 **秒** 读取 `start`/`end` 并自行 ×1000。若沿用旧的
-> 毫秒假设会读到错误边界。当前 sona 代码已正确换算，勿在适配层再乘一次。
+opt-in 必须发生在任何 PCM 之前且只能发送一次。未回显、profile 不可用或服务拒绝时，连接进入明确的
+`off`/`degraded` 状态；不得试探另一个协议或启动第二个分人器。
 
-## 3. sona 侧对接现状（对应代码）
+## 4. 事件与数据约束
 
-| sona 组件 | 职责 | 与本次变更的关系 |
-|---|---|---|
-| `speechrail/transcription_events.py` | `decode_transcription_event` → `TranscriptionSegment`/`TranscriptionCompleted` 等，含 speaker/时间戳协议校验 | 无需改动；`SPEECHRAIL_DIARIZATION_PROTOCOL_ERROR` 校验已按 `spk_*` 格式对齐 |
-| `speechrail/transcriber.py` | `SpeechRailStreamingTranscriber`：消费流式事件，把匿名 `spk_*` 重写进 `group:{id}` 命名空间 | 无需改动；`completed` 无 segment 时已有兜底单 segment（保留本轮转写） |
-| `meeting/diarization_overlay`（批路径） | 批量转写的分人归属回流 | **S0 起默认关闭**：仅在 `diarization_overlay_enabled=true` 且未启用分人扩展时，作为显式 legacy 诊断在会末单次调用；缓冲只保留尾部并携带会议时间线偏移，跨裁剪边界段不改写 |
+### 4.1 confirmed 正文
 
-## 4. 消费模式
+标准 `conversation.item.input_audio_transcription.completed` 提供 `item_id`、canonical `transcript`，
+以及以 session 为时间域的 `audio_start_sample`/`audio_end_sample`。开启分人时，`attribution_units` 必须完整覆盖
+transcript，范围使用 Python Unicode code point 半开区间；后端先切出可展示文本，前端不自行按 UTF-16 索引切分。
 
-### 4.1 会议页面实时分人
+completed item 一旦写入 PostgreSQL，文本、时间和 item identity 不得改变。重复 completed 只做幂等确认；同一
+source identity 携带不同正文或范围是协议错误。
 
-沿用现有 `SpeechRailStreamingTranscriber.events()` 流：
-`TranscriptionSegment`（含 `speaker`）→ `ASRSegment` → 渲染匿名发言人
-（`Speaker 1`/`Speaker 2`，可重命名）。**链路打通后即刻生效，无需额外改代码。**
+### 4.2 分人事件
 
-### 4.2 最终纪要分人
+当前只接受以下三个扩展事件：
 
-同一链路按 commit 累积段事件即为带分人的完整转写。SpeechRail 侧承诺：
-**sona 无需再自行缓冲 PCM 做非流式分人回流**。
-
-### 4.3 文本一致性
-
-- `completed.transcript` 为流式解码全文；
-- 各 `.segment.text` 来自 commit 时的**独立对齐解码**，与 `transcript` 可能有轻微文本漂移
-  （同一音频的两种解码路径）。
-
-**建议**：启用分人时以 `.segment` 渲染；`transcript` 仅作全文/兜底索引，勿按字级强对齐。
-
-## 5. 降级与失败语义（fail-closed）
-
-- commit 时对齐失败 / 未产出分段 → **不发送 `.segment` 事件**，SpeechRail **不伪造
-  单一 speaker**；
-- sona 现有兜底已覆盖：`completed` 无 segment 时合成单 segment 保留本轮转写
-  （`transcriber.py` `_synthesized_segment`，`text` 之外不含 speaker）；
-- 分人会话 commit 因对齐多一次重解码，延迟略高于非分人（见 §7），UI 以提交中状态覆盖。
-
-## 6. 已知限制与风险（上线前知悉）
-
-| 项 | 说明 |
+| 事件 | 作用 |
 |---|---|
-| commit 延迟增量 | 启用分人时 commit 增加一次批量对齐重解码（估算 +0.15~0.3s/次）；以 SpeechRail 侧基准实测为准 |
-| 段文本漂移 | 段文本与 `completed.transcript` 可能轻微不一致（见 §4.3） |
-| label 会话性 | `spk_N` 会话内稳定，断线失效，不跨会话保真；sona 用 `group:{id}` 命名空间承载映射，重连须重建 |
-| 真实分人精度 | DER/JER、双人交替、重叠语音效果需 SpeechRail 真实模型基准 + 双音色 smoke 验收确认 |
-| 能力声明 | sona `transcriber.py` 现声明 `supports_segment_timestamps=False`，但解码器已消费段时间戳——请 sona 团队核实该声明是否需更新为 `True` |
+| `speechrail.diarization.updated` | 按 `segment_uid` 和连续 `revision` 提供 speaker patch；包含稳定水位 |
+| `speechrail.diarization.status` | 报告 `active`、`degraded` 等运行状态和原因 |
+| `speechrail.diarization.done` | EOF 后给出 `finalization_id`、`through_sample`、稳定水位和最后 update sequence |
 
-## 7. 验收清单（sona 对接完成标准）
+扩展事件必须带顶层 `event_id`、`session_id`、递增 `sequence`。speaker 只能是 `A`–`D` 或 `null`；不同 session
+即使返回相同标签，也不能在 Sona 中自动合并为同一人。所有 patch 经 typed decoder 和 speaker-only transaction
+后落库，不改正文。
 
-- [ ] 双音色（`warm` / `bright`）TTS 交替说话，两端收到**不同 `speaker` label**（`spk_01`/`spk_02`）；
-- [ ] 单说话人连续说，同一 commit 内 `speaker` 稳定不跳变；
-- [ ] 页面实时标签与最终纪要分人一致；
-- [ ] 分人会话必见 `.segment`（不再出现「说话人恒为 speaker:0」）；
-- [ ] 非分人会话（纯字幕/交互）行为与旧版一致（无 `.segment`、无回归）；
-- [ ] 断线重连后新会话 label 从头编号，`group:{id}` 映射重建正常。
+## 5. 结束与故障处理
 
-## 8. 参考
+开启分人的会议停止时：
 
-- SpeechRail 协议事实：[`contracts/realtime-openai.md`](../../../SpeechRail/contracts/realtime-openai.md)
-- SpeechRail 决策记录：[`docs/decisions/0010-streaming-diarization-fix.md`](../../../SpeechRail/docs/decisions/0010-streaming-diarization-fix.md)
-- sona 现有对接实现：`src/sona/speechrail/transcriber.py`、`transcription_events.py`
-- sona 事件解码测试：`tests/asr/test_speechrail_events.py`
+```text
+停止接收 PCM → input_audio_buffer.commit → 落库全部 completed
+→ 等待 updated/status → 等待 done 与 repository watermark 对齐
+→ 保存 complete/degraded → clear/close → 封存会议并排队纪要
+```
+
+`done` 缺失、超时、session 不匹配或 status 为 `degraded` 时，保留已确认正文，分人状态和原因对外可见，
+不得伪造成功终态。未开启分人时按标准 ASR 终态快速关闭，不轮询分人水位。
+
+人工更正写入 `manually_corrected=true` 后，任何后续自动 patch、状态冲刷和 EOF 处理都只能更新模型证据，
+不能覆盖用户结果。
+
+## 6. 联调与排障
+
+- 首包不是 `session.created`、标准 session 回显含扩展、事件 sequence 回退或 patch revision 跳号：视为协议错误，
+  保留正文并停止分人消费。
+- 没有 speaker 不代表需要伪造一个默认人；检查 opt-in 回显、SpeechRail profile readiness 和 `degraded` 原因。
+- 当前服务若请求 server-side VAD 但运行环境缺少 `onnxruntime`，会在 SpeechRail preflight 失败；这是服务部署依赖，
+  不应通过 Sona 本地模型或隐藏 fallback 掩盖。可用手工 turn detection 独立验证 Realtime 分人协议。
+- 真实验收只记录版本、事件计数、状态、哈希和错误类别，不记录 API key、PCM、完整 transcript 或服务 raw event。
+
+## 7. 参考实现与门禁
+
+- 客户端：`src/sona/speechrail/transport.py`、`transcriber.py`、`transcription_events.py`
+- 会议屏障：`src/sona/meeting/session.py`、`finalization.py`
+- 字幕会话：`src/sona/subtitles/sessions.py`、`proxy.py`
+- 契约测试：`tests/asr/test_speechrail_v2_contract.py`、`tests/asr/test_speechrail_realtime.py`
+- 端到端任务卡：[`2026-09-08-speechrail-openai-diarization-integration.md`](../superpowers/plans/2026-09-08-speechrail-openai-diarization-integration.md)
+- 脱敏验收记录：[`2026-09-08 联合验收报告`](../operations/speechrail-openai-diarization-integration-acceptance.md)
+
+变更后至少执行后端测试、`mypy`、`ruff`、前端测试和生产构建；真实服务联调必须使用独立临时输出目录，
+不得把音频或凭据写入仓库。

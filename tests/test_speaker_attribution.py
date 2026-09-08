@@ -95,7 +95,7 @@ def test_patch_target_errors_reject_unknown_uid_and_gap_and_frozen() -> None:
     errors = patch_target_errors(event, targets)
     assert any(error.startswith("unknown_uid:ghost") for error in errors)
     assert any(error.startswith("revision_gap:u1:5") for error in errors)
-    assert any(error.startswith("frozen:u2") for error in errors)
+    assert not any(error.startswith("frozen:u2") for error in errors)
 
 
 def test_resolve_patch_application_keeps_override() -> None:

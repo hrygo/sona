@@ -1,10 +1,11 @@
 ---
 title: "Sona 接入 SpeechRail OpenAI Realtime 讲话人分离（会议与实时字幕）"
-status: ready
+status: completed
 type: execution_plan
 category: meeting
-version: "1.0.0"
+version: "1.3.0"
 date: 2026-09-08
+last_updated: 2026-09-09
 owners: [sona-core]
 tags: [speechrail, openai, realtime, diarization, subtitles, migration]
 ---
@@ -13,13 +14,21 @@ tags: [speechrail, openai, realtime, diarization, subtitles, migration]
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **当前状态（2026-09-09）：** Sona 侧实现、fake/隔离验收、完整质量门和真实联合 smoke 均已通过。SpeechRail v2.0.2 的
+> `/health`、`/readyz`、`realtime_vad` 与默认 `server_vad` meeting smoke 均正常；完整短语音的真实字幕 stop 已完成
+> `completed → updated → done`、单次 `finish`、最终 SRT 归档且无协议/连接错误。`status="unknown", speaker=null` 是当前协议允许的未知归属，
+> 不应与非法的 `tentative/stable + speaker=null` 混淆。详细证据见[联合验收报告](../../operations/speechrail-openai-diarization-integration-acceptance.md)。
+
 **Goal:** 让 Sona 的会议与实时字幕模式以 OpenAI Realtime 为主协议，按各自显式开关使用唯一的 SpeechRail opt-in 接收匿名、会话内的讲话人归属；未开启分人的调用不感知任何分人扩展。
 
 **Architecture:** 固定正文继续来自 OpenAI 的 `conversation.item.input_audio_transcription.completed`。所有会话先完成原有的标准 OpenAI ASR `session.update`；`SONA_MEETING_DIARIZATION_ENABLED` 或 `SONA_SUBTITLE_DIARIZATION_ENABLED` 为真时，才在首个 PCM 前发送唯一一次 `session.speechrail.diarization.enabled=true` opt-in。会议把 `updated` 落为 speaker-only 事务并在 EOF 用 `finish/done` 建立持久化屏障；实时字幕把同一 patch 原位投影到内存字幕/SRT，并在停止时排空 `finish/done` 尾部。Sona 不加载声学模型、不维护声纹或跨会议身份；它仅呈现 A–D 等匿名标签，并把会议人工改名/更正作为本应用的优先事实。
 
 **Tech Stack:** Python 3.12、OpenAI-compatible Realtime WebSocket、现有 `websockets` transport、Pydantic、PostgreSQL、pytest、Ruff、mypy；不引入 SpeechRail 专用 SDK。
 
-**Authoritative upstream contract:** SpeechRail 当前 checkout 的 `contracts/realtime-openai.md` “Diarization 扩展”、`docs/users/api-contract.md` 与 `src/speechrail/compatibility/openai_realtime.py` 的实际渲染 payload。实现前必须以三者的当前内容重核字段；不得以 Sona 现有 `speechrail.diarization.v1` 文档、fixture 或代码推断新协议。2026-09-08 核查时 `contracts/diarization/v1/` 中仍保留旧 `update/finalized` schema/fixture 名称，不能作为新 wire literal 的依据；由 SpeechRail 在其契约变更中原子更新后，Sona 才可将新 schema fixture 镜像到自己的测试。
+**Authoritative upstream contract:** SpeechRail 已发布的 [v2.0.0 release](https://github.com/hrygo/SpeechRail/releases/tag/v2.0.0)、
+`contracts/realtime-openai.md` 的 “Diarization 扩展”、`docs/users/api-contract.md` 与
+`src/speechrail/compatibility/openai_realtime.py` 的实际 payload。Sona 的 fixture 与 typed decoder 已按该发布版本核对；
+本地联合 smoke 使用兼容的 v2.0.2 服务；此前 v2.0.1 的 `server_vad` preflight 限制及维护者修复后的复验结果记录在验收报告中。
 
 ## Global Constraints
 
@@ -99,7 +108,7 @@ tags: [speechrail, openai, realtime, diarization, subtitles, migration]
 - Produces: `SpeechRailStreamingTranscriber.diarization_unavailable_reason: str | None`, set only when the requested opt-in is rejected by `diarization_not_available` or `unsupported_operation` after baseline ASR setup.
 - Consumes: `session.created` only to establish transport session identity, then the baseline OpenAI `session.updated`, then the diarization `session.updated` exact echo; no capability-string negotiation.
 
-- [ ] Write a failing fake-WebSocket test that first delivers `session.created`, then asserts every session sends the same existing standard ASR configuration (`model`, `language`, and turn detection) and receives its normal `session.updated`. A meeting with `SONA_MEETING_DIARIZATION_ENABLED=true` and a subtitle stream with `SONA_SUBTITLE_DIARIZATION_ENABLED=true` each send exactly one additional opt-in before their first PCM; every disabled mode sends none.
+- [x] Write a failing fake-WebSocket test that first delivers `session.created`, then asserts every session sends the same existing standard ASR configuration (`model`, `language`, and turn detection) and receives its normal `session.updated`. A meeting with `SONA_MEETING_DIARIZATION_ENABLED=true` and a subtitle stream with `SONA_SUBTITLE_DIARIZATION_ENABLED=true` each send exactly one additional opt-in before their first PCM; every disabled mode sends none.
 
 ```python
 assert standard_connection.sent[0]["session"].get("speechrail") is None
@@ -110,16 +119,16 @@ assert meeting_connection.sent[1] == {
 assert client.diarization_enabled is True
 ```
 
-- [ ] Write failing negative tests for: legacy `input_audio_transcription.diarization`, `speechrail.diarization.v1`, a late opt-in after PCM, missing/changed `version` or `max_speakers`, and any `speechrail.diarization.*` event on a non-opted-in connection. Each must raise the existing stable protocol error and must not issue a second opt-in request.
-- [ ] Add a failing negotiation-error test: after baseline ASR configuration is confirmed, an opt-in `error` with `diarization_not_available` or `unsupported_operation` preserves standard ASR delivery. A meeting persists `degraded` with that reason; a subtitle stream emits its explicit degraded state and keeps confirmed text/SRT. Neither creates a `finish/done` barrier or calls a legacy/batch implementation.
-- [ ] Replace `diarization_extensions_enabled` with independent `SONA_MEETING_DIARIZATION_ENABLED` and `SONA_SUBTITLE_DIARIZATION_ENABLED` settings, both default `false`. Delete the legacy capability constant, `group_id`, `speaker_count_hint`, contract/timebase negotiation, and all fallback branches. Remove `speaker_count_hint` and `diarization_group_id` from `ASRSessionContext`, `SubtitleProxy.prepare_capture`, `MeetingCaptureSession`, their callers and contract tests. `SubtitleProxy` selects its matching explicit setting from `context.purpose`; `UIRuntime` wires both settings and removes all legacy overlay capability reporting. The standard OpenAI ASR model remains the connection model; the session opt-in alone requests Realtime diarization.
-- [ ] Implement `send_diarization_finish` as an idempotent, one-shot client event:
+- [x] Write failing negative tests for: legacy `input_audio_transcription.diarization`, `speechrail.diarization.v1`, a late opt-in after PCM, missing/changed `version` or `max_speakers`, and any `speechrail.diarization.*` event on a non-opted-in connection. Each must raise the existing stable protocol error and must not issue a second opt-in request.
+- [x] Add a failing negotiation-error test: after baseline ASR configuration is confirmed, an opt-in `error` with `diarization_not_available` or `unsupported_operation` preserves standard ASR delivery. A meeting persists `degraded` with that reason; a subtitle stream emits its explicit degraded state and keeps confirmed text/SRT. Neither creates a `finish/done` barrier or calls a legacy/batch implementation.
+- [x] Replace `diarization_extensions_enabled` with independent `SONA_MEETING_DIARIZATION_ENABLED` and `SONA_SUBTITLE_DIARIZATION_ENABLED` settings, both default `false`. Delete the legacy capability constant, `group_id`, `speaker_count_hint`, contract/timebase negotiation, and all fallback branches. Remove `speaker_count_hint` and `diarization_group_id` from `ASRSessionContext`, `SubtitleProxy.prepare_capture`, `MeetingCaptureSession`, their callers and contract tests. `SubtitleProxy` selects its matching explicit setting from `context.purpose`; `UIRuntime` wires both settings and removes all legacy overlay capability reporting. The standard OpenAI ASR model remains the connection model; the session opt-in alone requests Realtime diarization.
+- [x] Implement `send_diarization_finish` as an idempotent, one-shot client event:
 
 ```python
 {"type": "speechrail.diarization.finish", "event_id": event_id}
 ```
 
-- [ ] Run and pass:
+- [x] Run and pass:
 
 ```bash
 uv run pytest tests/asr/test_speechrail_realtime.py tests/asr/test_diarization_extension_contract.py tests/asr/test_proxy_contract.py tests/test_runtime.py tests/test_subtitle_components.py tests/test_subtitle_send_gaps.py -q
@@ -137,12 +146,12 @@ uv run pytest tests/asr/test_speechrail_realtime.py tests/asr/test_diarization_e
 - Produces: `DiarizationUpdatedEvent`, `DiarizationStatusEvent`, `DiarizationDoneEvent` typed values.
 - Consumes: `conversation.item.input_audio_transcription.completed`, `speechrail.diarization.updated`, `speechrail.diarization.status`, `speechrail.diarization.done`.
 
-- [ ] Replace old fixture literals and decoder types. The accepted server literals are exactly `speechrail.diarization.updated`, `speechrail.diarization.status`, and `speechrail.diarization.done`; reject `speechrail.diarization.update` and `speechrail.diarization.finalized`.
-- [ ] Add failing decoder tests using only sanitized JSON for a Chinese-plus-emoji transcript. Assert that `attribution_units` tile the canonical transcript exactly in code points, each patch revision starts at 1 and advances by one, `unknown` has `speaker is None`, and `tentative`/`stable` have a nonempty anonymous speaker.
-- [ ] Decode and retain top-level `event_id`, `session_id`, and `sequence`. Require every patch target to refer to a completed item from the same session. Reject duplicate/missing `segment_uid`, noncontiguous revision, malformed ratios, foreign session, and an update after `done`.
-- [ ] Decode `done` with `finalization_id`, `status`, `through_sample`, `stable_through_sample`, and `last_update_sequence`. Require `finalization_id` to match Sona's one outstanding finish `event_id`. Do not treat `status=degraded` as a missing terminal event.
-- [ ] Preserve OpenAI `.segment` decoding for ordinary ASR, but in an opted-in diarization session reject every `.segment` event as a double-write protocol violation.
-- [ ] Run and pass:
+- [x] Replace old fixture literals and decoder types. The accepted server literals are exactly `speechrail.diarization.updated`, `speechrail.diarization.status`, and `speechrail.diarization.done`; reject `speechrail.diarization.update` and `speechrail.diarization.finalized`.
+- [x] Add failing decoder tests using only sanitized JSON for a Chinese-plus-emoji transcript. Assert that `attribution_units` tile the canonical transcript exactly in code points, each patch revision starts at 1 and advances by one, `unknown` has `speaker is None`, and `tentative`/`stable` have a nonempty anonymous speaker.
+- [x] Decode and retain top-level `event_id`, `session_id`, and `sequence`. Require every patch target to refer to a completed item from the same session. Reject duplicate/missing `segment_uid`, noncontiguous revision, malformed ratios, foreign session, and an update after `done`.
+- [x] Decode `done` with `finalization_id`, `status`, `through_sample`, `stable_through_sample`, and `last_update_sequence`. Require `finalization_id` to match Sona's one outstanding finish `event_id`. Do not treat `status=degraded` as a missing terminal event.
+- [x] Preserve OpenAI `.segment` decoding for ordinary ASR, but in an opted-in diarization session reject every `.segment` event as a double-write protocol violation.
+- [x] Run and pass:
 
 ```bash
 uv run pytest tests/asr/test_speechrail_events.py tests/asr/test_diarization_extension_contract.py -q
@@ -168,13 +177,13 @@ uv run pytest tests/asr/test_speechrail_events.py tests/asr/test_diarization_ext
 - Consumes: validated `ASREvent(kind="diarization")` with same-session `segment_uid` revisions after the corresponding fixed subtitle unit.
 - Produces: the existing `full_update` browser message and SRT with changed anonymous speaker display only; no meeting repository writes. Its clean current schema uses `lines[].speaker: str` for every subtitle line and adds `diarization: {"status": "off"|"active"|"degraded", "reason": str | null}`. The UI and producer change atomically; do not accept a number-or-string compatibility union or retain a legacy parser.
 
-- [ ] Write a failing subtitle-session test: completed units A/B first render as unknown; a `tentative` then `stable` update changes only the matching unit's speaker display. Assert text, start/end, source UID and ordering are unchanged, and the emitted `full_update` replaces the prior line rather than appending a duplicate.
-- [ ] Keep subtitle patch state keyed by `(source_session_id, segment_uid)` with contiguous revision validation. A patch for an unknown UID, a foreign session, a revision gap or a post-done update is a bounded protocol failure: retain already confirmed subtitle text, mark the subtitle stream degraded and do not infer a speaker.
-- [ ] Render anonymous subtitle speakers as an explicit session/epoch-scoped display label (for example `会话 2 · A`) so a reconnect with another A cannot appear to be the same person. Convert every subtitle presenter speaker value to the one `str` wire type, update `subtitleStore` and `SubtitleStream` to render/hash the string safely, and use a reserved anonymous unknown label. Neither SRT nor UI may persist a human name, candidate or `speaker_links` value.
-- [ ] Extend the existing `full_update` payload with `diarization.status` (`off`, `active`, or `degraded`) and a sanitized optional reason. Update the store/component to show the current state without creating a parallel browser event channel. Normal subtitles emit `off`; opt-in success emits `active`; unavailable, malformed-wire, lost-done and terminal degraded outcomes emit `degraded` while retaining the latest confirmed text.
-- [ ] Replace `StandardSubtitleSession.close_stream()`'s direct cancellation with a graceful drain for an opted-in stream: stop acceptance, await the sent PCM queue, send exactly one finish, keep the receive loop alive through all tail updates and done, persist the final full snapshot/SRT, then clear and close. If done times out or the extension is degraded, persist the latest canonical subtitle/SRT and publish a bounded degraded state; do not invoke a second diarizer.
-- [ ] Add a reconnect test where two subtitle sessions both return A. Their labels must be distinct by epoch/session, and neither session may patch the other session's lines. Add UI/store tests that reject numeric speaker payloads, render the scoped string label and visibly expose `degraded`. Add a disabled-subtitle control test proving no `speechrail` request or diarization event handling occurs.
-- [ ] Run and pass:
+- [x] Write a failing subtitle-session test: completed units A/B first render as unknown; a `tentative` then `stable` update changes only the matching unit's speaker display. Assert text, start/end, source UID and ordering are unchanged, and the emitted `full_update` replaces the prior line rather than appending a duplicate.
+- [x] Keep subtitle patch state keyed by `(source_session_id, segment_uid)` with contiguous revision validation. A patch for an unknown UID, a foreign session, a revision gap or a post-done update is a bounded protocol failure: retain already confirmed subtitle text, mark the subtitle stream degraded and do not infer a speaker.
+- [x] Render anonymous subtitle speakers as an explicit session/epoch-scoped display label (for example `会话 2 · A`) so a reconnect with another A cannot appear to be the same person. Convert every subtitle presenter speaker value to the one `str` wire type, update `subtitleStore` and `SubtitleStream` to render/hash the string safely, and use a reserved anonymous unknown label. Neither SRT nor UI may persist a human name, candidate or `speaker_links` value.
+- [x] Extend the existing `full_update` payload with `diarization.status` (`off`, `active`, or `degraded`) and a sanitized optional reason. Update the store/component to show the current state without creating a parallel browser event channel. Normal subtitles emit `off`; opt-in success emits `active`; unavailable, malformed-wire, lost-done and terminal degraded outcomes emit `degraded` while retaining the latest confirmed text.
+- [x] Replace `StandardSubtitleSession.close_stream()`'s direct cancellation with a graceful drain for an opted-in stream: stop acceptance, await the sent PCM queue, send exactly one finish, keep the receive loop alive through all tail updates and done, persist the final full snapshot/SRT, then clear and close. If done times out or the extension is degraded, persist the latest canonical subtitle/SRT and publish a bounded degraded state; do not invoke a second diarizer.
+- [x] Add a reconnect test where two subtitle sessions both return A. Their labels must be distinct by epoch/session, and neither session may patch the other session's lines. Add UI/store tests that reject numeric speaker payloads, render the scoped string label and visibly expose `degraded`. Add a disabled-subtitle control test proving no `speechrail` request or diarization event handling occurs.
+- [x] Run and pass:
 
 ```bash
 uv run pytest tests/test_subtitle_components.py tests/test_subtitle_send_gaps.py tests/asr/test_proxy_contract.py -q
@@ -204,12 +213,12 @@ cd ui && npm test -- --run SubtitleStream.test.tsx
 - Consumes: completed item before all updates targeting its `segment_uid`.
 - Produces: existing `SpeakerPatchEvent` / repository speaker-only transaction with the new wire event names and fields.
 
-- [ ] Write a failing repository test that appends three completed items, applies an update to the middle item's unit, and verifies the id, order, text, timing and source identity of all three items are byte-for-byte unchanged. Replay of the same event is idempotent; same event id with a different payload is rejected.
-- [ ] Write a failing meeting test where a user has manually named/corrected a segment. A later `tentative` then `stable` update must update model evidence only; the displayed/persisted manual speaker remains unchanged. An `unknown` patch must display the reserved unknown state and never manufacture a person.
-- [ ] Convert the new wire event into the existing domain transaction only after session id, source item, unit tiling, and revision checks pass. Maintain a meeting-local mapping from the anonymous session label to an opaque Sona speaker key. Ignore `speaker_links` and candidates for identity resolution.
-- [ ] Add a reconnect test with two SpeechRail session ids both using `A`. They must create distinct opaque Sona speaker keys and never inherit each other's automatic or manual label. A manual correction remains attached only to its immutable item identity.
-- [ ] Delete `group_generation` and `speaker_links` semantics from Sona domain types, group remapping and every legacy batch overlay invocation. Delete `src/sona/meeting/diarization_overlay.py`, `src/sona/speechrail/batch_transcriber.py`, their unit tests, and their `app_context` construction; remove `diarization_overlay_enabled` from the runtime protocol. Retain no second diarization producer. Historical rows remain readable as historical data, but no running code may select their legacy contract path.
-- [ ] Run and pass:
+- [x] Write a failing repository test that appends three completed items, applies an update to the middle item's unit, and verifies the id, order, text, timing and source identity of all three items are byte-for-byte unchanged. Replay of the same event is idempotent; same event id with a different payload is rejected.
+- [x] Write a failing meeting test where a user has manually named/corrected a segment. A later `tentative` then `stable` update must update model evidence only; the displayed/persisted manual speaker remains unchanged. An `unknown` patch must display the reserved unknown state and never manufacture a person.
+- [x] Convert the new wire event into the existing domain transaction only after session id, source item, unit tiling, and revision checks pass. Maintain a meeting-local mapping from the anonymous session label to an opaque Sona speaker key. Ignore `speaker_links` and candidates for identity resolution.
+- [x] Add a reconnect test with two SpeechRail session ids both using `A`. They must create distinct opaque Sona speaker keys and never inherit each other's automatic or manual label. A manual correction remains attached only to its immutable item identity.
+- [x] Delete `group_generation` and `speaker_links` semantics from Sona domain types, group remapping and every legacy batch overlay invocation. Delete `src/sona/meeting/diarization_overlay.py`, `src/sona/speechrail/batch_transcriber.py`, their unit tests, and their `app_context` construction; remove `diarization_overlay_enabled` from the runtime protocol. Retain no second diarization producer. Historical rows remain readable as historical data, but no running code may select their legacy contract path.
+- [x] Run and pass:
 
 ```bash
 uv run pytest tests/test_speaker_attribution.py tests/test_meeting_session.py tests/test_ui_app_context.py tests/test_runtime_events.py -q
@@ -228,12 +237,12 @@ uv run pytest tests/test_speaker_attribution.py tests/test_meeting_session.py te
 - Consumes: `speechrail.diarization.done.last_update_sequence`.
 - Produces: meeting diarization state `complete` for `done.status=complete`, `degraded` for `done.status=degraded` or the prior status event.
 
-- [ ] Write a failing EOF ordering test: final capture/commit drains first, Sona emits exactly one finish, receives two tail `updated` events, then `done`; the finalizer must wait until the repository watermark reaches `last_update_sequence` before transcript finalization or minutes creation.
-- [ ] Write failing negative tests for a lost `done`, mismatched `finalization_id`, `done` before an outstanding patch persists, and `status=degraded`. The first three must end in the documented bounded degraded outcome without leaving a task pending; the last must still finalize a readable meeting with anonymous `unknown` attribution where necessary.
-- [ ] Replace all `finalized`/legacy clear-barrier checks with the new `done` barrier. Only a meeting that did not request `diarization_enabled`, or whose opt-in was explicitly persisted as unavailable/degraded before capture, has no diarization barrier; neither case may use old protocol or batch work.
-- [ ] Make the unavailable path concrete: expose `diarization_unavailable_reason` on the stream, have `_diarization_barrier` persist `finalize_diarization(status="degraded", reason=...)` and return without sending finish, and leave standard capture cleanup unchanged. All other requested-and-enabled meetings send finish and require done.
-- [ ] Ensure cleanup remains at-most-once. A failure of diarization must preserve completed ASR text and must not retrigger capture, batch diarization, or summary creation before the terminal decision.
-- [ ] Run and pass:
+- [x] Write a failing EOF ordering test: final capture/commit drains first, Sona emits exactly one finish, receives two tail `updated` events, then `done`; the finalizer must wait until the repository watermark reaches `last_update_sequence` before transcript finalization or minutes creation.
+- [x] Write failing negative tests for a lost `done`, mismatched `finalization_id`, `done` before an outstanding patch persists, and `status=degraded`. The first three must end in the documented bounded degraded outcome without leaving a task pending; the last must still finalize a readable meeting with anonymous `unknown` attribution where necessary.
+- [x] Replace all `finalized`/legacy clear-barrier checks with the new `done` barrier. Only a meeting that did not request `diarization_enabled`, or whose opt-in was explicitly persisted as unavailable/degraded before capture, has no diarization barrier; neither case may use old protocol or batch work.
+- [x] Make the unavailable path concrete: expose `diarization_unavailable_reason` on the stream, have `_diarization_barrier` persist `finalize_diarization(status="degraded", reason=...)` and return without sending finish, and leave standard capture cleanup unchanged. All other requested-and-enabled meetings send finish and require done.
+- [x] Ensure cleanup remains at-most-once. A failure of diarization must preserve completed ASR text and must not retrigger capture, batch diarization, or summary creation before the terminal decision.
+- [x] Run and pass:
 
 ```bash
 uv run pytest tests/test_meeting_finalization.py tests/asr/test_speechrail_realtime.py -q
@@ -254,11 +263,11 @@ uv run pytest tests/test_meeting_finalization.py tests/asr/test_speechrail_realt
 - Create: `docs/operations/speechrail-openai-diarization-integration-acceptance.md`
 - Test: `tests/test_diarization_e2e.py`
 
-- [ ] Replace all old `v1`, `update`, `finalized`, `group_id`, legacy fallback, four-combination compatibility, and post-recording batch-overlay instructions with the target protocol table in this card. Move the replaced implementation reports to the historical archive only if the repository's documentation convention requires retaining them; no active document may claim the old literals work against current SpeechRail.
-- [ ] Add fake end-to-end coverage for both modes. Meeting sequence: opt-in → completed item 1 → completed item 2 → update item 1 → manual correction item 1 → stable update item 1 → finish → tail update item 2 → done. Subtitle sequence: opt-in → completed unit → update → reconnect with same A label → finish → tail update → done. Verify immutable text/timings, session separation, final SRT and, for meetings, persisted watermark and minutes input.
-- [ ] Add normal-ASR control tests proving that a subtitle/assistant connection with its diarization setting disabled sends no `speechrail` session field and succeeds with the unchanged OpenAI event stream.
-- [ ] With an authorized ready SpeechRail runtime, run one sanitized short multi-speaker meeting and one sanitized realtime subtitle session against `/v1/realtime`; record only commits/versions, contract fixture hashes, event ordering, terminal state and aggregate timings. Do not state DER, tail quality or long-run quality as passed unless the corresponding SpeechRail quality AC has evidence.
-- [ ] Run the complete Sona gate and inspect the actual result:
+- [x] Replace all old `v1`, `update`, `finalized`, `group_id`, legacy fallback, four-combination compatibility, and post-recording batch-overlay instructions with the target protocol table in this card. Move the replaced implementation reports to the historical archive only if the repository's documentation convention requires retaining them; no active document may claim the old literals work against current SpeechRail.
+- [x] Add fake end-to-end coverage for both modes. Meeting sequence: opt-in → completed item 1 → completed item 2 → update item 1 → manual correction item 1 → stable update item 1 → finish → tail update item 2 → done. Subtitle sequence: opt-in → completed unit → update → reconnect with same A label → finish → tail update → done. Verify immutable text/timings, session separation, final SRT and, for meetings, persisted watermark and minutes input.
+- [x] Add normal-ASR control tests proving that a subtitle/assistant connection with its diarization setting disabled sends no `speechrail` session field and succeeds with the unchanged OpenAI event stream.
+- [x] With an authorized ready SpeechRail runtime, run one sanitized short two-source meeting capture and one sanitized realtime subtitle session against `/v1/realtime`; record only commits/versions, contract fixture hashes, event ordering, terminal state and aggregate timings. Do not state DER, tail quality or long-run quality as passed unless the corresponding SpeechRail quality AC has evidence.
+- [x] Run the complete Sona gate and inspect the actual result:
 
 ```bash
 uv run pytest
@@ -269,22 +278,27 @@ git diff --check
 
 ## Acceptance Criteria
 
-- [ ] **AC-S1:** Any enabled meeting or subtitle session sends exactly one pre-PCM `session.speechrail.diarization.enabled=true`; exact `session.updated` echo is required.
-- [ ] **AC-S2:** Every session first confirms its existing standard OpenAI ASR configuration. Disabled Sona OpenAI SDK/Realtime consumers send no diarization extension and have no behavior change.
-- [ ] **AC-S3:** Every accepted update targets one immutable, same-session completed attribution unit; canonical transcript and timings never change.
-- [ ] **AC-S4:** A–D labels remain anonymous and meeting/session scoped. No automatic human identity, voiceprint, cross-meeting linkage or persistence of `speaker_links` occurs.
-- [ ] **AC-S5:** Manual corrections always outrank any `tentative`, `stable`, `unknown` or degraded update.
-- [ ] **AC-S5a:** Subtitle updates replace only the matching `(session_id, segment_uid)` anonymous speaker display; every `full_update.lines[].speaker` is a session/epoch-scoped string label, subtitle text, timing, order and SRT body never change, and reconnects do not share A–D labels.
-- [ ] **AC-S5b:** Every subtitle `full_update` exposes `diarization.status=off|active|degraded`; the UI renders the state, and its parser rejects the replaced numeric speaker shape.
-- [ ] **AC-S6:** Old fields and literals are rejected deterministically; source has no dual-protocol, batch-overlay module, configuration, runtime wiring or compatibility matrix.
-- [ ] **AC-S7:** EOF sends one finish, accepts all updates before done, persists through `last_update_sequence`, and only then creates the final transcript/minutes.
-- [ ] **AC-S7a:** Subtitle stop drains queued PCM, sends one finish, applies every tail update through done, then writes the final SRT and closes the stream.
-- [ ] **AC-S8:** `status=degraded`, lost done and malformed wire data preserve canonical ASR text, reach a bounded visible terminal state, and leave no hanging meeting, subtitle or finalizer task.
-- [ ] **AC-S8a:** An opt-in rejected as unavailable leaves baseline ASR active, records one explicit degraded reason for the relevant mode, and never issues legacy events, batch requests or a second diarization attempt.
-- [ ] **AC-S9:** Fake protocol, transaction and full Sona quality gates pass; authorized joint smoke has a saved sanitized acceptance record.
+- [x] **AC-S1:** Any enabled meeting or subtitle session sends exactly one pre-PCM `session.speechrail.diarization.enabled=true`; exact `session.updated` echo is required.
+- [x] **AC-S2:** Every session first confirms its existing standard OpenAI ASR configuration. Disabled Sona OpenAI SDK/Realtime consumers send no diarization extension and have no behavior change.
+- [x] **AC-S3:** Every accepted update targets one immutable, same-session completed attribution unit; canonical transcript and timings never change.
+- [x] **AC-S4:** A–D labels remain anonymous and meeting/session scoped. No automatic human identity, voiceprint, cross-meeting linkage or persistence of `speaker_links` occurs.
+- [x] **AC-S5:** Manual corrections always outrank any `tentative`, `stable`, `unknown` or degraded update.
+- [x] **AC-S5a:** Subtitle updates replace only the matching `(session_id, segment_uid)` anonymous speaker display; every `full_update.lines[].speaker` is a session/epoch-scoped string label, subtitle text, timing, order and SRT body never change, and reconnects do not share A–D labels.
+- [x] **AC-S5b:** Every subtitle `full_update` exposes `diarization.status=off|active|degraded`; the UI renders the state, and its parser rejects the replaced numeric speaker shape.
+- [x] **AC-S6:** Old fields and literals are rejected deterministically; source has no dual-protocol, batch-overlay module, configuration, runtime wiring or compatibility matrix.
+- [x] **AC-S7:** EOF sends one finish, accepts all updates before done, persists through `last_update_sequence`, and only then creates the final transcript/minutes.
+- [x] **AC-S7a:** Subtitle stop drains queued PCM, sends one finish, applies every tail update through done, then writes the final SRT and closes the stream.
+- [x] **AC-S8:** `status=degraded`, lost done and malformed wire data preserve canonical ASR text, reach a bounded visible terminal state, and leave no hanging meeting, subtitle or finalizer task.
+- [x] **AC-S8a:** An opt-in rejected as unavailable leaves baseline ASR active, records one explicit degraded reason for the relevant mode, and never issues legacy events, batch requests or a second diarization attempt.
+- [x] **AC-S9:** Fake protocol, transaction and full Sona quality gates pass; authorized joint smoke has a saved sanitized acceptance record.
 
 ## Handoff / External Preconditions
 
 Development and fake acceptance can proceed immediately. The only external prerequisite for the joint smoke is a SpeechRail checkout/runtime that exposes the contract listed above and has a ready diarization profile. If that profile is unavailable, record `diarization_not_available` as the expected integration precondition failure; do not revive the old protocol or deploy a local model in Sona.
 
 The joint smoke does not close SpeechRail's quality gates for tail speech, DER/cpCER, long files, two-hour resource behavior, or RTTM/UEM corpus scoring. Those remain owned by SpeechRail's current diarization acceptance matrix and its quality-evaluation handoff.
+
+当前已验证的外部前置条件不是假设：SpeechRail v2.0.2 `/health` 与 `/readyz` 报告 ready，`realtime_vad`
+ready，默认 `server_vad` meeting handshake/smoke 已通过；完整短语音的字幕 stop 已验证尾部 `updated → done`、单次
+`finish`、最终 SRT 和 stopped 清理。Sona 未修改 SpeechRail 工作树，也未放宽 `tentative/stable` 的 speaker 约束。
+SpeechRail 的 DER/cpCER、长文件、两小时资源行为和 RTTM/UEM 仍属于其独立质量验收范围，不在本任务 AC 中宣称通过。

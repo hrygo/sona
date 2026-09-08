@@ -33,7 +33,9 @@ class SrtArchive:
 
     def persist_confirmed(self, payload: Mapping[str, object]) -> None:
         """confirmed 快照变化时原子替换 current.srt；partial-only 不落盘。"""
-        signature = self.confirmed_signature(payload)
+        # speaker-only patches are a browser projection change; SRT body has no
+        # speaker field and must not be rewritten for that change alone.
+        signature = self._srt_signature(payload)
         if not signature or signature == self._persisted_confirmed_signature:
             return
         output = self._render_srt(self._confirmed_lines(payload))
@@ -74,12 +76,24 @@ class SrtArchive:
 
     @staticmethod
     def confirmed_signature(payload: Mapping[str, object]) -> tuple[tuple[str, ...], ...]:
-        """返回 confirmed 行的不可变签名，用于广播与落盘去重。"""
+        """返回含 speaker 的快照签名，用于浏览器广播去重。"""
         return tuple(
             (
                 str(line.get("start") or ""),
                 str(line.get("end") or ""),
                 str(line.get("speaker") if line.get("speaker") is not None else ""),
+                str(line.get("text") or ""),
+            )
+            for line in SrtArchive._confirmed_lines(payload)
+        )
+
+    @staticmethod
+    def _srt_signature(payload: Mapping[str, object]) -> tuple[tuple[str, ...], ...]:
+        """返回 SRT 正文签名；speaker 修订不触发文件重写。"""
+        return tuple(
+            (
+                str(line.get("start") or ""),
+                str(line.get("end") or ""),
                 str(line.get("text") or ""),
             )
             for line in SrtArchive._confirmed_lines(payload)

@@ -5,26 +5,27 @@ import {
   isStandaloneFiller,
   reduceSubtitleSnapshot,
   toSRT,
+  type SubtitleReducerState,
+  type SubtitleSnapshot,
 } from "./subtitleStore";
 
 describe("formatSpeaker", () => {
-  it("formats positive and zero speaker IDs cleanly", () => {
-    expect(formatSpeaker(0)).toBe("说话人 0");
-    expect(formatSpeaker(1)).toBe("说话人 1");
-    expect(formatSpeaker(2)).toBe("说话人 2");
+  it("preserves scoped anonymous speaker labels", () => {
+    expect(formatSpeaker("会话 1 · A")).toBe("会话 1 · A");
+    expect(formatSpeaker("会话 1 · B")).toBe("会话 1 · B");
   });
 
-  it("normalizes negative or unassigned speaker IDs to 0 instead of 未知", () => {
-    expect(formatSpeaker(-1)).toBe("说话人 0");
-    expect(formatSpeaker(-2)).toBe("说话人 0");
+  it("uses a reserved label for an empty speaker", () => {
+    expect(formatSpeaker("")).toBe("未识别说话人");
   });
 });
 
 describe("subtitle snapshot reducer", () => {
   it("replaces confirmed lines and accepts an empty partial", () => {
-    const previous = {
-      lines: [{ speaker: 0, text: "旧", start: "00:00:00", end: "00:00:01" }],
+    const previous: SubtitleReducerState = {
+      lines: [{ speaker: "会话 1 · A", text: "旧", start: "00:00:00", end: "00:00:01" }],
       partial: "处理中",
+      diarization: { status: "active", reason: null },
     };
 
     const next = reduceSubtitleSnapshot(previous, { lines: [], buffer_transcription: "" });
@@ -34,23 +35,25 @@ describe("subtitle snapshot reducer", () => {
   });
 
   it("filters out old raw lines when clearedOffset is set", () => {
-    const previous = {
+    const previous: SubtitleReducerState = {
       rawLines: [
-        { speaker: 0, text: "第一句", start: "00:00:00", end: "00:00:01" },
-        { speaker: 1, text: "第二句", start: "00:00:01", end: "00:00:02" },
+        { speaker: "会话 1 · A", text: "第一句", start: "00:00:00", end: "00:00:01" },
+        { speaker: "会话 1 · B", text: "第二句", start: "00:00:01", end: "00:00:02" },
       ],
       lines: [],
       partial: "",
+      diarization: { status: "active", reason: null },
       clearedOffset: 2,
     };
 
-    const snapshotWithNewLines = {
+    const snapshotWithNewLines: Partial<SubtitleSnapshot> = {
       lines: [
-        { speaker: 0, text: "第一句", start: "00:00:00", end: "00:00:01" },
-        { speaker: 1, text: "第二句", start: "00:00:01", end: "00:00:02" },
-        { speaker: 0, text: "第三句 (新)", start: "00:00:02", end: "00:00:03" },
+        { speaker: "会话 1 · A", text: "第一句", start: "00:00:00", end: "00:00:01" },
+        { speaker: "会话 1 · B", text: "第二句", start: "00:00:01", end: "00:00:02" },
+        { speaker: "会话 1 · A", text: "第三句 (新)", start: "00:00:02", end: "00:00:03" },
       ],
       buffer_transcription: "正在说话",
+      diarization: { status: "active", reason: null },
     };
 
     const next = reduceSubtitleSnapshot(previous, snapshotWithNewLines);
@@ -64,7 +67,7 @@ describe("subtitle snapshot reducer", () => {
 describe("toSRT", () => {
   it("accepts dot and comma milliseconds and exports comma format", () => {
     const output = toSRT([
-      { speaker: 0, text: "第一句", start: "0:00:03.500", end: "0:00:04,125" },
+      { speaker: "会话 1 · A", text: "第一句", start: "0:00:03.500", end: "0:00:04,125" },
     ]);
 
     expect(output).toContain("00:00:03,500 --> 00:00:04,125");
@@ -95,18 +98,20 @@ describe("isStandaloneFiller", () => {
 
 describe("reduceSubtitleSnapshot filler suppression", () => {
   it("filters out standalone filler lines and suppresses standalone filler partial", () => {
-    const previous = {
+    const previous: SubtitleReducerState = {
       lines: [],
       partial: "",
+      diarization: { status: "off", reason: null },
     };
 
-    const snapshotWithFillers = {
+    const snapshotWithFillers: Partial<SubtitleSnapshot> = {
       lines: [
-        { speaker: 0, text: "嗯。", start: "00:00:01", end: "00:00:02" },
-        { speaker: 0, text: "啊。", start: "00:00:02", end: "00:00:03" },
-        { speaker: 0, text: "大家好，现在开会。", start: "00:00:03", end: "00:00:05" },
+        { speaker: "会话 1 · A", text: "嗯。", start: "00:00:01", end: "00:00:02" },
+        { speaker: "会话 1 · A", text: "啊。", start: "00:00:02", end: "00:00:03" },
+        { speaker: "会话 1 · A", text: "大家好，现在开会。", start: "00:00:03", end: "00:00:05" },
       ],
       buffer_transcription: "嗯。",
+      diarization: { status: "off", reason: null },
     };
 
     const next = reduceSubtitleSnapshot(previous, snapshotWithFillers);
@@ -119,9 +124,10 @@ describe("reduceSubtitleSnapshot filler suppression", () => {
   });
 
   it("preserves real partial text", () => {
-    const previous = {
+    const previous: SubtitleReducerState = {
       lines: [],
       partial: "",
+      diarization: { status: "off", reason: null },
     };
 
     const snapshot = {

@@ -278,19 +278,18 @@ def test_rejects_segment_with_non_string_speaker() -> None:
     assert excinfo.value.code == "SPEECHRAIL_DIARIZATION_PROTOCOL_ERROR"
 
 
-def test_rejects_segment_with_bad_speaker_prefix() -> None:
-    with pytest.raises(SpeechRailProtocolError) as excinfo:
-        decode_transcription_event(
-            _event(
-                type="conversation.item.input_audio_transcription.segment",
-                text="你好",
-                start=0.0,
-                end=1.0,
-                speaker="speaker_1",
-            )
+def test_preserves_ordinary_string_speaker_without_requiring_a_legacy_prefix() -> None:
+    decoded = decode_transcription_event(
+        _event(
+            type="conversation.item.input_audio_transcription.segment",
+            text="你好",
+            start=0.0,
+            end=1.0,
+            speaker="speaker_1",
         )
+    )
 
-    assert excinfo.value.code == "SPEECHRAIL_DIARIZATION_PROTOCOL_ERROR"
+    assert decoded.speaker == "speaker_1"  # type: ignore[union-attr]
 
 
 def test_rejects_error_without_error_field() -> None:

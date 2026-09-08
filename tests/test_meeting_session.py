@@ -28,7 +28,7 @@ from sona.meeting.speaker_attribution import CompletedItem, SpeakerPatchResult
 from sona.speechrail.transcription_events import (
     DiarizationCandidate,
     DiarizationUpdate,
-    DiarizationUpdateEvent,
+    DiarizationUpdatedEvent,
 )
 
 
@@ -213,13 +213,13 @@ async def test_prepare_creates_record_and_listeners_without_activating_or_publis
     assert len(gateway.listeners) == 1
     assert len(gateway.gap_listeners) == 1
     gateway.prepare_capture.assert_awaited_once_with(
-        f"meeting:{preparation.record.id}", timeout_secs=5.0, speaker_count_hint=None
+        f"meeting:{preparation.record.id}", timeout_secs=5.0
     )
     gateway.commit_capture.assert_not_called()
     publish.assert_not_awaited()
 
 
-async def test_prepare_passes_max_speakers_as_a_speechrail_hint(
+async def test_prepare_does_not_forward_max_speakers_to_speechrail(
     repository: FakeRepository, gateway: FakeGateway
 ) -> None:
     session = MeetingSession(repository, gateway, event_publisher=AsyncMock())
@@ -228,7 +228,6 @@ async def test_prepare_passes_max_speakers_as_a_speechrail_hint(
     gateway.prepare_capture.assert_awaited_once_with(
         f"meeting:{preparation.record.id}",
         timeout_secs=5.0,
-        speaker_count_hint=2,
     )
 
 
@@ -1514,8 +1513,10 @@ async def test_on_diarization_event_dispatches_speaker_patch(
     session = MeetingSession(repository, gateway, event_publisher=publish)
     await _start_session(session)
 
-    diarization_event = DiarizationUpdateEvent(
-        group_generation="gen_1",
+    diarization_event = DiarizationUpdatedEvent(
+        event_id="evt_202",
+        session_id="sess_101",
+        sequence=5,
         stable_through_sample=16000,
         updates=(
             DiarizationUpdate(
@@ -1528,16 +1529,9 @@ async def test_on_diarization_event_dispatches_speaker_patch(
                 candidates=(DiarizationCandidate(speaker="spk_01", support_ratio=0.95),),
             ),
         ),
-        speaker_links=(),
     )
-    payload = {
-        "event": diarization_event,
-        "session_id": "sess_101",
-        "event_id": "evt_202",
-        "sequence": 5,
-    }
 
-    await session._on_diarization_event(payload)
+    await session._on_diarization_event(diarization_event)
 
     assert "apply_speaker_patches" in repository.calls
     assert repository.last_patch_event is not None
@@ -1558,17 +1552,15 @@ async def test_diarization_barrier_leaves_extensions_inactive_for_legacy_stream(
     session = MeetingSession(repository, gateway)
     await _start_session(session)
 
-    # 模拟纯 legacy stream：未协商扩展，无 diarization_finalized
+    # 模拟未请求分人的普通 stream：不启动 done 水位屏障。
     legacy_stream = SimpleNamespace(
-        extensions_negotiated=False,
-        diarization_finalized=None,
-        session_id="legacy_sess",
+        diarization_requested=False,
     )
     now = asyncio.get_running_loop().time()
     await session._diarization_barrier(legacy_stream, deadline=now + 10.0)
 
-    # 关键断言：legacy stream 绝对不能激活 extensions_active，否则 finalizer 会等待 30 秒超时！
-    assert session._diarization_gate_state.extensions_active is False
+    # 关键断言：普通 stream 绝对不能激活分人屏障。
+    assert session._diarization_gate_state.active is False
 
 
 async def test_on_diarization_event_handles_degraded_status(
@@ -1580,13 +1572,15 @@ async def test_on_diarization_event_handles_degraded_status(
     await _start_session(session)
 
     status_event = DiarizationStatusEvent(
+        event_id="evt_degraded",
+        session_id="sess_101",
+        sequence=6,
         status="degraded",
         reason="overloaded",
         since_sample=16000,
     )
-    payload = {"event": status_event}
 
-    await session._on_diarization_event(payload)
+    await session._on_diarization_event(status_event)
 
     # 关键断言：degraded 状态事件应立即记录到 repository
     assert any("finalize_diarization:degraded:overloaded" in call for call in repository.calls)

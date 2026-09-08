@@ -133,17 +133,22 @@ class SpeakerPatch(BaseModel):
 
 
 class SpeakerPatchEvent(BaseModel):
-    """一批归属修订（同连接顺序交付；一次事务一次版本）。"""
+    """一批归属修订（同一 session 顺序交付；一次事务一次版本）。"""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     source_session_id: str = Field(min_length=1, max_length=128)
     event_id: str = Field(min_length=1, max_length=128)
     sequence: int = Field(ge=0)
-    group_generation: str | None = Field(default=None, min_length=1, max_length=128)
     stable_through_sample: int = Field(ge=0)
     patches: tuple[SpeakerPatch, ...] = Field(default=(), max_length=256)
-    links: tuple[str, ...] = Field(default=(), max_length=16)
+
+    @model_validator(mode="after")
+    def _validate_unique_targets(self) -> SpeakerPatchEvent:
+        uids = [patch.segment_uid for patch in self.patches]
+        if len(uids) != len(set(uids)):
+            raise ValueError("同一分人事件不得重复修订 segment_uid")
+        return self
 
 
 class SpeakerPatchResult(BaseModel):
@@ -155,7 +160,7 @@ class SpeakerPatchResult(BaseModel):
     changed_segment_ids: tuple[UUID, ...] = ()
     transcript_revision: int = Field(ge=0)
     content_revision: int = Field(ge=0)
-    diarization_status: Literal["legacy", "active", "complete", "degraded"]
+    diarization_status: Literal["off", "active", "complete", "degraded"]
     # 受影响后缀（end_ms >= 最小被改 start 的完整段列表），供 presenter
     # 按既有 replace_from_ms 语义输出；空表示无可广播变更。
     segments: tuple[NormalizedSegment, ...] = ()
@@ -169,8 +174,7 @@ def segment_identity(meeting_id: UUID, session_id: str, segment_uid: str) -> UUI
 def speaker_source_key(meeting_id: UUID, session_id: str, source_speaker: str) -> str:
     """把 (session, 匿名标签) 解析为会议内不透明应用身份 UUID 字符串。
 
-    同一 session 内同标签恒同身份；跨 session 相同编号不合并，只有显式
-    speaker_link 且无人工冲突时才由上层建立关联。
+    同一 session 内同标签恒同身份；跨 session 相同标签永不自动合并。
     """
     return str(uuid5(meeting_id, f"{_SPEAKER_SOURCE_IDENTITY}:{session_id}:{source_speaker}"))
 
@@ -204,12 +208,9 @@ def patch_target_errors(
         if current is None:
             errors.append(f"unknown_uid:{patch.segment_uid}")
             continue
-        revision, frozen = current
+        revision, _frozen = current
         if patch.revision != revision + 1:
             errors.append(f"revision_gap:{patch.segment_uid}:{patch.revision}")
-            continue
-        if frozen and not allow_frozen:
-            errors.append(f"frozen:{patch.segment_uid}")
     return errors
 
 

@@ -34,6 +34,13 @@ class SubtitleSettings(BaseSettings):
         le=0.99,
         description="Realtime VAD 人声判定阈值（默认 0.65，有效滤除室内环境底噪误触发）",
     )
+    diarization_enabled: bool = Field(
+        default=False,
+        description=(
+            "是否在实时字幕 Realtime session 的首个 PCM 前启用 SpeechRail v2.0.0"
+            " namespaced diarization opt-in"
+        ),
+    )
 
     @field_validator("speechrail_url")
     @classmethod

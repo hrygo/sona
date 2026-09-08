@@ -11,18 +11,23 @@ import contextlib
 import logging
 import re
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
+from typing import Literal
 
 from sona.asr.contracts import ASREvent, ASRSessionContext, StreamingTranscriber
 from sona.asr.models import ASRSegment, ASRWindow
 from sona.asr.presenters import legacy_ready_payload, legacy_subtitle_payload
-from sona.meeting.diarization_overlay import meeting_diarization_group_id
 from sona.meeting.models import TranscriptWindow
 from sona.meeting.ports import (
     CaptureFinalizationTimeout,
     CaptureGap,
     CaptureLease,
+)
+from sona.speechrail.transcription_events import (
+    DiarizationDoneEvent,
+    DiarizationStatusEvent,
+    DiarizationUpdatedEvent,
 )
 
 logger = logging.getLogger(__name__)
@@ -33,6 +38,7 @@ CapturePayloadSink = Callable[[dict[str, object], bool], Awaitable[None]]
 WindowListener = Callable[[TranscriptWindow], Awaitable[None]]
 GapListener = Callable[["CaptureGap"], Awaitable[None]]
 DiarizationListener = Callable[[object], Awaitable[None]]
+DiarizationDisplayStatus = Literal["off", "active", "degraded"]
 
 # 兼容别名：同一对象定义只保留在 meeting/ports.py。
 CapturePreparation = CaptureLease
@@ -89,11 +95,6 @@ async def _wait_with_readiness(
             continue
         return False
     return True
-
-
-def _diarization_group_id(owner: str | None) -> str:
-    """Keep the application meeting identifier out of the public audio protocol."""
-    return meeting_diarization_group_id(owner)
 
 
 class SubtitleSessionState(StrEnum):
@@ -155,6 +156,9 @@ class StandardSubtitleSession:
         self._stream: StreamingTranscriber | None = None
         self._prepared: SubtitlePreparation | None = None
         self._committed = False
+        # close_stream() 的 opt-in EOF drain 期间保持 send loop 存活，避免
+        # 在 audio_queue.join() 前清除 committed 导致尾部 PCM 被静默丢弃。
+        self._closing = False
         self._supervisor_task: asyncio.Task[None] | None = None
         self._ready = asyncio.Event()
         self._active = asyncio.Event()
@@ -169,6 +173,11 @@ class StandardSubtitleSession:
         self._confirmed_segments: list[ASRSegment] = []
         self._last_confirmed_window: tuple[ASRSegment, ...] = ()
         self._partial = ""
+        self._diarization_status: DiarizationDisplayStatus = "off"
+        self._diarization_reason: str | None = None
+        self._diarization_done = False
+        self._diarization_revisions: dict[tuple[str, str], tuple[int, object]] = {}
+        self._source_session_id: str | None = None
         # 已激活但流未就绪（重连退避）期间丢弃的 PCM 字节；重连成功后一次性上报
         self._gap_dropped_bytes = 0
 
@@ -192,12 +201,25 @@ class StandardSubtitleSession:
     def epoch(self) -> int:
         return self._epoch
 
+    @property
+    def diarization_status(self) -> str:
+        return self._diarization_status
+
+    @property
+    def diarization_reason(self) -> str | None:
+        return self._diarization_reason
+
     def reset_flags(self) -> None:
         """start() 时清空会话事件。"""
         self._ready.clear()
         self._active.clear()
+        self._closing = False
         self._reset_transcript()
         self._reset_audio_timeline()
+        self._diarization_status = "off"
+        self._diarization_reason = None
+        self._diarization_done = False
+        self._diarization_revisions.clear()
 
     async def prepare(self, *, timeout_secs: float) -> SubtitlePreparation:
         """建立普通字幕流并等待 ready，但不接收 PCM。"""
@@ -258,25 +280,74 @@ class StandardSubtitleSession:
         await self.close_stream()
 
     async def close_stream(self) -> None:
-        """停用普通字幕：关闭任务与流、封存 epoch 并清空待发 PCM。"""
+        """停用普通字幕；opt-in 流先完成有限 EOF drain 再关闭。"""
         self._prepared = None
-        self._committed = False
-        self._active.clear()
-        self._gap_dropped_bytes = 0
-        task = self._supervisor_task
-        self._supervisor_task = None
-        if task is not None and task is not asyncio.current_task():
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+        was_committed = self._committed
         stream = self._stream
-        self._stream = None
-        if stream is not None:
-            with contextlib.suppress(Exception):
-                await stream.close()
-        await self._close_epoch()
-        self._reset_transcript()
-        self._drain_queue()
+        graceful = was_committed and stream is not None and self._should_graceful_finish(stream)
+        self._closing = graceful
+        if graceful:
+            # 保留 committed/active，让 _audio_send_loop 排空已有 PCM；
+            # push_audio 会因 _closing 拒绝新数据。
+            self._active.set()
+        else:
+            self._committed = False
+            self._active.clear()
+        self._gap_dropped_bytes = 0
+        try:
+            if graceful and stream is not None:
+                await self._graceful_finish(stream)
+        finally:
+            self._active.clear()
+            self._committed = False
+            self._closing = False
+            task = self._supervisor_task
+            self._supervisor_task = None
+            if task is not None and task is not asyncio.current_task():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+            stream = self._stream
+            self._stream = None
+            if stream is not None:
+                with contextlib.suppress(Exception):
+                    await stream.close()
+            await self._close_epoch()
+            self._reset_transcript()
+            self._drain_queue()
+
+    @staticmethod
+    def _should_graceful_finish(stream: StreamingTranscriber) -> bool:
+        return bool(
+            getattr(stream, "diarization_enabled", False)
+            or getattr(stream, "diarization_requested", False)
+        )
+
+    async def _graceful_finish(self, stream: StreamingTranscriber) -> None:
+        """让 finish/done 以及尾部 update 在关闭 supervisor 前完成。"""
+
+        try:
+            await self._audio_queue.join()
+            final_window = await stream.finish()
+            if getattr(stream, "diarization_status", "off") == "degraded":
+                self._mark_diarization_degraded(
+                    getattr(stream, "diarization_degraded_reason", None)
+                    or getattr(stream, "diarization_unavailable_reason", None)
+                    or "degraded"
+                )
+            self._record_confirmed_window(final_window)
+            await self._on_payload(legacy_subtitle_payload(self._full_window(final_window)))
+        except TimeoutError:
+            self._mark_diarization_degraded("finalization_timeout")
+            await self._on_payload(
+                legacy_subtitle_payload(self._current_window())
+            )
+        except Exception as exc:
+            logger.warning("StandardSubtitleSession: 字幕优雅停机失败: %s", exc)
+            self._mark_diarization_degraded("finalization_error")
+            await self._on_payload(
+                legacy_subtitle_payload(self._current_window())
+            )
 
     async def reset_stream(self) -> None:
         """clear_subtitles：关闭当前浏览器流而不封存 epoch。"""
@@ -298,6 +369,7 @@ class StandardSubtitleSession:
         if (
             not self._running()
             or not self._committed
+            or self._closing
         ):
             return
         self._input_ms += len(data) // 32
@@ -475,9 +547,12 @@ class StandardSubtitleSession:
             await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _audio_send_loop(self, stream: StreamingTranscriber) -> None:
-        while self._running() and self._stream is stream:
+        while (self._running() or self._closing) and self._stream is stream:
             await self._active.wait()
-            if not self._running() or self._stream is not stream:
+            if (
+                (not self._running() and not self._closing)
+                or self._stream is not stream
+            ):
                 return
             chunk = await self._audio_queue.get()
             sent = False
@@ -495,7 +570,7 @@ class StandardSubtitleSession:
                 self._audio_queue.task_done()
                 if (
                     not sent
-                    and self._running()
+                    and (self._running() or self._closing)
                     and self._committed
                     and self._stream is stream
                 ):
@@ -512,14 +587,20 @@ class StandardSubtitleSession:
         """只消费后端无关事件，并按完整领域窗口广播。"""
         self._on_last_event()
         if event.kind == "ready":
+            self._set_diarization_state_from_metadata(event.metadata)
             self._ready.set()
             await self._on_payload(legacy_ready_payload())
+            await self._on_payload(legacy_subtitle_payload(self._current_window()))
             return
         if event.kind == "error":
             self._on_last_error(event.error_message)
             await self._on_payload(
                 {"type": "error", "error": event.error_message or "ASR error"}
             )
+            return
+        if event.kind == "diarization":
+            self._handle_diarization_event(event.metadata.get("event"))
+            await self._on_payload(legacy_subtitle_payload(self._current_window()))
             return
         window = event.window
         if window is not None:
@@ -533,11 +614,112 @@ class StandardSubtitleSession:
             self._record_confirmed_window(window)
             await self._on_payload(legacy_subtitle_payload(self._full_window(window)))
 
+    def _set_diarization_state_from_metadata(self, metadata: object) -> None:
+        if not isinstance(metadata, dict):
+            return
+        status = metadata.get("diarization_status")
+        if status in {"off", "active", "degraded"}:
+            self._diarization_status = status
+        reason = metadata.get("diarization_reason")
+        if isinstance(reason, str) and reason.strip():
+            self._diarization_reason = reason.strip()
+            self._diarization_status = "degraded"
+
+    def _handle_diarization_event(self, event: object) -> None:
+        if isinstance(event, DiarizationUpdatedEvent):
+            if self._diarization_done:
+                self._mark_diarization_degraded("update_after_done")
+                return
+            for update in event.updates:
+                key = (event.session_id, update.segment_uid)
+                previous = self._diarization_revisions.get(key)
+                if previous is not None:
+                    if update.revision < previous[0] or (
+                        update.revision == previous[0] and update != previous[1]
+                    ):
+                        self._mark_diarization_degraded("revision_conflict")
+                        return
+                    if update.revision == previous[0]:
+                        continue
+                    if update.revision != previous[0] + 1:
+                        self._mark_diarization_degraded("revision_gap")
+                        return
+                elif update.revision != 1:
+                    self._mark_diarization_degraded("revision_gap")
+                    return
+                indices = [
+                    index
+                    for index, segment in enumerate(self._confirmed_segments)
+                    if segment.source_uid == update.segment_uid
+                    and segment.source_session_id == event.session_id
+                ]
+                if not indices:
+                    self._mark_diarization_degraded("unknown_segment_uid")
+                    return
+                for index in indices:
+                    segment = self._confirmed_segments[index]
+                    speaker_key = (
+                        "unknown"
+                        if update.status == "unknown"
+                        else f"session:{segment.source_epoch}:{update.speaker}"
+                    )
+                    self._confirmed_segments[index] = replace(
+                        segment, speaker_key=speaker_key
+                    )
+                self._diarization_revisions[key] = (update.revision, update)
+            if self._diarization_status != "degraded":
+                self._diarization_status = "active"
+            self._replace_last_window_speakers(event.session_id)
+            return
+        if isinstance(event, DiarizationStatusEvent):
+            self._mark_diarization_degraded(event.reason)
+            return
+        if isinstance(event, DiarizationDoneEvent):
+            self._diarization_done = True
+            if event.status == "degraded":
+                self._mark_diarization_degraded(event.reason or "degraded")
+            return
+        self._mark_diarization_degraded("protocol_error")
+
+    def _mark_diarization_degraded(self, reason: str) -> None:
+        self._diarization_status = "degraded"
+        self._diarization_reason = reason.strip() or "degraded"
+
+    def _replace_last_window_speakers(self, session_id: str) -> None:
+        if not self._last_confirmed_window:
+            return
+        by_uid = {
+            segment.source_uid: segment
+            for segment in self._confirmed_segments
+            if segment.source_session_id == session_id and segment.source_uid is not None
+        }
+        self._last_confirmed_window = tuple(
+            by_uid.get(segment.source_uid, segment)
+            if segment.source_session_id == session_id and segment.source_uid is not None
+            else segment
+            for segment in self._last_confirmed_window
+        )
+
+    def _current_window(self) -> ASRWindow:
+        return ASRWindow(
+            source_epoch=self._epoch,
+            partial=self._partial,
+            segments=tuple(self._confirmed_segments),
+            source_session_id=self._source_session_id,
+            diarization_status=self._diarization_status,
+            diarization_reason=self._diarization_reason,
+        )
+
     def _record_confirmed_window(self, window: ASRWindow) -> None:
         """累计 confirmed 段并保留窗口最新 partial。"""
         self._partial = "" if is_standalone_filler(window.partial) else window.partial
+        self._source_session_id = window.source_session_id or self._source_session_id
         incoming = tuple(
-            segment for segment in window.segments if not is_standalone_filler(segment.text)
+            replace(segment, source_session_id=window.source_session_id)
+            if window.source_session_id is not None and segment.source_uid is not None
+            else segment
+            for segment in window.segments
+            if not is_standalone_filler(segment.text)
         )
         if not incoming:
             return
@@ -598,12 +780,18 @@ class StandardSubtitleSession:
             partial_speaker_key=window.partial_speaker_key,
             segments=tuple(self._confirmed_segments),
             speaker_remap=window.speaker_remap,
+            source_session_id=window.source_session_id or self._source_session_id,
+            diarization_status=self._diarization_status,
+            diarization_reason=self._diarization_reason,
+            offset_ms=window.offset_ms,
         )
 
     def _reset_transcript(self) -> None:
         self._confirmed_segments.clear()
         self._last_confirmed_window = ()
         self._partial = ""
+        self._diarization_revisions.clear()
+        self._source_session_id = None
 
     def _reset_audio_timeline(self) -> None:
         self._offset_ms = 0
@@ -695,7 +883,6 @@ class MeetingCaptureSession:
         self._audio_ms = 0
         self._input_ms = 0
         self._accept_audio = False
-        self._speaker_count_hint: int | None = None
         self._active = asyncio.Event()
         self._ready = asyncio.Event()
         self._stream_available = asyncio.Event()
@@ -764,7 +951,6 @@ class MeetingCaptureSession:
         owner: str,
         *,
         timeout_secs: float,
-        speaker_count_hint: int | None = None,
     ) -> CapturePreparation:
         """建立会议流并等待 ready，但不接收 PCM。"""
         if self._owner is not None:
@@ -774,7 +960,6 @@ class MeetingCaptureSession:
         self._prepared = preparation
         self._epoch += 1
         self._offset_ms = 0
-        self._speaker_count_hint = speaker_count_hint
         self._audio_ms = 0
         self._input_ms = 0
         self._owner = owner
@@ -791,8 +976,6 @@ class MeetingCaptureSession:
                     source_epoch=self._epoch,
                     offset_ms=self._offset_ms,
                     purpose="meeting",
-                    speaker_count_hint=self._speaker_count_hint,
-                    diarization_group_id=_diarization_group_id(owner),
                 ),
             )
             self._stream = stream
@@ -853,12 +1036,10 @@ class MeetingCaptureSession:
                 self._active.clear()
                 final_window = await stream.finish()
                 self._last_window = self._to_transcript_window(final_window)
-                release = getattr(stream, "release_clear", None)
-                if release is not None and self.diarization_barrier is not None:
-                    # 扩展模式：stream.finish 只等到 Rail finalized；必须先等
-                    # 应用层把对应归属修订持久化（屏障），再发送 clear。
+                if self.diarization_barrier is not None:
+                    # v2 finish 已等待 SpeechRail done；应用层随后等待
+                    # last_update_sequence 对应的 speaker-only 事务落库。
                     await self.diarization_barrier(stream, deadline)
-                    await release(timeout_secs=max(0.0, deadline - loop.time()))
             elapsed_ms = (loop.time() - start_time) * 1000
             logger.info("会议 ASR 优雅冲刷完成，耗时 %.1f ms", elapsed_ms)
         except TimeoutError as exc:
@@ -869,9 +1050,11 @@ class MeetingCaptureSession:
                 timeout_secs,
             )
             last_window = self._last_window
+            await self._record_diarization_failure(stream)
             await self.close()
             raise FinalizationTimeoutError(last_window) from exc
         except BaseException:
+            await self._record_diarization_failure(stream)
             await self.close()
             raise
         result = self._last_window or TranscriptWindow(source_epoch=self._epoch)
@@ -886,6 +1069,15 @@ class MeetingCaptureSession:
         self._accept_audio = False
         self._active.clear()
         await self.close()
+
+    async def _record_diarization_failure(self, stream: StreamingTranscriber) -> None:
+        if (
+            self.diarization_barrier is None
+            or not getattr(stream, "diarization_requested", False)
+        ):
+            return
+        with contextlib.suppress(Exception):
+            await self.diarization_barrier(stream, asyncio.get_running_loop().time())
 
     async def push_audio(self, data: bytes) -> None:
         """会议租约已提交时接收 s16le 音频。"""
@@ -1058,8 +1250,6 @@ class MeetingCaptureSession:
                         source_epoch=self._epoch,
                         offset_ms=self._offset_ms,
                         purpose="meeting",
-                        speaker_count_hint=self._speaker_count_hint,
-                        diarization_group_id=_diarization_group_id(self._owner),
                     )
                 )
                 await stream.connect()
@@ -1084,7 +1274,10 @@ class MeetingCaptureSession:
             self._ready.set()
             return
         if event.kind == "diarization":
-            payload: object = dict(event.metadata)
+            payload = event.metadata.get("event")
+            if payload is None:
+                logger.warning("MeetingCaptureSession: 丢弃没有 typed event 的分人事件")
+                return
             for diarization_listener in tuple(self._diarization_listeners):
                 try:
                     await diarization_listener(payload)

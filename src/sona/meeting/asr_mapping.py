@@ -35,8 +35,8 @@ def meeting_sample(epoch_start: int, rail_sample: int) -> int:
 def to_transcript_window(window: ASRWindow) -> TranscriptWindow:
     """把 ASR 中立窗口投影为会议 TranscriptWindow。
 
-    legacy segment UUID 使用版本化种子，包含 source epoch、顺序、带会议 group
-    的 speaker key、绝对时间区间和文本；同一窗口重播保持 ID 稳定。扩展模式的
+    普通 segment UUID 使用版本化种子，包含 source epoch、顺序、speaker key、
+    绝对时间区间和文本；同一窗口重播保持 ID 稳定。扩展模式的
     归属单元（带 ``source_uid``）改用 ``source session + segment UID`` 派生稳定
     UUID——重连后的同编号 UID 不会误并身份。历史已落库 ID 不做迁移。
     """

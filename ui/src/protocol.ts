@@ -59,7 +59,6 @@ export interface RuntimeStateSnapshot {
     readonly inner_os_enabled: boolean;
     readonly inner_os_analysis_enabled: boolean;
     readonly inner_os_channel: "loopback_only";
-    readonly diarization_overlay_enabled?: boolean;
     readonly physical_output_enabled?: boolean;
   };
 }
@@ -197,9 +196,7 @@ function isRuntimeCapabilities(value: unknown): value is RuntimeStateSnapshot["c
     && typeof value.inner_os_enabled === "boolean"
     && typeof value.inner_os_analysis_enabled === "boolean"
     && value.inner_os_channel === "loopback_only"
-    && (value.physical_output_enabled === undefined || typeof value.physical_output_enabled === "boolean")
-    && (value.diarization_overlay_enabled === undefined
-      || typeof value.diarization_overlay_enabled === "boolean");
+    && (value.physical_output_enabled === undefined || typeof value.physical_output_enabled === "boolean");
 }
 
 function isRuntimeMode(value: unknown): value is RuntimeMode {

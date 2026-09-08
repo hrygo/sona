@@ -13,11 +13,6 @@ from fastapi import FastAPI
 from sona.config import Settings
 from sona.inference.scheduler import LocalInferenceScheduler
 from sona.lm_studio import LMStudioClient
-from sona.meeting.diarization_overlay import (
-    MeetingDiarizationOverlay,
-    overlay_gate_for_runtime,
-)
-from sona.meeting.diarization_smoother import DiarizationSmoother
 from sona.meeting.events import MeetingEventBroadcaster
 from sona.meeting.inner_os.model_client import InnerOSModelClient
 from sona.meeting.inner_os.repository import InnerOSExchangeRepository
@@ -30,7 +25,6 @@ from sona.meeting.repository import PostgresMeetingRepository
 from sona.meeting.runtime_mode import MeetingWorkload
 from sona.meeting.session import MeetingSession
 from sona.meeting.summary import MeetingSummaryClient, MeetingSummaryService
-from sona.speechrail.batch_transcriber import SpeechRailBatchTranscriber
 from sona.ui.runtime import UIRuntime
 
 logger = logging.getLogger(__name__)
@@ -173,21 +167,6 @@ async def initialize_meeting_backend(context: UIAppContext) -> bool:
                 )
             await context.meeting_events.publish_event(event_type, meeting_id, payload)
 
-        diarization_overlay: MeetingDiarizationOverlay | None = None
-        if overlay_gate_for_runtime(
-            overlay_enabled=settings.meeting.diarization_overlay_enabled,
-            extensions_enabled=settings.meeting.diarization_extensions_enabled,
-        ):
-            batch_transcriber = SpeechRailBatchTranscriber(
-                url=settings.subtitles.speechrail_url,
-                api_key=settings.subtitles.speechrail_api_key,
-                language=settings.subtitles.language,
-            )
-            diarization_overlay = MeetingDiarizationOverlay(
-                transcriber=batch_transcriber,
-                max_buffer_seconds=settings.meeting.diarization_overlay_max_buffer_secs,
-            )
-
         meeting_session = MeetingSession(
             repository,
             runtime.subtitle_proxy,
@@ -195,12 +174,6 @@ async def initialize_meeting_backend(context: UIAppContext) -> bool:
             finalization_timeout_secs=settings.meeting.finalization_timeout_secs,
             recovery_journal=journal,
             event_publisher=publish_meeting_event,
-            diarization_smoother=DiarizationSmoother(
-                enabled=settings.meeting.diarization_smoothing_enabled,
-                min_duration_ms=settings.meeting.diarization_min_duration_ms,
-                hangover_gap_ms=settings.meeting.diarization_hangover_gap_ms,
-            ),
-            diarization_overlay=diarization_overlay,
         )
         await summary_service.start()
 

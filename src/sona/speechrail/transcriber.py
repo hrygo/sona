@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import AsyncIterator, Mapping
+from typing import Literal
 from uuid import uuid4
 
 from sona.asr.contracts import ASRCapabilities, ASREvent, ASRSessionContext
@@ -42,6 +43,7 @@ __all__ = ["ConnectionFactory", "SpeechRailRealtimeClient", "SpeechRailStreaming
 _BYTES_PER_MS = 32
 _SAMPLES_PER_MS = 16
 UNKNOWN_SPEAKER_KEY = "unknown"
+DIARIZATION_DISPLAY_STATUS = Literal["off", "active", "degraded"]
 _MAX_TRACKED_UNITS = 8_192
 _MAX_TRACKED_ITEM_IDS = 64
 
@@ -106,6 +108,7 @@ class SpeechRailStreamingTranscriber:
         self._diarization_unavailable_reason: str | None = None
         self._diarization_degraded_reason: str | None = None
         self._diarization_done: DiarizationDoneEvent | None = None
+        self._diarization_done_received = False
         self._completed_item_ids: list[str] = []
         self._unit_updates: dict[str, tuple[int, tuple[object, ...], int]] = {}
         self._last_update_sequence = 0
@@ -144,7 +147,7 @@ class SpeechRailStreamingTranscriber:
         return self._diarization_done
 
     @property
-    def diarization_status(self) -> str:
+    def diarization_status(self) -> DIARIZATION_DISPLAY_STATUS:
         if self._diarization_degraded_reason or self._diarization_unavailable_reason:
             return "degraded"
         return "active" if self._diarization_enabled else "off"
@@ -234,6 +237,8 @@ class SpeechRailStreamingTranscriber:
                     self._last_window = ASRWindow(
                         source_epoch=self._context.source_epoch,
                         partial=self._partial_text,
+                        diarization_status=self.diarization_status,
+                        diarization_reason=self._diarization_reason(),
                     )
                     yield ASREvent(kind="snapshot", window=self._last_window)
                     continue
@@ -261,25 +266,44 @@ class SpeechRailStreamingTranscriber:
                     else:
                         self._diagnostics.record_empty_completed()
                     if self._diarization_enabled:
-                        final_window = self._extension_completed_window(decoded)
+                        try:
+                            final_window = self._extension_completed_window(decoded)
+                        except RuntimeError:
+                            self._diagnostics.record_protocol_error()
+                            yield self._mark_diarization_degraded("protocol_error")
+                            continue
                     else:
                         final_window = self._plain_completed_window(decoded)
                     yield ASREvent(kind="final", window=final_window)
                     continue
 
                 if isinstance(decoded, DiarizationUpdatedEvent):
+                    if self._diarization_done_received:
+                        yield self._mark_diarization_degraded("update_after_done")
+                        continue
                     if decoded.session_id != self.session_id:
                         yield self._mark_diarization_degraded("session_mismatch")
                         continue
-                    if not self._consume_diarization_update(decoded):
+                    valid_update, changed = self._consume_diarization_update(decoded)
+                    if not valid_update:
+                        yield self._mark_diarization_degraded(
+                            self._diarization_degraded_reason or "protocol_error"
+                        )
                         continue
                     self._last_update_sequence = max(
                         self._last_update_sequence, decoded.sequence
                     )
-                    yield ASREvent(kind="diarization", metadata={"event": decoded})
+                    if changed:
+                        yield ASREvent(kind="diarization", metadata={"event": decoded})
                     continue
 
                 if isinstance(decoded, DiarizationStatusEvent):
+                    if self._diarization_done_received:
+                        yield self._mark_diarization_degraded("status_after_done")
+                        continue
+                    if decoded.session_id != self.session_id:
+                        yield self._mark_diarization_degraded("session_mismatch")
+                        continue
                     yield self._mark_diarization_degraded(decoded.reason, event=decoded)
                     continue
 
@@ -287,10 +311,17 @@ class SpeechRailStreamingTranscriber:
                     if not self._finish_requested:
                         yield self._mark_diarization_degraded("unexpected_done", event=decoded)
                         continue
+                    self._diarization_done_received = True
                     self._diarization_done = decoded
                     self._last_update_sequence = max(
                         self._last_update_sequence, decoded.last_update_sequence
                     )
+                    if decoded.session_id != self.session_id:
+                        self._done_ready.set()
+                        yield self._mark_diarization_degraded(
+                            "session_mismatch", event=decoded
+                        )
+                        continue
                     if decoded.finalization_id != self._finish_event_id:
                         self._done_ready.set()
                         yield self._mark_diarization_degraded(
@@ -342,6 +373,10 @@ class SpeechRailStreamingTranscriber:
                 self._diarization_done.finalization_id != self._finish_event_id
             ):
                 raise RuntimeError("SPEECHRAIL_FINALIZATION_ID_MISMATCH")
+            if self._diarization_done is not None and (
+                self._diarization_done.session_id != self.session_id
+            ):
+                raise RuntimeError("SPEECHRAIL_SESSION_ID_MISMATCH")
         else:
             try:
                 await asyncio.wait_for(self._final_ready.wait(), self._finish_timeout_secs)
@@ -381,7 +416,12 @@ class SpeechRailStreamingTranscriber:
             raise
         self._pending_segments.clear()
         self._reset_active_item(decoded.item_id)
-        final_window = ASRWindow(source_epoch=self._context.source_epoch, segments=segments)
+        final_window = ASRWindow(
+            source_epoch=self._context.source_epoch,
+            segments=segments,
+            diarization_status=self.diarization_status,
+            diarization_reason=self._diarization_reason(),
+        )
         if segments:
             self._last_window = final_window
             self._last_confirmed_window = final_window
@@ -409,6 +449,8 @@ class SpeechRailStreamingTranscriber:
             source_session_id=self.session_id,
             completed_items=(completed,),
             offset_ms=self._context.offset_ms,
+            diarization_status=self.diarization_status,
+            diarization_reason=self._diarization_reason(),
         )
         self._last_window = final_window
         if segments:
@@ -469,31 +511,39 @@ class SpeechRailStreamingTranscriber:
                     text=text,
                     source_uid=unit.segment_uid,
                     timing_quality=unit.timing_quality,
+                    source_session_id=self.session_id,
                 )
             )
         return tuple(segments)
 
-    def _consume_diarization_update(self, event: DiarizationUpdatedEvent) -> bool:
+    def _consume_diarization_update(
+        self, event: DiarizationUpdatedEvent
+    ) -> tuple[bool, bool]:
         if event.stable_through_sample < 0:
             self._diarization_degraded_reason = "protocol_error"
-            return False
+            return False, False
+        changed = False
         for update in event.updates:
             tracked = self._unit_updates.get(update.segment_uid)
             if tracked is None:
                 self._diarization_degraded_reason = "unknown_segment_uid"
-                return False
+                return False, False
             last_revision, last_content, unit_end = tracked
             content = _update_content(update)
             if update.revision == last_revision:
                 if content != last_content:
                     self._diarization_degraded_reason = "revision_conflict"
-                    return False
+                    return False, False
                 continue
             if update.revision != last_revision + 1:
                 self._diarization_degraded_reason = "revision_gap"
-                return False
+                return False, False
             self._unit_updates[update.segment_uid] = (update.revision, content, unit_end)
-        return bool(event.updates)
+            changed = True
+        for segment_uid, (_, _, unit_end) in tuple(self._unit_updates.items()):
+            if unit_end <= event.stable_through_sample:
+                del self._unit_updates[segment_uid]
+        return bool(event.updates), changed
 
     def _mark_diarization_degraded(
         self,
@@ -507,12 +557,18 @@ class SpeechRailStreamingTranscriber:
         if event is not None:
             metadata["event"] = event
         else:
-            metadata["event"] = {
-                "status": "degraded",
-                "reason": reason,
-                "session_id": self.session_id,
-            }
+            metadata["event"] = DiarizationStatusEvent(
+                event_id=f"sona-status-{uuid4().hex}",
+                session_id=self.session_id or "unknown-session",
+                sequence=self._last_update_sequence,
+                status="degraded",
+                reason=reason,
+                since_sample=0,
+            )
         return ASREvent(kind="diarization", metadata=metadata)
+
+    def _diarization_reason(self) -> str | None:
+        return self._diarization_degraded_reason or self._diarization_unavailable_reason
 
     def _set_terminal_error(self, code: str, message: str) -> ASREvent:
         self._terminal_error = (code, message)
