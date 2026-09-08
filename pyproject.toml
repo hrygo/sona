@@ -1,6 +1,6 @@
 [project]
 name = "sona"
-version = "1.4.0"
+version = "1.5.0"
 description = "全本地实时语音交互 + 智能会议助手 + 实时语音字幕系统 (Apple Silicon / 中文优先 / 离线)"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"

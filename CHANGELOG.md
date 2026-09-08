@@ -1,5 +1,28 @@
 # Changelog
 
+## [1.5.0] - 2026-09-09
+
+### Added
+
+- 完成 SpeechRail v2 OpenAI Realtime 接入，会议与实时字幕支持独立启用的 namespaced diarization opt-in。
+- 增加持续分人事件解析、说话人原位修订、EOF `done` 水位屏障、最终 SRT 归档及人工更正优先保护。
+- 增加 SpeechRail v2.0.2 联合验收记录，覆盖协议、事务、前端、真实会议与字幕 smoke。
+
+### Changed
+
+- 统一升级产品版本号至 `1.5.0`（Python 包、前端控制台、后端 FastAPI 与 `uv.lock`）。
+- 更新中英文 README，明确 SpeechRail v2 运行前置、独立分人开关、健康检查与验收边界。
+
+### Fixed
+
+- 修复旧版分人 overlay、字典事件解包、已确认正文丢失及 legacy EOF 屏障悬挂等联调缺陷。
+- 完善实时音频采集、播放稳定性、静音环境转录和声音工坊链路的错误处理与用户反馈。
+
+### Verification
+
+- Python 全量测试、`mypy` strict、`ruff` 与前端测试/生产构建均通过；真实 SpeechRail v2.0.2 健康检查、会议及字幕 smoke 已完成。
+- SpeechRail 的 DER/cpCER、长文件/长时资源行为及 RTTM/UEM 质量不属于本版本验收范围。
+
 ## [1.4.0] - 2026-08-28
 
 ### Added
