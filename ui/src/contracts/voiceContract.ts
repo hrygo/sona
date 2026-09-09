@@ -1,5 +1,40 @@
 export type VoiceMode = "system" | "clone" | "instruction";
 
+export type VoiceQualityStatus = "unevaluated" | "pass" | "warn" | "reject";
+
+export interface VoiceReferenceQuality {
+  readonly duration_seconds?: number;
+  readonly sample_rate?: number;
+  readonly channels?: number;
+  readonly speech_active_ratio?: number;
+  readonly noise_floor_dbfs?: number;
+  readonly estimated_snr_db?: number;
+  readonly clipping_ratio?: number;
+  readonly leading_silence_seconds?: number;
+  readonly trailing_silence_seconds?: number;
+  readonly transcript_match?: number;
+}
+
+export interface VoiceSynthesisQuality {
+  readonly probe_count?: number;
+  readonly successful_probe_count?: number;
+  readonly active_rms_dbfs?: number;
+  readonly peak_dbfs?: number;
+  readonly chunk_jump_p95_db?: number;
+  readonly clipping_ratio?: number;
+  readonly deterministic?: boolean;
+}
+
+export interface VoiceQualityReport {
+  readonly policy_version: string;
+  readonly status: VoiceQualityStatus;
+  readonly run_id: string;
+  readonly tested_at: string;
+  readonly reference?: VoiceReferenceQuality;
+  readonly synthesis?: VoiceSynthesisQuality;
+  readonly failure_codes: readonly string[];
+}
+
 export interface VoiceCapabilities {
   readonly supports_speaker?: boolean;
   readonly supports_clone?: boolean;
@@ -34,6 +69,7 @@ export interface VoiceCatalogItem {
   readonly created_at?: number;
   readonly available?: boolean;
   readonly capabilities?: VoiceCapabilities;
+  readonly quality?: VoiceQualityReport;
 }
 
 export interface VoiceModelCatalogItem {

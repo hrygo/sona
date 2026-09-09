@@ -900,6 +900,24 @@
   box-shadow: 0 4px 14px rgba(16, 185, 129, 0.3);
 }
 
+.deck-quality-tag,
+.clone-candidate-hint {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--border-light);
+  border-radius: 999px;
+  color: var(--text-secondary);
+  font-size: 0.68rem;
+  font-weight: 700;
+  line-height: 1.4;
+  padding: 0.12rem 0.42rem;
+}
+
+.deck-quality-tag.quality-pass { border-color: rgba(5, 150, 105, 0.55); color: #047857; }
+.deck-quality-tag.quality-warn { border-color: rgba(180, 83, 9, 0.6); color: #92400e; }
+.deck-quality-tag.quality-reject { border-color: rgba(185, 28, 28, 0.6); color: #b91c1c; }
+.clone-candidate-hint { padding: 0.45rem 0.65rem; }
+
 [data-theme="light"] .btn-apply-success {
   background: #047857;
   border-color: #065f46;

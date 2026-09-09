@@ -152,6 +152,7 @@ graph TD
 | [全链路语音交互与会议助手-技术方案与实施方案](architecture/全链路语音交互与会议助手-技术方案与实施方案.md) | 🟢 `active` | `architecture` | `v1.1.0` | **完整技术方案与实施路径**：当前 v2.0.3 边界、400/900ms VAD、断句/分人/对账、前沿调研与历史路线 |
 | [实时语音交互与字幕-方案与最佳实践](architecture/实时语音交互与字幕-方案与最佳实践.md) | 🟢 `active` | `architecture` | `v2.3.0` | SpeechRail OpenAI Realtime `/v1/realtime` 语音交互与字幕技术方案、单 PCM owner 仲裁契约及验收边界 |
 | [声学防回声与全双工交互设计方案](architecture/声学防回声与全双工交互设计方案.md) | 🟣 `implemented` | `architecture` | `v1.1` | 后端 L1/L2 防回声与 SubtitleProxy 音频门控；UI 融合仍标注为后续设计项 |
+| [Sona 克隆音色质量闭环与声音工坊自量保障设计](architecture/voice-clone-quality-closed-loop.md) | 🟠 `under_review` | `technical_spec` | `v1.0.0` | 录音预检、SpeechRail 权威质量报告、固定 probe、清空/重启闭环、UI/UX 与噪声归因 |
 
 ### 2. 专项技术方案与深度设计 (`docs/solutions/`)
 

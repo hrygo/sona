@@ -513,7 +513,20 @@ function stubCloneFetch(): CloneFetchResult {
   const cloneBodies: FormData[] = [];
   const fetchMock = vi.fn(async (url: unknown, init?: RequestInit) => {
     const path = String(url);
-    if (path.includes("/v1/voices/clone") && init?.method === "POST") {
+    if (path.includes("/quality-runs") && init?.method === "POST") {
+      return {
+        ok: true,
+        json: async () => ({
+          policy_version: "voice_quality_v1",
+          status: "pass",
+          run_id: "vqr-test",
+          tested_at: "2026-09-09T10:00:00Z",
+          synthesis: { probe_count: 3, successful_probe_count: 3, deterministic: true },
+          failure_codes: [],
+        }),
+      };
+    }
+    if (path.endsWith("/v1/voices/clone") && init?.method === "POST") {
       cloneBodies.push(init.body as FormData);
       return {
         ok: true,
@@ -568,6 +581,19 @@ async function submitCloneWith(name: string) {
   });
   await act(async () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+}
+
+async function waitForCloneRequest(cloneBodies: FormData[]) {
+  await vi.waitFor(() => {
+    expect(cloneBodies).toHaveLength(1);
+  });
+}
+
+async function waitForLocalQualityFailure(message: string) {
+  await vi.waitFor(() => {
+    expect(container.textContent).toContain(message);
   });
 }
 
@@ -609,11 +635,11 @@ it("submits loudness-normalized WAV audio when cloning a recorded voice", async 
   try {
     await recordSampleAudio(events, recorders);
     await submitCloneWith("我的测试音色");
+    await waitForCloneRequest(cloneBodies);
   } finally {
     vi.useRealTimers();
   }
 
-  expect(cloneBodies).toHaveLength(1);
   const audio = cloneBodies[0]!.get("audio") as File;
   expect(audio.name).toBe("recording.wav");
   expect(audio.type).toBe("audio/wav");
@@ -622,6 +648,12 @@ it("submits loudness-normalized WAV audio when cloning a recorded voice", async 
   expect(onVoiceCreated).toHaveBeenCalledWith(
     expect.objectContaining({ id: "cloned_voice", name: "测试音色" }),
   );
+  expect(onVoiceCreated).toHaveBeenCalledWith(
+    expect.objectContaining({
+      quality: expect.objectContaining({ status: "pass" }),
+    }),
+  );
+  expect(onSelectVoice).not.toHaveBeenCalled();
 });
 
 it("falls back to uploading the raw recording when loudness normalization fails", async () => {
@@ -633,11 +665,11 @@ it("falls back to uploading the raw recording when loudness normalization fails"
   try {
     await recordSampleAudio(events, recorders);
     await submitCloneWith("我的测试音色");
+    await waitForCloneRequest(cloneBodies);
   } finally {
     vi.useRealTimers();
   }
 
-  expect(cloneBodies).toHaveLength(1);
   const audio = cloneBodies[0]!.get("audio") as File;
   expect(audio.name).toBe("recording.webm");
   expect(onVoiceCreated).toHaveBeenCalledWith(
@@ -673,16 +705,16 @@ it("blocks the clone submission and asks for a re-record when the recording is s
       return Promise.resolve();
     }
   } as unknown as typeof AudioContext);
-  const { cloneBodies } = stubCloneFetch();
+  stubCloneFetch();
 
   try {
     await recordSampleAudio(events, recorders);
     await submitCloneWith("我的测试音色");
+    await waitForLocalQualityFailure("录音几乎无声");
   } finally {
     vi.useRealTimers();
   }
 
-  expect(cloneBodies).toHaveLength(0);
   expect(container.textContent).toContain("录音几乎无声");
   expect(onVoiceCreated).not.toHaveBeenCalled();
 });

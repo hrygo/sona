@@ -12,8 +12,14 @@ import { showToast } from "./Toast";
 import { SoundWaveAnimatedIcon } from "./Icons";
 import {
   supportsVoiceCapability,
+  type VoiceQualityReport,
   type VoiceModelCapabilities,
 } from "../contracts/voiceContract";
+import {
+  evaluateVoiceSignal,
+  inspectVoiceRecording,
+  type LocalVoiceQualityResult,
+} from "../utils/voiceQuality";
 import {
   type VoiceCatalogItem,
   type VoiceMode,
@@ -21,6 +27,7 @@ import {
   VOICE_MODE_META,
 } from "./assistantPresentation";
 import { VoiceDeleteModal } from "./VoiceDeleteModal";
+import { VoiceQualityCard } from "./VoiceQualityCard";
 import "./VoiceStudioModal.css";
 
 export interface VoiceStudioModalProps {
@@ -152,6 +159,9 @@ export function VoiceStudioModal({
   const [cloneName, setCloneName] = useState("");
   const [cloneError, setCloneError] = useState("");
   const [lastClonedVoice, setLastClonedVoice] = useState<VoiceCatalogItem | null>(null);
+  const [localQuality, setLocalQuality] = useState<LocalVoiceQualityResult | undefined>();
+  const [serverQuality, setServerQuality] = useState<VoiceQualityReport | undefined>();
+  const [qualityRunPending, setQualityRunPending] = useState(false);
 
   // 麦克风录音实例与媒体流引用
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -460,6 +470,9 @@ export function VoiceStudioModal({
     setRecordingSeconds(0);
     setCloneStage("ready");
     setCloneError("");
+    setLocalQuality(undefined);
+    setServerQuality(undefined);
+    setQualityRunPending(false);
   }, [cleanupRecording, recordedAudioUrl]);
 
   /* ====================== 提交克隆至 SpeechRail ====================== */
@@ -489,6 +502,38 @@ export function VoiceStudioModal({
     setCloneStage("submitting");
 
     try {
+      try {
+        const signalMetrics = await inspectVoiceRecording(recordedBlob);
+        if (signalMetrics.duration_seconds !== undefined
+          && signalMetrics.duration_seconds >= recordingSeconds * 0.5) {
+          const result = evaluateVoiceSignal({
+            ...signalMetrics,
+            // MediaRecorder 的 container duration 在部分浏览器中会滞后，
+            // 录音计时器是 UI 侧更稳定的最小长度证据。
+            duration_seconds: recordingSeconds,
+          });
+          setLocalQuality(result);
+          if (result.status === "reject" && !result.failure_codes.includes("speech_not_detected")) {
+            setCloneError(result.primary_action);
+            setCloneStage("recorded");
+            showToast(result.primary_action, "error");
+            return;
+          }
+        } else {
+          setLocalQuality({
+            status: "unevaluated",
+            failure_codes: [],
+            primary_action: "录音容器时长与计时不一致，将由 SpeechRail 进行权威校验",
+          });
+        }
+      } catch {
+        setLocalQuality({
+          status: "unevaluated",
+          failure_codes: [],
+          primary_action: "浏览器无法完成本地检查，将由 SpeechRail 进行权威校验",
+        });
+      }
+
       // 克隆的是音色而不是音量：提交前统一响度并转无损 WAV，
       // 标准化失败（除近静音外）降级提交原始录音，保证功能可用。
       let uploadBlob = recordedBlob;
@@ -514,9 +559,23 @@ export function VoiceStudioModal({
 
       const createdVoice = await voiceService.clone(formData);
       setLastClonedVoice(createdVoice);
+      setServerQuality(createdVoice.quality);
+      let voiceForCatalog = createdVoice;
+      if (!createdVoice.quality) {
+        setQualityRunPending(true);
+        try {
+          const quality = await voiceService.qualityRun(createdVoice.id);
+          setServerQuality(quality);
+          voiceForCatalog = { ...createdVoice, quality };
+        } catch {
+          // 旧版 SpeechRail 没有质量运行端点时保持未评估，不阻断试听。
+        } finally {
+          setQualityRunPending(false);
+        }
+      }
+      onVoiceCreated(voiceForCatalog);
       setCloneStage("success");
-      onVoiceCreated(createdVoice);
-      showToast(`🎉 音色「${createdVoice.name}」已克隆入库！`, "success");
+      showToast(`🎉 音色「${createdVoice.name}」已克隆入库，等待质量确认`, "success");
     } catch (err) {
       const msg = err instanceof Error ? err.message : "提交音色克隆失败，请检查服务连接";
       setCloneError(msg);
@@ -524,6 +583,18 @@ export function VoiceStudioModal({
       showToast(msg, "error");
     }
   }, [canClone, recordedBlob, recordingSeconds, cloneName, activePrompt.script, onVoiceCreated]);
+
+  const retryQualityRun = useCallback(async () => {
+    if (!lastClonedVoice || qualityRunPending) return;
+    setQualityRunPending(true);
+    try {
+      setServerQuality(await voiceService.qualityRun(lastClonedVoice.id));
+    } catch {
+      showToast("服务端质量检查暂不可用，音色仍保持未评估", "info");
+    } finally {
+      setQualityRunPending(false);
+    }
+  }, [lastClonedVoice, qualityRunPending]);
 
   /* ====================== 试听生成与播放 ====================== */
   const handleAuditionVoice = useCallback(async (vItem: VoiceCatalogItem) => {
@@ -682,6 +753,17 @@ export function VoiceStudioModal({
                       <div className="deck-card-badges">
                         {isSelected && <span className="deck-active-tag">当前生效</span>}
                         <span className={`deck-type-badge type-${vMode}`}>{modeMeta.badge}</span>
+                        {vMode === "clone" && (
+                          <span className={`deck-quality-tag quality-${item.quality?.status ?? "unevaluated"}`}>
+                            {item.quality?.status === "pass"
+                              ? "质量良好"
+                              : item.quality?.status === "warn"
+                                ? "存在风险"
+                                : item.quality?.status === "reject"
+                                  ? "不建议使用"
+                                  : "未评估"}
+                          </span>
+                        )}
                       </div>
                     </div>
 
@@ -933,7 +1015,7 @@ export function VoiceStudioModal({
                             <span>🚀 提交克隆此声音</span>
                           )}
                         </button>
-                      ) : (
+                      ) : serverQuality?.status === "pass" ? (
                         <button
                           type="button"
                           className="btn-apply-success"
@@ -947,8 +1029,30 @@ export function VoiceStudioModal({
                         >
                           ✨ 设为当前助理音色并完成
                         </button>
+                      ) : (
+                        <span className="clone-candidate-hint">
+                          {qualityRunPending ? "正在等待质量验收" : "仅保存候选，质量通过后再激活"}
+                        </span>
                       )}
                     </div>
+
+                    {localQuality && (
+                      <VoiceQualityCard
+                        title="录音预检"
+                        localResult={localQuality}
+                        onRerecord={handleResetRecording}
+                      />
+                    )}
+
+                    {cloneStage === "success" && lastClonedVoice && (
+                      <VoiceQualityCard
+                        title="服务端质量验收"
+                        report={serverQuality}
+                        pending={qualityRunPending}
+                        onRetry={retryQualityRun}
+                        onRerecord={handleResetRecording}
+                      />
+                    )}
 
                     {cloneStage === "success" && lastClonedVoice && (
                       <div className="clone-success-box">

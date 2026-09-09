@@ -53,6 +53,11 @@ import { VoiceRecordingMicLease } from "./voiceRecordingMicLease";
 import { showToast } from "./Toast";
 import { SPEECHRAIL_TTS_MODEL, voiceService } from "../services/voiceService";
 import {
+  classifyVoiceNoiseEvidence,
+  NOISE_CLASSIFICATION_LABEL,
+  type VoiceNoiseClassification,
+} from "../utils/voiceQualityDiagnostic";
+import {
   ActivityIcon,
   BroomIcon,
   DownloadIcon,
@@ -70,6 +75,29 @@ import {
 import "./AssistantPanel.css";
 
 type Command = "clear_context" | "stop_session" | "restart";
+
+type VoiceCloneAcceptanceStep =
+  | "idle"
+  | "clear_context"
+  | "clear_transcript"
+  | "restart_pipeline"
+  | "self_intro"
+  | "complete"
+  | "failed";
+
+const VOICE_CLONE_ACCEPTANCE_STEPS: readonly Exclude<VoiceCloneAcceptanceStep, "idle" | "complete" | "failed">[] = [
+  "clear_context",
+  "clear_transcript",
+  "restart_pipeline",
+  "self_intro",
+];
+
+const VOICE_CLONE_ACCEPTANCE_STEP_LABEL: Record<Exclude<VoiceCloneAcceptanceStep, "idle" | "complete" | "failed">, string> = {
+  clear_context: "清空上下文记忆",
+  clear_transcript: "清空本轮屏幕记录",
+  restart_pipeline: "重启交互管道",
+  self_intro: "发送固定问题：请进行自我介绍",
+};
 
 /**
  * 给“用户开始说话”留出一个可感知的视觉窗口。
@@ -281,6 +309,12 @@ export default function AssistantPanel({
   const [pendingDuplexMode, setPendingDuplexMode] = useState<DuplexMode | null>(null);
   const [duplexSwitchError, setDuplexSwitchError] = useState<string | null>(null);
   const [pendingSessionCommand, setPendingSessionCommand] = useState<AssistantSessionControlCommand | null>(null);
+  const [voiceCloneAcceptanceStep, setVoiceCloneAcceptanceStep] = useState<VoiceCloneAcceptanceStep>("idle");
+  const [voiceCloneAcceptanceError, setVoiceCloneAcceptanceError] = useState<string | null>(null);
+  const [voiceCloneAcceptanceClassification, setVoiceCloneAcceptanceClassification] =
+    useState<VoiceNoiseClassification | null>(null);
+  const [voiceCloneAcceptanceCompletedSteps, setVoiceCloneAcceptanceCompletedSteps] =
+    useState<readonly VoiceCloneAcceptanceStep[]>([]);
 
   /* ---- 声音输出与插话模式 ---- */
   const duplexMode = useUISettingsStore((s) => s.duplexMode);
@@ -311,6 +345,10 @@ export default function AssistantPanel({
   if (voiceRecordingMicLeaseRef.current === null) {
     voiceRecordingMicLeaseRef.current = new VoiceRecordingMicLease();
   }
+  const voicePreviewMicLeaseRef = useRef<VoiceRecordingMicLease | null>(null);
+  if (voicePreviewMicLeaseRef.current === null) {
+    voicePreviewMicLeaseRef.current = new VoiceRecordingMicLease();
+  }
   const currentVoiceItem = availableVoices.find((v) => v.id === voice);
 
   const commandReady = commandSocket.ready;
@@ -322,12 +360,24 @@ export default function AssistantPanel({
     await voiceRecordingMicLeaseRef.current!.restore(ready, sendCommand);
   }, []);
 
+  const restoreVoicePreviewMic = useCallback(async () => {
+    const { ready, sendCommand } = commandSocketRef.current;
+    await voicePreviewMicLeaseRef.current!.restore(ready, sendCommand);
+  }, []);
+
   useEffect(() => {
     if (!commandReady || !voiceRecordingMicLeaseRef.current?.needsRestore) return;
     void restoreVoiceRecordingMic().catch(() => {
       showToast("语音助手麦克风恢复失败，请检查控制连接", "error");
     });
   }, [commandReady, restoreVoiceRecordingMic]);
+
+  useEffect(() => {
+    if (!commandReady || !voicePreviewMicLeaseRef.current?.needsRestore) return;
+    void restoreVoicePreviewMic().catch(() => {
+      showToast("试听结束后麦克风恢复失败，请检查控制连接", "error");
+    });
+  }, [commandReady, restoreVoicePreviewMic]);
 
   // 声音工坊开启即静音麦克风，避免试听或录音前误触助手输入
   useEffect(() => {
@@ -438,6 +488,56 @@ export default function AssistantPanel({
     [sendCommandWith],
   );
 
+  /**
+   * 克隆音色验收：固定执行同一组动作，避免“背景音很吵”只能凭感觉描述。
+   * 目前服务端音频证据尚未回传到 UI，因此没有证据时明确显示“证据不足”，不猜测根因。
+   */
+  const runVoiceCloneAcceptance = useCallback(async () => {
+    const isRunning = voiceCloneAcceptanceStep !== "idle"
+      && voiceCloneAcceptanceStep !== "complete"
+      && voiceCloneAcceptanceStep !== "failed";
+    if (!commandSocket.ready || isMeetingRecording || isRunning) {
+      return;
+    }
+
+    setVoiceCloneAcceptanceStep("clear_context");
+    setVoiceCloneAcceptanceError(null);
+    setVoiceCloneAcceptanceClassification(null);
+    setVoiceCloneAcceptanceCompletedSteps([]);
+
+    try {
+      await commandSocket.sendCommand({ cmd: "clear_context" });
+      setVoiceCloneAcceptanceCompletedSteps((steps) => [...steps, "clear_context"]);
+      setVoiceCloneAcceptanceStep("clear_transcript");
+      clearTranscript();
+      setVoiceCloneAcceptanceCompletedSteps((steps) => [...steps, "clear_transcript"]);
+
+      setVoiceCloneAcceptanceStep("restart_pipeline");
+      await commandSocket.sendCommand({ cmd: "restart" });
+      setVoiceCloneAcceptanceCompletedSteps((steps) => [...steps, "restart_pipeline"]);
+
+      setVoiceCloneAcceptanceStep("self_intro");
+      await commandSocket.sendCommand({ cmd: "send_text", text: "请进行自我介绍" });
+      setVoiceCloneAcceptanceCompletedSteps((steps) => [...steps, "self_intro"]);
+
+      setVoiceCloneAcceptanceClassification(classifyVoiceNoiseEvidence({
+        voiceQualityStatus: currentVoiceItem?.quality?.status,
+      }));
+      setVoiceCloneAcceptanceStep("complete");
+    } catch (error) {
+      setVoiceCloneAcceptanceError(error instanceof Error ? error.message : "验收指令执行失败");
+      setVoiceCloneAcceptanceStep("failed");
+      showToast("克隆音色验收未完成，可重试", "error");
+    }
+  }, [clearTranscript, commandSocket, currentVoiceItem, isMeetingRecording, voiceCloneAcceptanceStep]);
+
+  const clearVoiceCloneAcceptance = useCallback(() => {
+    setVoiceCloneAcceptanceStep("idle");
+    setVoiceCloneAcceptanceError(null);
+    setVoiceCloneAcceptanceClassification(null);
+    setVoiceCloneAcceptanceCompletedSteps([]);
+  }, []);
+
   const handleSessionAction = useCallback(async () => {
     if (pendingSessionCommand) return;
     const command = getAssistantSessionControlPresentation(
@@ -523,37 +623,56 @@ export default function AssistantPanel({
   const handlePreviewVoice = useCallback(
     async (v: string) => {
       if (isPreviewPlaying) return;
+      const mutedBefore = useUISettingsStore.getState().micMuted;
+      const lease = voicePreviewMicLeaseRef.current!;
+      try {
+        lease.begin(mutedBefore);
+      } catch {
+        showToast("上一次试听的麦克风状态仍在恢复，请稍候...", "warning");
+        return;
+      }
+
+      if (!mutedBefore && !commandSocketRef.current.ready) {
+        lease.cancel();
+        showToast("控制端连接中，请稍候...", "warning");
+        return;
+      }
+
       setIsPreviewPlaying(true);
       const voiceItem = availableVoices.find((item) => item.id === v);
       showToast(`🔊 正在生成「${getVoiceDisplayName(v, voiceItem)}」试听...`, "info");
 
-      let blob: Blob;
       try {
+        if (!mutedBefore) {
+          await commandSocketRef.current.sendCommand({ cmd: "set_mic_muted", muted: true });
+        }
         const previewText = "你好，我是你的语音助手，很高兴为你服务。";
-        blob = await voiceService.speech({
+        const blob = await voiceService.speech({
           model: SPEECHRAIL_TTS_MODEL,
           input: previewText,
           voice: v,
           response_format: "wav",
         });
+        try {
+          await playAudioBlob(blob);
+        } catch {
+          showToast("音频播放被浏览器拦截，请点击页面后重试", "error");
+        }
       } catch (err) {
-        setIsPreviewPlaying(false);
         showToast(
           err instanceof Error ? err.message : "试听请求失败，请确保 SpeechRail 已启动",
           "error",
         );
-        return;
-      }
-
-      try {
-        await playAudioBlob(blob);
-      } catch {
-        showToast("音频播放被浏览器拦截，请点击页面后重试", "error");
       } finally {
+        try {
+          await restoreVoicePreviewMic();
+        } catch {
+          showToast("试听结束后麦克风恢复失败，请检查控制连接", "error");
+        }
         setIsPreviewPlaying(false);
       }
     },
-    [availableVoices, isPreviewPlaying],
+    [availableVoices, isPreviewPlaying, restoreVoicePreviewMic],
   );
 
   /** 执行删除自定义音色真实操作 */
@@ -599,6 +718,16 @@ export default function AssistantPanel({
     },
     [handleVoiceChange],
   );
+
+  /** 克隆音色先作为候选留在声音工坊，质量通过且用户确认后才激活。 */
+  const handleCloneVoiceCreated = useCallback((newVoice: VoiceCatalogItem) => {
+    setAvailableVoices((prev) => {
+      const exists = prev.some((item) => item.id === newVoice.id);
+      return exists
+        ? prev.map((item) => item.id === newVoice.id ? { ...item, ...newVoice } : item)
+        : [...prev, newVoice];
+    });
+  }, []);
 
   /** 文字兜底发送 */
   const handleSendText = async () => {
@@ -874,6 +1003,14 @@ export default function AssistantPanel({
     commandSocket.ready,
     duplexSwitchError ?? undefined,
   );
+  const voiceCloneAcceptanceRunning = voiceCloneAcceptanceStep !== "idle"
+    && voiceCloneAcceptanceStep !== "complete"
+    && voiceCloneAcceptanceStep !== "failed";
+  const voiceCloneAcceptanceButtonLabel = voiceCloneAcceptanceRunning
+    ? "验收中…"
+    : voiceCloneAcceptanceStep === "complete" || voiceCloneAcceptanceStep === "failed"
+      ? "重新验收"
+      : "克隆音色验收";
 
   return (
     <div className="assistant-workspace">
@@ -1264,7 +1401,73 @@ export default function AssistantPanel({
                 : <RefreshCwIcon size={13} className="btn-action-icon" />}
               <span>{sessionControlLabel}</span>
             </button>
+            <button
+              type="button"
+              data-testid="voice-quality-clean-check"
+              className="btn-action-ghost session-action-diagnostic"
+              onClick={() => void runVoiceCloneAcceptance()}
+              disabled={!commandSocket.ready || isMeetingRecording || voiceCloneAcceptanceRunning}
+              aria-busy={voiceCloneAcceptanceRunning}
+              title="按固定顺序清空上下文、清空屏幕记录、重启管道并发送自我介绍，复现克隆音色问题"
+            >
+              <WrenchIcon size={13} className="btn-action-icon" />
+              <span>{voiceCloneAcceptanceButtonLabel}</span>
+            </button>
           </div>
+
+          {voiceCloneAcceptanceStep !== "idle" && (
+            <div
+              className={`voice-clone-acceptance ${voiceCloneAcceptanceStep === "failed" ? "is-failed" : ""}`}
+              role={voiceCloneAcceptanceStep === "failed" ? "alert" : "status"}
+              aria-live="polite"
+            >
+              <div className="voice-clone-acceptance-header">
+                <strong>
+                  {voiceCloneAcceptanceStep === "complete"
+                    ? "克隆音色验收已完成"
+                    : voiceCloneAcceptanceStep === "failed"
+                      ? "克隆音色验收中断"
+                      : "克隆音色验收进行中"}
+                </strong>
+                <span>{getVoiceDisplayName(voice, currentVoiceItem)}</span>
+              </div>
+              <ol className="voice-clone-acceptance-steps">
+                {VOICE_CLONE_ACCEPTANCE_STEPS.map((step) => {
+                  const completed = voiceCloneAcceptanceCompletedSteps.includes(step);
+                  const active = voiceCloneAcceptanceStep === step;
+                  return (
+                    <li key={step} className={completed ? "is-complete" : active ? "is-active" : ""}>
+                      <span className="voice-clone-acceptance-step-mark" aria-hidden="true">
+                        {completed ? "✓" : active ? "…" : "·"}
+                      </span>
+                      <span>{VOICE_CLONE_ACCEPTANCE_STEP_LABEL[step]}</span>
+                    </li>
+                  );
+                })}
+              </ol>
+              {voiceCloneAcceptanceError && (
+                <p className="voice-clone-acceptance-error">{voiceCloneAcceptanceError}</p>
+              )}
+              {voiceCloneAcceptanceClassification && (
+                <p className="voice-clone-acceptance-attribution">
+                  <span>当前归因：</span>
+                  <strong>{NOISE_CLASSIFICATION_LABEL[voiceCloneAcceptanceClassification]}</strong>
+                  {voiceCloneAcceptanceClassification === "insufficient_evidence" && (
+                    <span>；请继续对照 SpeechRail 质量报告与播放前/播放后音频指标。</span>
+                  )}
+                </p>
+              )}
+              {!voiceCloneAcceptanceRunning && (
+                <button
+                  type="button"
+                  className="voice-clone-acceptance-clear"
+                  onClick={clearVoiceCloneAcceptance}
+                >
+                  清除诊断结果
+                </button>
+              )}
+            </div>
+          )}
 
           <div className="sidebar-export-row">
             <span className="export-label">导出记录</span>
@@ -1448,7 +1651,7 @@ export default function AssistantPanel({
           availableVoices={availableVoices}
           modelCapabilities={voiceModelCapabilities}
           onSelectVoice={(vid) => void handleVoiceChange(vid)}
-          onVoiceCreated={handleVoiceCreated}
+          onVoiceCreated={handleCloneVoiceCreated}
           onVoiceDeleted={(vid) => void handleDeleteVoice(vid)}
           onClose={() => setShowVoiceStudioModal(false)}
           onStartRecordingVoice={handleVoiceRecordingStart}

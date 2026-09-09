@@ -186,4 +186,121 @@ describe("voiceService", () => {
       { id: "speechrail/qwen3-asr-1.7b", variant: "asr" },
     ]);
   });
+
+  it("parses an optional quality report on a cloned voice", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        id: "clone-1",
+        name: "测试分身",
+        is_system: false,
+        mode: "clone",
+        quality: {
+          policy_version: "voice_quality_v1",
+          status: "pass",
+          run_id: "vqr-1",
+          tested_at: "2026-09-09T10:00:00Z",
+          reference: {
+            duration_seconds: 8.4,
+            estimated_snr_db: 28.4,
+            clipping_ratio: 0,
+          },
+          synthesis: {
+            probe_count: 3,
+            successful_probe_count: 3,
+            deterministic: true,
+          },
+          failure_codes: [],
+        },
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(voiceService.clone(new FormData())).resolves.toMatchObject({
+      quality: {
+        policy_version: "voice_quality_v1",
+        status: "pass",
+        run_id: "vqr-1",
+        reference: { estimated_snr_db: 28.4 },
+        synthesis: { probe_count: 3, deterministic: true },
+        failure_codes: [],
+      },
+    });
+  });
+
+  it("maps an unknown quality status to unevaluated without trusting it as pass", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        policy_version: "voice_quality_v1",
+        status: "future_status",
+        run_id: "vqr-2",
+        tested_at: "2026-09-09T10:00:00Z",
+        failure_codes: ["unknown_status"],
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(voiceService.qualityRun("clone-1")).resolves.toMatchObject({
+      status: "unevaluated",
+      run_id: "vqr-2",
+      failure_codes: ["unknown_status"],
+    });
+  });
+
+  it("validates clone FormData without setting a multipart content type", async () => {
+    const formData = new FormData();
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        policy_version: "voice_quality_v1",
+        status: "warn",
+        run_id: "vqr-3",
+        tested_at: "2026-09-09T10:00:00Z",
+        failure_codes: ["low_snr"],
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await voiceService.validateClone(formData);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("/v1/voices/clone/validate"),
+      expect.objectContaining({ method: "POST", body: formData }),
+    );
+    expect((fetchMock.mock.calls[0][1] as RequestInit).headers).toBeUndefined();
+  });
+
+  it("starts a bounded quality run with a fixed probe set", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        policy_version: "voice_quality_v1",
+        status: "pass",
+        run_id: "vqr-4",
+        tested_at: "2026-09-09T10:00:00Z",
+        failure_codes: [],
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await voiceService.qualityRun("clone-1");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("/v1/voices/clone-1/quality-runs"),
+      expect.objectContaining({
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    expect(JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string)).toEqual({
+      probe_set: "voice_quality_v1_zh",
+      runs: 3,
+      include_audio: false,
+    });
+  });
 });

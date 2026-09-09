@@ -5,7 +5,7 @@ type SetMicMutedCommand = Extract<ControlCommand, { cmd: "set_mic_muted" }>;
 export type VoiceRecordingMicCommandSender = (command: SetMicMutedCommand) => Promise<unknown>;
 
 /**
- * 记录声音工坊录音期间的助手静音租约，并保证恢复操作可重试且只发送一次。
+ * 记录需要临时静音助手麦克风的语音工作流租约，并保证恢复操作可重试且只发送一次。
  */
 export class VoiceRecordingMicLease {
   private mutedBefore: boolean | null = null;

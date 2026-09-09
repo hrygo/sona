@@ -1245,6 +1245,119 @@
   transform: none;
 }
 
+.btn-action-ghost.session-action-diagnostic {
+  grid-column: 1 / -1;
+  color: var(--color-accent-light);
+  border-color: color-mix(in srgb, var(--color-accent) 42%, var(--border));
+  background: color-mix(in srgb, var(--color-accent) 8%, var(--bg-secondary));
+}
+
+[data-theme="light"] .btn-action-ghost.session-action-diagnostic {
+  color: #5b21b6;
+  border-color: #8b5cf6;
+  background: #f5f3ff;
+}
+
+.voice-clone-acceptance {
+  margin-top: 8px;
+  padding: 10px;
+  border: 1px solid color-mix(in srgb, var(--color-accent) 34%, var(--border));
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--color-accent) 6%, var(--bg-secondary));
+  color: var(--text-primary);
+  font-size: 0.7rem;
+}
+
+.voice-clone-acceptance.is-failed {
+  border-color: color-mix(in srgb, var(--color-red) 58%, var(--border));
+}
+
+.voice-clone-acceptance-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.voice-clone-acceptance-header strong {
+  font-size: 0.72rem;
+}
+
+.voice-clone-acceptance-header span {
+  overflow: hidden;
+  color: var(--text-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.voice-clone-acceptance-steps {
+  display: grid;
+  gap: 4px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  color: var(--text-muted);
+}
+
+.voice-clone-acceptance-steps li {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.voice-clone-acceptance-steps li.is-active {
+  color: var(--text-primary);
+}
+
+.voice-clone-acceptance-steps li.is-complete {
+  color: var(--color-green);
+}
+
+.voice-clone-acceptance-step-mark {
+  width: 12px;
+  flex: 0 0 12px;
+  text-align: center;
+  font-weight: 700;
+}
+
+.voice-clone-acceptance-error,
+.voice-clone-acceptance-attribution {
+  margin: 8px 0 0;
+  line-height: 1.45;
+}
+
+.voice-clone-acceptance-error {
+  color: var(--color-red);
+}
+
+.voice-clone-acceptance-attribution {
+  color: var(--text-secondary);
+}
+
+.voice-clone-acceptance-attribution strong {
+  color: var(--text-primary);
+}
+
+.voice-clone-acceptance-clear {
+  margin-top: 8px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.voice-clone-acceptance-clear:hover {
+  color: var(--text-primary);
+}
+
+[data-theme="light"] .voice-clone-acceptance {
+  background: #fafafa;
+}
+
 /* Sidebar Export Row */
 .sidebar-export-row {
   display: flex;

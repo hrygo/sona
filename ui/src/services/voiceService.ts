@@ -7,6 +7,9 @@ import type {
   VoiceModelCatalogItem,
   VoiceModelCapabilities,
   VoicePreviewRequest,
+  VoiceQualityReport,
+  VoiceReferenceQuality,
+  VoiceSynthesisQuality,
 } from "../contracts/voiceContract";
 
 export const SPEECHRAIL_TTS_MODEL = "speechrail/qwen3-tts";
@@ -43,6 +46,79 @@ function asNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
+function parseReferenceQuality(value: unknown): VoiceReferenceQuality | undefined {
+  if (!isRecord(value)) return undefined;
+  const durationSeconds = asNumber(value.duration_seconds);
+  const sampleRate = asNumber(value.sample_rate);
+  const channels = asNumber(value.channels);
+  const speechActiveRatio = asNumber(value.speech_active_ratio);
+  const noiseFloorDbfs = asNumber(value.noise_floor_dbfs);
+  const estimatedSnrDb = asNumber(value.estimated_snr_db);
+  const clippingRatio = asNumber(value.clipping_ratio);
+  const leadingSilenceSeconds = asNumber(value.leading_silence_seconds);
+  const trailingSilenceSeconds = asNumber(value.trailing_silence_seconds);
+  const transcriptMatch = asNumber(value.transcript_match);
+  const result: VoiceReferenceQuality = {
+    ...(durationSeconds !== undefined ? { duration_seconds: durationSeconds } : {}),
+    ...(sampleRate !== undefined ? { sample_rate: sampleRate } : {}),
+    ...(channels !== undefined ? { channels } : {}),
+    ...(speechActiveRatio !== undefined ? { speech_active_ratio: speechActiveRatio } : {}),
+    ...(noiseFloorDbfs !== undefined ? { noise_floor_dbfs: noiseFloorDbfs } : {}),
+    ...(estimatedSnrDb !== undefined ? { estimated_snr_db: estimatedSnrDb } : {}),
+    ...(clippingRatio !== undefined ? { clipping_ratio: clippingRatio } : {}),
+    ...(leadingSilenceSeconds !== undefined ? { leading_silence_seconds: leadingSilenceSeconds } : {}),
+    ...(trailingSilenceSeconds !== undefined ? { trailing_silence_seconds: trailingSilenceSeconds } : {}),
+    ...(transcriptMatch !== undefined ? { transcript_match: transcriptMatch } : {}),
+  };
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
+function parseSynthesisQuality(value: unknown): VoiceSynthesisQuality | undefined {
+  if (!isRecord(value)) return undefined;
+  const probeCount = asNumber(value.probe_count);
+  const successfulProbeCount = asNumber(value.successful_probe_count);
+  const activeRmsDbfs = asNumber(value.active_rms_dbfs);
+  const peakDbfs = asNumber(value.peak_dbfs);
+  const chunkJumpP95Db = asNumber(value.chunk_jump_p95_db);
+  const clippingRatio = asNumber(value.clipping_ratio);
+  const deterministic = asBoolean(value.deterministic);
+  const result: VoiceSynthesisQuality = {
+    ...(probeCount !== undefined ? { probe_count: probeCount } : {}),
+    ...(successfulProbeCount !== undefined ? { successful_probe_count: successfulProbeCount } : {}),
+    ...(activeRmsDbfs !== undefined ? { active_rms_dbfs: activeRmsDbfs } : {}),
+    ...(peakDbfs !== undefined ? { peak_dbfs: peakDbfs } : {}),
+    ...(chunkJumpP95Db !== undefined ? { chunk_jump_p95_db: chunkJumpP95Db } : {}),
+    ...(clippingRatio !== undefined ? { clipping_ratio: clippingRatio } : {}),
+    ...(deterministic !== undefined ? { deterministic } : {}),
+  };
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
+function parseQualityReport(value: unknown): VoiceQualityReport | undefined {
+  if (!isRecord(value)) return undefined;
+  const policyVersion = asString(value.policy_version);
+  const runId = asString(value.run_id);
+  const testedAt = asString(value.tested_at);
+  if (!policyVersion || !runId || !testedAt) return undefined;
+  const status = value.status === "pass" || value.status === "warn" || value.status === "reject"
+    ? value.status
+    : "unevaluated";
+  const failureCodes = Array.isArray(value.failure_codes)
+    ? value.failure_codes.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : [];
+  const reference = parseReferenceQuality(value.reference);
+  const synthesis = parseSynthesisQuality(value.synthesis);
+  return {
+    policy_version: policyVersion,
+    status,
+    run_id: runId,
+    tested_at: testedAt,
+    ...(reference ? { reference } : {}),
+    ...(synthesis ? { synthesis } : {}),
+    failure_codes: failureCodes,
+  };
+}
+
 function parseVoice(value: unknown): VoiceCatalogItem | null {
   if (!isRecord(value)) return null;
   const id = asString(value.id);
@@ -57,6 +133,7 @@ function parseVoice(value: unknown): VoiceCatalogItem | null {
   const durationSeconds = asNumber(value.duration_seconds);
   const createdAt = asNumber(value.created_at);
   const available = asBoolean(value.available);
+  const quality = parseQualityReport(value.quality);
   const capabilities = isRecord(value.capabilities)
     ? {
       ...(typeof value.capabilities.supports_clone === "boolean"
@@ -84,6 +161,7 @@ function parseVoice(value: unknown): VoiceCatalogItem | null {
     ...(createdAt !== undefined ? { created_at: createdAt } : {}),
     ...(available !== undefined ? { available } : {}),
     ...(capabilities ? { capabilities } : {}),
+    ...(quality ? { quality } : {}),
   };
 }
 
@@ -302,6 +380,49 @@ export const voiceService = {
       );
     }
     return voice;
+  },
+
+  async validateClone(formData: FormData): Promise<VoiceQualityReport> {
+    const payload = await requestJson<unknown>("/v1/voices/clone/validate", {
+      method: "POST",
+      body: formData,
+    });
+    const report = parseQualityReport(payload);
+    if (!report) {
+      throw new VoiceServiceError(
+        "SpeechRail 返回的参考音频质量报告无效",
+        502,
+        "invalid_response",
+      );
+    }
+    return report;
+  },
+
+  async qualityRun(
+    voiceId: string,
+    input: { probe_set?: string; runs?: number } = {},
+  ): Promise<VoiceQualityReport> {
+    const payload = await requestJson<unknown>(
+      `/v1/voices/${encodeURIComponent(voiceId)}/quality-runs`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          probe_set: input.probe_set ?? "voice_quality_v1_zh",
+          runs: Math.min(Math.max(input.runs ?? 3, 1), 3),
+          include_audio: false,
+        }),
+      },
+    );
+    const report = parseQualityReport(payload);
+    if (!report) {
+      throw new VoiceServiceError(
+        "SpeechRail 返回的音色质量报告无效",
+        502,
+        "invalid_response",
+      );
+    }
+    return report;
   },
 
   async create(request: VoiceCreateRequest): Promise<VoiceCatalogItem> {

@@ -28,6 +28,11 @@ const toastHarness = vi.hoisted(() => ({
   showToast: vi.fn(),
 }));
 
+const voicePreviewHarness = vi.hoisted(() => ({
+  speech: vi.fn(),
+  playAudioBlob: vi.fn(),
+}));
+
 vi.mock("../hooks/useEventSocket", () => ({
   useEventSocket: (_url: string, onMessage: (message: MessageEvent) => void) => {
     assistantEventHarness.onMessage = onMessage;
@@ -80,6 +85,20 @@ vi.mock("./Toast", () => ({
   showToast: toastHarness.showToast,
 }));
 
+vi.mock("../services/voiceService", () => ({
+  SPEECHRAIL_TTS_MODEL: "speechrail/qwen3-tts",
+  voiceService: {
+    list: vi.fn().mockResolvedValue([]),
+    models: vi.fn().mockResolvedValue([]),
+    speech: voicePreviewHarness.speech,
+    delete: vi.fn(),
+  },
+}));
+
+vi.mock("../utils/audioPlayback", () => ({
+  playAudioBlob: voicePreviewHarness.playAudioBlob,
+}));
+
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
 let root: Root;
@@ -105,6 +124,8 @@ beforeEach(() => {
   toastHarness.showToast.mockClear();
   useAssistantStore.setState({ ...createAssistantSnapshot(), connected: false });
   useUISettingsStore.setState({ micMuted: false });
+  voicePreviewHarness.speech.mockReset().mockResolvedValue(new Blob(["audio"], { type: "audio/wav" }));
+  voicePreviewHarness.playAudioBlob.mockReset().mockResolvedValue(undefined);
   vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("test fetch skipped")));
 });
 
@@ -113,6 +134,8 @@ afterEach(() => {
   container.remove();
   useAssistantStore.setState({ ...createAssistantSnapshot(), connected: false });
   useUISettingsStore.setState({ micMuted: false });
+  voicePreviewHarness.speech.mockReset();
+  voicePreviewHarness.playAudioBlob.mockReset();
   vi.unstubAllGlobals();
 });
 
@@ -263,6 +286,42 @@ describe("assistant session control state", () => {
   });
 });
 
+describe("voice clone acceptance diagnostic", () => {
+  it("runs context reset, pipeline restart, and self-introduction in order", async () => {
+    const sendCommand = vi.fn().mockResolvedValue(runtimeSnapshot());
+    const commandSocket: CommandSocketApi = {
+      state: "open",
+      ready: true,
+      snapshot: runtimeSnapshot(),
+      highestRuntimeRevision: 1,
+      sendCommand,
+      reconcileRuntime: vi.fn().mockResolvedValue(runtimeSnapshot()),
+    };
+
+    act(() => {
+      root.render(createElement(AssistantPanel, { commandSocket }));
+    });
+
+    const startButton = container.querySelector<HTMLButtonElement>("[data-testid='voice-quality-clean-check']");
+    expect(startButton?.textContent).toContain("克隆音色验收");
+
+    await act(async () => {
+      startButton?.click();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(sendCommand.mock.calls.map(([command]) => command)).toEqual([
+      { cmd: "clear_context" },
+      { cmd: "restart" },
+      { cmd: "send_text", text: "请进行自我介绍" },
+    ]);
+    expect(container.textContent).toContain("克隆音色验收已完成");
+    expect(container.textContent).toContain("证据不足，需要对照音频指标");
+  });
+});
+
 describe("voice switching presentation", () => {
   it("shows the readable voice name instead of its id after switching", async () => {
     const sendCommand = vi.fn().mockResolvedValue({});
@@ -290,6 +349,115 @@ describe("voice switching presentation", () => {
 
     expect(sendCommand).toHaveBeenCalledWith({ cmd: "set_voice", voice: "warm" });
     expect(toastHarness.showToast).toHaveBeenCalledWith("音色已切换为: 温暖磁性", "success");
+  });
+});
+
+describe("voice audition microphone lease", () => {
+  it("keeps the microphone muted until the preview audio has actually ended", async () => {
+    let finishPlayback!: () => void;
+    voicePreviewHarness.playAudioBlob.mockImplementationOnce(
+      () => new Promise<void>((resolve) => {
+        finishPlayback = resolve;
+      }),
+    );
+    const sendCommand = vi.fn(async (command: { cmd: string; muted?: boolean }) => {
+      if (command.cmd === "set_mic_muted" && command.muted !== undefined) {
+        useUISettingsStore.setState({ micMuted: command.muted });
+      }
+      return runtimeSnapshot({ mic_muted: useUISettingsStore.getState().micMuted });
+    });
+    const commandSocket: CommandSocketApi = {
+      state: "open",
+      ready: true,
+      snapshot: runtimeSnapshot(),
+      highestRuntimeRevision: 1,
+      sendCommand,
+      reconcileRuntime: vi.fn().mockResolvedValue(runtimeSnapshot()),
+    };
+
+    act(() => {
+      root.render(createElement(AssistantPanel, { commandSocket }));
+    });
+
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>(".btn-voice-audition")?.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(sendCommand).toHaveBeenCalledWith({ cmd: "set_mic_muted", muted: true });
+    expect(sendCommand).not.toHaveBeenCalledWith({ cmd: "set_mic_muted", muted: false });
+    expect(useUISettingsStore.getState().micMuted).toBe(true);
+
+    await act(async () => {
+      finishPlayback();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(sendCommand).toHaveBeenCalledWith({ cmd: "set_mic_muted", muted: false });
+    expect(useUISettingsStore.getState().micMuted).toBe(false);
+  });
+
+  it("keeps an already muted microphone muted throughout the audition", async () => {
+    useUISettingsStore.setState({ micMuted: true });
+    const sendCommand = vi.fn().mockResolvedValue(runtimeSnapshot({ mic_muted: true }));
+    const commandSocket: CommandSocketApi = {
+      state: "open",
+      ready: true,
+      snapshot: runtimeSnapshot({ mic_muted: true }),
+      highestRuntimeRevision: 1,
+      sendCommand,
+      reconcileRuntime: vi.fn().mockResolvedValue(runtimeSnapshot({ mic_muted: true })),
+    };
+
+    act(() => {
+      root.render(createElement(AssistantPanel, { commandSocket }));
+    });
+
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>(".btn-voice-audition")?.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(voicePreviewHarness.speech).toHaveBeenCalledOnce();
+    expect(voicePreviewHarness.playAudioBlob).toHaveBeenCalledOnce();
+    expect(sendCommand).not.toHaveBeenCalled();
+    expect(useUISettingsStore.getState().micMuted).toBe(true);
+  });
+
+  it("restores an open microphone when preview generation fails", async () => {
+    voicePreviewHarness.speech.mockRejectedValueOnce(new Error("preview failed"));
+    const sendCommand = vi.fn(async (command: { cmd: string; muted?: boolean }) => {
+      if (command.cmd === "set_mic_muted" && command.muted !== undefined) {
+        useUISettingsStore.setState({ micMuted: command.muted });
+      }
+      return runtimeSnapshot({ mic_muted: useUISettingsStore.getState().micMuted });
+    });
+    const commandSocket: CommandSocketApi = {
+      state: "open",
+      ready: true,
+      snapshot: runtimeSnapshot(),
+      highestRuntimeRevision: 1,
+      sendCommand,
+      reconcileRuntime: vi.fn().mockResolvedValue(runtimeSnapshot()),
+    };
+
+    act(() => {
+      root.render(createElement(AssistantPanel, { commandSocket }));
+    });
+
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>(".btn-voice-audition")?.click();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(sendCommand).toHaveBeenCalledWith({ cmd: "set_mic_muted", muted: true });
+    expect(sendCommand).toHaveBeenCalledWith({ cmd: "set_mic_muted", muted: false });
+    expect(useUISettingsStore.getState().micMuted).toBe(false);
   });
 });
 
