@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import pytest
 
+from sona.audio.devices import AudioInputDeviceError
 from sona.audio.levels import AudioLevelMeter
 from sona.audio.selection import SubtitleCaptureSelection
 from sona.config import Settings
@@ -799,6 +800,56 @@ class TestControlCommands:
         # stop_session 不关闭 hub/proxy
         hub.stop.assert_not_awaited()
         proxy.stop.assert_not_awaited()
+
+    async def test_start_assistant_retries_unavailable_audio_hub(
+        self, settings: Settings
+    ) -> None:
+        """恢复助手会话前必须重新初始化此前启动失败的 AudioHub。"""
+        with ExitStack() as stack:
+            _proxy_cls, hub_cls, build, _worker_cls, runner_cls = _patched(stack)
+            runtime = UIRuntime(settings)
+            proxy = runtime.subtitle_proxy
+            hub = hub_cls.return_value
+            runner = runner_cls.return_value
+            _mock_async_components(proxy, hub, runner)
+            build.return_value = MagicMock(name="pipeline", processors=[])
+            hub.start = AsyncMock(side_effect=[OSError("no mic"), None])
+
+            await runtime.start()
+            await runtime.start_assistant()
+            recovered = runtime.snapshot()
+            await runtime.stop()
+
+        assert hub.start.await_count == 2
+        assert recovered.degraded_reason is None
+        assert recovered.mode is RuntimeMode.ASSISTANT
+        assert recovered.pcm_owner is PCMOwner.ASSISTANT
+
+    async def test_start_assistant_keeps_degraded_state_when_audio_recovery_fails(
+        self, settings: Settings
+    ) -> None:
+        """音频源仍不可用时不得伪装成已恢复的助手会话。"""
+        with ExitStack() as stack:
+            _proxy_cls, hub_cls, build, _worker_cls, runner_cls = _patched(stack)
+            runtime = UIRuntime(settings)
+            proxy = runtime.subtitle_proxy
+            hub = hub_cls.return_value
+            runner = runner_cls.return_value
+            _mock_async_components(proxy, hub, runner)
+            build.return_value = MagicMock(name="pipeline", processors=[])
+            hub.start = AsyncMock(side_effect=OSError("no mic"))
+
+            await runtime.start()
+            with pytest.raises(AudioInputDeviceError, match="麦克风采集不可用"):
+                await runtime.start_assistant()
+            await runtime.stop()
+
+        assert hub.start.await_count == 2
+        assert runtime._hub_active is False
+        assert runtime.snapshot().degraded_reason == "audio_hub_unavailable"
+        assert runtime.snapshot().mode is RuntimeMode.IDLE
+        assert runtime.snapshot().pcm_owner is PCMOwner.NONE
+        assert not runtime.pipelines_active
 
     async def test_restart_pipeline_rebuilds(self, settings: Settings) -> None:
         """restart_pipeline 停止旧管道后重新装配。"""

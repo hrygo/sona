@@ -35,7 +35,10 @@ SAMPLE_RATE = 16000
 CHANNELS = 1
 SAMPLE_WIDTH = 2  # 16-bit
 CHUNK_SIZE = 512  # 每次读取的采样帧数（~32ms @ 16kHz；mono int16 为 1024 bytes）
-STREAM_OPEN_TIMEOUT_SECS = 5.0
+# macOS CoreAudio 在设备刚从休眠/切换状态恢复时可能需要十几秒完成 AUHAL 初始化。
+# 仍保留有界等待，避免真正失效的设备永久阻塞 UI 启动。
+STREAM_OPEN_TIMEOUT_SECS = 20.0
+CAPTURE_THREAD_JOIN_TIMEOUT_SECS = 1.0
 
 
 @dataclass(slots=True)
@@ -95,6 +98,7 @@ class AudioHub:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._qaudio: pyaudio.PyAudio | None = None
         self._open_future: asyncio.Future[None] | None = None
+        self._capture_generation = 0
 
     @property
     def muted(self) -> bool:
@@ -152,22 +156,17 @@ class AudioHub:
         """启动后台采集线程。"""
         if self._running:
             return
+        await self._reap_previous_capture_thread()
         self._loop = asyncio.get_running_loop()
-        self._qaudio = pyaudio.PyAudio()
         try:
-            self._resolved_device_index = self._resolve_device_index()
-            device_info = self._get_device_info(self._resolved_device_index)
-            logger.info(
-                "AudioHub: 打开设备 %s (%s ch, %d Hz)",
-                device_info or "默认",
-                device_info.get("max_input_channels", "?") if device_info else "?",
-                self._sample_rate,
-            )
+            self._capture_generation += 1
+            generation = self._capture_generation
             self._running = True
             self._start_sink_workers()
             self._open_future = self._loop.create_future()
             self._thread = threading.Thread(
                 target=self._worker_capture_loop,
+                args=(generation,),
                 name="audio-hub-capture",
                 daemon=True,
             )
@@ -190,31 +189,52 @@ class AudioHub:
         self._running = False
         thread = self._thread
         if thread is not None:
-            await asyncio.to_thread(thread.join, timeout=1.0)
-            self._thread = None
+            await asyncio.to_thread(
+                thread.join,
+                timeout=CAPTURE_THREAD_JOIN_TIMEOUT_SECS,
+            )
+            if not thread.is_alive():
+                self._thread = None
         await self._stop_sink_workers()
-        self._terminate_pyaudio()
-        self._loop = None
         self._open_future = None
-        self._resolved_device_index = None
+        if thread is None or not thread.is_alive():
+            self._loop = None
+            self._qaudio = None
+            self._resolved_device_index = None
         logger.info("AudioHub: 已停止")
 
     async def _cleanup_after_failed_start(self) -> None:
         self._running = False
         thread = self._thread
         if thread is not None:
-            await asyncio.to_thread(thread.join, timeout=1.0)
-            self._thread = None
+            await asyncio.to_thread(
+                thread.join,
+                timeout=CAPTURE_THREAD_JOIN_TIMEOUT_SECS,
+            )
+            if not thread.is_alive():
+                self._thread = None
         await self._stop_sink_workers()
-        self._terminate_pyaudio()
-        self._loop = None
         self._open_future = None
-        self._resolved_device_index = None
-
-    def _terminate_pyaudio(self) -> None:
-        if self._qaudio is not None:
-            self._qaudio.terminate()
+        # PyAudio 由采集线程创建和释放；若该线程仍在 open() 内阻塞，不能在此处
+        # terminate，否则会与 CoreAudio 并发操作并触发 AUHAL -50。线程返回后会
+        # 在 _worker_capture_loop 的 finally 中自行关闭 stream 和 PyAudio。
+        self._loop = None
+        if thread is None or not thread.is_alive():
             self._qaudio = None
+            self._resolved_device_index = None
+
+    async def _reap_previous_capture_thread(self) -> None:
+        """等待上一次超时的打开尝试退出，禁止旧线程与新采集并发。"""
+        thread = self._thread
+        if thread is None:
+            return
+        if thread.is_alive():
+            await asyncio.to_thread(thread.join, timeout=self._stream_open_timeout_secs)
+        if thread.is_alive():
+            raise AudioInputDeviceError("上一次音频流仍在关闭，请稍后重试")
+        self._thread = None
+        self._qaudio = None
+        self._resolved_device_index = None
 
     def _start_sink_workers(self) -> None:
         for name, sink in self._sinks.items():
@@ -240,7 +260,13 @@ class AudioHub:
             except asyncio.QueueEmpty:
                 return
 
-    def _report_stream_open(self, error: BaseException | None = None) -> None:
+    def _report_stream_open(
+        self,
+        generation: int,
+        error: BaseException | None = None,
+    ) -> None:
+        if generation != self._capture_generation:
+            return
         future = self._open_future
         if future is None or future.done():
             return
@@ -249,39 +275,50 @@ class AudioHub:
         else:
             future.set_exception(error)
 
-    def _worker_capture_loop(self) -> None:
+    def _worker_capture_loop(self, generation: int) -> None:
         """后台专用线程中的 PyAudio 阻塞采集循环。"""
-        qaudio = self._qaudio
-        if qaudio is None:
-            return
+        qaudio: pyaudio.PyAudio | None = None
+        stream: Any | None = None
         try:
-            stream = qaudio.open(
-                format=pyaudio.paInt16,
-                channels=CHANNELS,
-                rate=self._sample_rate,
-                input=True,
-                input_device_index=self._resolved_device_index,
-                frames_per_buffer=self._chunk_size,
-                start=True,
-            )
-        except Exception as exc:
-            logger.exception("AudioHub: 打开音频流失败")
+            try:
+                # PyAudio/PortAudio/CoreAudio 的创建、打开和释放保持在同一线程，避免
+                # 超时清理从事件循环线程并发 terminate 正在进行的 AUHAL 初始化。
+                qaudio = pyaudio.PyAudio()
+                self._qaudio = qaudio
+                self._resolved_device_index = self._resolve_device_index()
+                device_info = self._get_device_info(self._resolved_device_index)
+                logger.info(
+                    "AudioHub: 打开设备 %s (%s ch, %d Hz)",
+                    device_info or "默认",
+                    device_info.get("max_input_channels", "?") if device_info else "?",
+                    self._sample_rate,
+                )
+                stream = qaudio.open(
+                    format=pyaudio.paInt16,
+                    channels=CHANNELS,
+                    rate=self._sample_rate,
+                    input=True,
+                    input_device_index=self._resolved_device_index,
+                    frames_per_buffer=self._chunk_size,
+                    start=True,
+                )
+            except Exception as exc:
+                logger.exception("AudioHub: 打开音频流失败")
+                loop = self._loop
+                if loop is not None and loop.is_running():
+                    loop.call_soon_threadsafe(self._report_stream_open, generation, exc)
+                return
+
             loop = self._loop
             if loop is not None and loop.is_running():
-                loop.call_soon_threadsafe(self._report_stream_open, exc)
-            return
-
-        loop = self._loop
-        if loop is not None and loop.is_running():
-            loop.call_soon_threadsafe(self._report_stream_open)
-        chunk_ms = self._chunk_size / self._sample_rate * 1000
-        logger.info(
-            "AudioHub: 采集流已打开，chunk=%d frames/%d bytes (~%.0fms)",
-            self._chunk_size,
-            self._chunk_size * CHANNELS * SAMPLE_WIDTH,
-            chunk_ms,
-        )
-        try:
+                loop.call_soon_threadsafe(self._report_stream_open, generation)
+            chunk_ms = self._chunk_size / self._sample_rate * 1000
+            logger.info(
+                "AudioHub: 采集流已打开，chunk=%d frames/%d bytes (~%.0fms)",
+                self._chunk_size,
+                self._chunk_size * CHANNELS * SAMPLE_WIDTH,
+                chunk_ms,
+            )
             while self._running:
                 if self._throttle_secs:
                     time.sleep(self._throttle_secs)
@@ -301,9 +338,16 @@ class AudioHub:
                 if loop is not None and loop.is_running():
                     loop.call_soon_threadsafe(self._on_chunk_received, data)
         finally:
-            with contextlib.suppress(Exception):
-                stream.stop_stream()
-                stream.close()
+            if stream is not None:
+                with contextlib.suppress(Exception):
+                    stream.stop_stream()
+                    stream.close()
+            if qaudio is not None:
+                with contextlib.suppress(Exception):
+                    qaudio.terminate()
+                if generation == self._capture_generation and self._qaudio is qaudio:
+                    self._qaudio = None
+                    self._resolved_device_index = None
             logger.info("AudioHub: 采集流已关闭")
 
     def _on_chunk_received(self, data: bytes) -> None:

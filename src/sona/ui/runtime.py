@@ -10,6 +10,7 @@ from typing import Any
 import httpx
 
 from sona.asr.contracts import ConversationSTTFactory
+from sona.audio.devices import AudioInputDeviceError
 from sona.audio.frame import AudioFrame, AudioSourceKind
 from sona.audio.hub import AudioHub
 from sona.audio.levels import AudioLevelMeter
@@ -232,7 +233,8 @@ class UIRuntime:
     async def restart_pipeline(self) -> None:
         async def restart() -> None:
             self._drain_audio_queue()
-            if self._started and self._hub_active:
+            if self._started:
+                await self._ensure_hub()
                 await self.session.restart()
 
         await self._coordinator.restart_assistant(restart)
@@ -334,6 +336,7 @@ class UIRuntime:
         return await self._coordinator.end_meeting(meeting_id)
 
     async def start_assistant(self) -> None:
+        await self._ensure_hub()
         await self._coordinator.start_assistant()
 
     async def start_subtitles(self, capture: SubtitleCaptureSelection | None = None) -> None:
@@ -414,6 +417,17 @@ class UIRuntime:
         except Exception:
             logger.warning("UIRuntime: AudioHub 启动失败（麦克风不可用？）", exc_info=True)
             return False
+
+    async def _ensure_hub(self) -> None:
+        """确保语音工作负载切换前存在真实可用的麦克风采集源。"""
+        if self._hub_active:
+            return
+        if not self._started:
+            raise AudioInputDeviceError("音频运行时尚未启动")
+        if not await self._start_hub():
+            raise AudioInputDeviceError("麦克风采集不可用，无法恢复语音会话")
+        self._hub_active = True
+        self._publish_runtime_state()
 
     async def _enqueue_audio(self, data: bytes) -> None:
         if (

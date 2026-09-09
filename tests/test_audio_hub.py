@@ -149,6 +149,48 @@ class TestLifecycle:
         assert await asyncio.to_thread(open_finished.wait, 1.0)
         assert hub.running is False
 
+    async def test_timeout_defers_termination_until_capture_thread_finishes(self) -> None:
+        """超时清理不得与仍在阻塞的 PyAudio.open 并发 terminate。"""
+        open_started = threading.Event()
+        release_open = threading.Event()
+        open_finished = threading.Event()
+        terminate_before_open_finished = False
+        mock_stream = MagicMock()
+        mock_pa = MagicMock()
+        instance = mock_pa.PyAudio.return_value
+        instance.get_default_input_device_info.return_value = {"index": 0}
+        instance.get_device_info_by_index.return_value = {
+            "name": "mock-mic",
+            "maxInputChannels": 1,
+        }
+
+        def blocked_open(*_args: object, **_kwargs: object) -> MagicMock:
+            open_started.set()
+            release_open.wait(timeout=2.0)
+            open_finished.set()
+            return mock_stream
+
+        def terminate() -> None:
+            nonlocal terminate_before_open_finished
+            terminate_before_open_finished = not open_finished.is_set()
+
+        instance.open.side_effect = blocked_open
+        instance.terminate.side_effect = terminate
+
+        with patch("sona.audio.hub.pyaudio", mock_pa):
+            hub = AudioHub(stream_open_timeout_secs=0.05)
+            try:
+                with pytest.raises(AudioInputDeviceError, match="音频流打开超时"):
+                    await hub.start()
+                assert open_started.is_set()
+                assert terminate_before_open_finished is False
+            finally:
+                release_open.set()
+
+        assert await asyncio.to_thread(open_finished.wait, 1.0)
+        assert terminate_before_open_finished is False
+        instance.terminate.assert_called_once()
+
     @pytest.mark.parametrize("timeout_secs", [0.0, float("inf"), float("nan")])
     def test_rejects_non_finite_stream_open_timeout(self, timeout_secs: float) -> None:
         with pytest.raises(ValueError, match="有限正数"):
