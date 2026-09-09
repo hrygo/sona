@@ -888,6 +888,83 @@ class TestVoices:
         assert b'name="ref_text"' in forwarded_body["body"]
         assert b'filename="recording.webm"' in forwarded_body["body"]
 
+    def test_clone_validate_proxies_multipart_with_speechrail_auth(self) -> None:
+        mock_settings = Settings(
+            bridge={"host": "127.0.0.1", "port": 9999},
+            subtitles={"host": "127.0.0.1", "port": 9999},
+            interaction={
+                "llm_base_url": "http://127.0.0.1:9997/v1",
+                "speechrail_tts_rest_url": "http://127.0.0.1:9998/v1",
+                "speechrail_api_key": "tts-key",
+            },
+        )
+        app = create_app(mock_settings, initialize_meeting=False)
+        mock_response = Mock(status_code=200)
+        mock_response.content = b'{"status":"reject","run_id":"vqr-1"}'
+        mock_response.headers = {"content-type": "application/json"}
+
+        with patch("sona.ui.server.UIRuntime") as fake_cls, patch(
+            "sona.ui.http_routes.httpx.AsyncClient.post",
+            new_callable=AsyncMock,
+            return_value=mock_response,
+        ) as post:
+            fake_cls.return_value.start = AsyncMock()
+            fake_cls.return_value.stop = AsyncMock()
+            with TestClient(app, raise_server_exceptions=False) as client:
+                response = client.post(
+                    "/v1/voices/clone/validate",
+                    data={"name": "测试分身", "ref_text": "白日依山尽"},
+                    files={"audio": ("recording.webm", b"x" * 2048, "audio/webm")},
+                )
+
+        assert response.status_code == 200
+        assert response.json()["run_id"] == "vqr-1"
+        post.assert_awaited_once()
+        assert post.call_args.args[0] == "http://127.0.0.1:9998/v1/voices/clone/validate"
+        assert post.call_args.kwargs["headers"]["Authorization"] == "Bearer tts-key"
+        assert post.call_args.kwargs["headers"]["Content-Type"].startswith("multipart/form-data")
+
+    def test_quality_run_proxies_json_with_speechrail_auth(self) -> None:
+        mock_settings = Settings(
+            bridge={"host": "127.0.0.1", "port": 9999},
+            subtitles={"host": "127.0.0.1", "port": 9999},
+            interaction={
+                "llm_base_url": "http://127.0.0.1:9997/v1",
+                "speechrail_tts_rest_url": "http://127.0.0.1:9998/v1",
+                "speechrail_api_key": "tts-key",
+            },
+        )
+        app = create_app(mock_settings, initialize_meeting=False)
+        mock_response = Mock(status_code=200)
+        mock_response.content = b'{"status":"pass","run_id":"vqr-2"}'
+        mock_response.headers = {"content-type": "application/json"}
+
+        with patch("sona.ui.server.UIRuntime") as fake_cls, patch(
+            "sona.ui.http_routes.httpx.AsyncClient.post",
+            new_callable=AsyncMock,
+            return_value=mock_response,
+        ) as post:
+            fake_cls.return_value.start = AsyncMock()
+            fake_cls.return_value.stop = AsyncMock()
+            with TestClient(app, raise_server_exceptions=False) as client:
+                response = client.post(
+                    "/v1/voices/clone-1/quality-runs",
+                    json={
+                        "probe_set": "voice_quality_v1_zh",
+                        "runs": 3,
+                        "include_audio": False,
+                    },
+                )
+
+        assert response.status_code == 200
+        assert response.json()["run_id"] == "vqr-2"
+        post.assert_awaited_once()
+        assert post.call_args.args[0] == "http://127.0.0.1:9998/v1/voices/clone-1/quality-runs"
+        assert post.call_args.kwargs["headers"] == {
+            "Content-Type": "application/json",
+            "Authorization": "Bearer tts-key",
+        }
+
     def test_voice_preview_proxies_to_extension_and_preserves_error(self) -> None:
         """自然语言试听走独立 preview 扩展，并保留 SpeechRail 错误信封。"""
         mock_response = Mock(status_code=422)

@@ -160,6 +160,8 @@ export function VoiceStudioModal({
   const [cloneError, setCloneError] = useState("");
   const [lastClonedVoice, setLastClonedVoice] = useState<VoiceCatalogItem | null>(null);
   const [localQuality, setLocalQuality] = useState<LocalVoiceQualityResult | undefined>();
+  const [serverValidation, setServerValidation] = useState<VoiceQualityReport | undefined>();
+  const [serverValidationPending, setServerValidationPending] = useState(false);
   const [serverQuality, setServerQuality] = useState<VoiceQualityReport | undefined>();
   const [qualityRunPending, setQualityRunPending] = useState(false);
 
@@ -471,6 +473,8 @@ export function VoiceStudioModal({
     setCloneStage("ready");
     setCloneError("");
     setLocalQuality(undefined);
+    setServerValidation(undefined);
+    setServerValidationPending(false);
     setServerQuality(undefined);
     setQualityRunPending(false);
   }, [cleanupRecording, recordedAudioUrl]);
@@ -556,6 +560,26 @@ export function VoiceStudioModal({
       formData.append("audio", uploadBlob, uploadFilename);
       formData.append("ref_text", activePrompt.script.trim());
       formData.append("name", cloneName.trim());
+
+      setServerValidationPending(true);
+      try {
+        const validation = await voiceService.validateClone(formData);
+        setServerValidation(validation);
+        if (validation.status === "reject") {
+          setCloneError(validation.failure_codes.length > 0
+            ? `SpeechRail 质量门禁未通过：${validation.failure_codes.join("、")}`
+            : "SpeechRail 质量门禁未通过，请重新录音");
+          setCloneStage("recorded");
+          showToast("SpeechRail 质量门禁未通过，请重新录音", "error");
+          return;
+        }
+      } catch {
+        // 旧版 SpeechRail 或网络不可用时不阻断 clone，结果保持未评估。
+        setServerValidation(undefined);
+        showToast("SpeechRail 预检暂不可用，将由 clone 接口再次校验", "info");
+      } finally {
+        setServerValidationPending(false);
+      }
 
       const createdVoice = await voiceService.clone(formData);
       setLastClonedVoice(createdVoice);
@@ -1040,6 +1064,15 @@ export function VoiceStudioModal({
                       <VoiceQualityCard
                         title="录音预检"
                         localResult={localQuality}
+                        onRerecord={handleResetRecording}
+                      />
+                    )}
+
+                    {(serverValidation || serverValidationPending) && (
+                      <VoiceQualityCard
+                        title="SpeechRail 参考音频验收"
+                        report={serverValidation}
+                        pending={serverValidationPending}
                         onRerecord={handleResetRecording}
                       />
                     )}

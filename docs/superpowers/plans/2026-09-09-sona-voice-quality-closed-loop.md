@@ -105,7 +105,7 @@
 
   Run: `cd ui && npm test -- --run src/components/VoiceQualityCard.test.tsx src/components/VoiceStudioModal.test.tsx`
 
-- [ ] **Step 3: 接入本地预检和服务端 validate**
+- [x] **Step 3: 接入本地预检和服务端 validate**
 
   录音停止后先计算可用的浏览器指标；reject 阻止上传，warn 允许继续但标记风险。validate 能力不存在或返回网络/404 时，保留录音并展示“服务端质量检查不可用，尚未评估”，不得直接判 pass。
 

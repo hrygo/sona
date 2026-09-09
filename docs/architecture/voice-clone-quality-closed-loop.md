@@ -105,7 +105,7 @@ flowchart LR
 
 ## 5. Sona UI/UX 设计
 
-> **当前落地（2026-09-09）**：Sona 已实现浏览器侧录音预检、质量报告消费、clone 后质量运行、候选音色保护，以及助手面板中的“克隆音色验收”串行诊断。SpeechRail 的权威 `validate`、更完整的播放前/播放后 PCM 证据和真实扬声器验收仍由 [SpeechRail #36](https://github.com/hrygo/SpeechRail/issues/36) 跟踪；因此旧服务端或证据不完整时 UI 明确显示“尚未评估/证据不足”，不判定为通过。
+> **当前落地（2026-09-09）**：Sona 已实现浏览器侧录音预检、SpeechRail 权威 `validate` 消费、质量报告消费、clone 后质量运行、候选音色保护，以及助手面板中的“克隆音色验收”串行诊断。播放前/播放后 PCM 对照、A/B 盲听和真实扬声器验收仍由 [SpeechRail #36](https://github.com/hrygo/SpeechRail/issues/36) 及联合验收跟踪；证据不完整时 UI 明确显示“尚未评估/证据不足”，不判定为通过。
 
 ### 5.1 五步向导
 
@@ -220,7 +220,7 @@ interface VoiceQualityReport {
 }
 ```
 
-声音工坊实现了录音预检、服务端质量运行、候选音色和可激活状态的最小兼容闭环；完整的 `server_validating` 状态、`Idempotency-Key`、A/B 盲听和真实播放证据仍需 SpeechRail #36 的契约落地后接入。网络失败/旧 profile 缺少 `quality` 时只显示“未评估”，不会伪造通过。
+声音工坊实现了录音预检、服务端 validate、质量运行、候选音色和可激活状态的最小兼容闭环；完整的 `Idempotency-Key` 前端重试、A/B 盲听和真实播放证据仍待联合验收接入。网络失败/旧 profile 缺少 `quality` 时只显示“未评估”，不会伪造通过。
 
 ## 7. 故障归因矩阵
 
@@ -272,6 +272,18 @@ interface VoiceQualityReport {
 
 ## 11. 本次 Sona 实施与验证边界
 
+### 11.1 2026-09-09 SpeechRail 2.1.0 联调证据
+
+本机受管运行时已切换到 SpeechRail `2.1.0`、`quality` profile。通过 Sona `:8100` 代理完成以下真实链路：
+
+- `/v1/voices/clone/validate`：合成参考音频返回 `200`、`voice_quality_v1/pass`；参考音频 `10.758s`、`24 kHz`、mono、SNR `33.83 dB`、clipping `0`。
+- `/v1/voices/clone`：真实模型创建返回 `201`，VoiceProfile 携带 `quality.status=pass`。
+- `/{voice_id}/quality-runs`：返回 `200`，`3/3` probe 成功、`deterministic=true`。
+- `/v1/audio/speech`：clone 输出返回 `200 audio/wav`，实测 `24 kHz`、mono、约 `2.08s`、peak `-5.85 dBFS`、clipping `0`。
+- 控制链路：`clear_context → restart → send_text` 命令均收到确认；首次重启后立即发送曾复现 `LLM completion timeout`，等待 5 秒后自我介绍成功生成 SpeechRail TTS。Sona 已将该稳定等待纳入验收流程。
+
+以上参考音频由 macOS 内置 `Tingting` 合成，仅证明接口、模型和代理链路，不代表真人克隆主观质量，也不能证明物理扬声器听感。真实“背景音很吵”仍需保留 SpeechRail PCM、Sona 播放前 PCM 与物理输出的三路对照。
+
 已落地：
 
 - `VoiceQualityReport` 兼容解析及 `qualityRun` 客户端；
@@ -283,6 +295,6 @@ interface VoiceQualityReport {
 
 尚未宣称完成：
 
-- SpeechRail 权威 validate、参考音频与生成 PCM 的完整对照摘要；
+- 参考音频与生成 PCM 的完整跨服务对照摘要；
 - 物理扬声器/CoreAudio 的自动化采集；
 - A/B 盲听、跨仓库 `run_id` 关联和真实模型/设备 smoke 验收。

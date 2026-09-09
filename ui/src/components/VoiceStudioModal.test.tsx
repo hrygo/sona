@@ -513,6 +513,30 @@ function stubCloneFetch(): CloneFetchResult {
   const cloneBodies: FormData[] = [];
   const fetchMock = vi.fn(async (url: unknown, init?: RequestInit) => {
     const path = String(url);
+    if (path.includes("/v1/voices/clone/validate") && init?.method === "POST") {
+      return {
+        ok: true,
+        json: async () => ({
+          policy_version: "voice_quality_v1",
+          status: "pass",
+          run_id: "vqr-validation-test",
+          tested_at: "2026-09-09T10:00:00Z",
+          reference: {
+            duration_seconds: 10,
+            sample_rate: 24000,
+            channels: 1,
+            speech_active_ratio: 0.8,
+            noise_floor_dbfs: -50,
+            estimated_snr_db: 30,
+            clipping_ratio: 0,
+            leading_silence_seconds: 0.1,
+            trailing_silence_seconds: 0.1,
+            transcript_match: 1,
+          },
+          failure_codes: [],
+        }),
+      };
+    }
     if (path.includes("/quality-runs") && init?.method === "POST") {
       return {
         ok: true,
@@ -630,7 +654,7 @@ it("submits loudness-normalized WAV audio when cloning a recorded voice", async 
       return Promise.resolve();
     }
   } as unknown as typeof AudioContext);
-  const { cloneBodies } = stubCloneFetch();
+  const { cloneBodies, fetchMock } = stubCloneFetch();
 
   try {
     await recordSampleAudio(events, recorders);
@@ -654,6 +678,7 @@ it("submits loudness-normalized WAV audio when cloning a recorded voice", async 
     }),
   );
   expect(onSelectVoice).not.toHaveBeenCalled();
+  expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/v1/voices/clone/validate"))).toBe(true);
 });
 
 it("falls back to uploading the raw recording when loudness normalization fails", async () => {

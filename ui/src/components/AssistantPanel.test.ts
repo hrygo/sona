@@ -16,6 +16,7 @@ import AssistantPanel, {
   getDuplexModeFeedback,
   getDuplexToggleMode,
   getVoiceDisplayName,
+  VOICE_CLONE_ACCEPTANCE_SETTLE_MS,
 } from "./AssistantPanel";
 import { createAssistantSnapshot, useAssistantStore } from "../stores/assistantStore";
 import { useUISettingsStore } from "../stores/uiSettingsStore";
@@ -305,12 +306,18 @@ describe("voice clone acceptance diagnostic", () => {
     const startButton = container.querySelector<HTMLButtonElement>("[data-testid='voice-quality-clean-check']");
     expect(startButton?.textContent).toContain("克隆音色验收");
 
-    await act(async () => {
-      startButton?.click();
-      await Promise.resolve();
-      await Promise.resolve();
-      await Promise.resolve();
-    });
+    vi.useFakeTimers();
+    try {
+      await act(async () => {
+        startButton?.click();
+        await vi.advanceTimersByTimeAsync(VOICE_CLONE_ACCEPTANCE_SETTLE_MS);
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+    } finally {
+      vi.useRealTimers();
+    }
 
     expect(sendCommand.mock.calls.map(([command]) => command)).toEqual([
       { cmd: "clear_context" },

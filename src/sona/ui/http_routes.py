@@ -27,6 +27,7 @@ NetworkScope = Literal["local", "network"]
 _RUNTIME_DIAGNOSTIC_KEYS = ("audio_hub", "interaction", "subtitles", "tts", "last_transition")
 _ASR_WORKLOAD_KEYS = ("workload", "ws_state", "reconnect_count", "last_event_age_ms")
 _VOICE_CLONE_MAX_BODY_BYTES = 15 * 1024 * 1024
+_VOICE_QUALITY_RUN_MAX_BODY_BYTES = 64 * 1024
 _VOICE_PREVIEW_MAX_BODY_BYTES = 64 * 1024
 _VOICE_WORKSHOP_BLOCKED_MODES = frozenset({"meeting", "subtitles"})
 _PROXY_RESPONSE_HEADERS = (
@@ -686,6 +687,134 @@ def create_http_router(context: UIAppContext) -> APIRouter:
                 code="internal_error",
                 message="音色克隆请求处理失败",
                 retryable=False,
+            )
+
+    @router.post("/v1/voices/clone/validate")
+    async def validate_voice_clone(request: Request) -> Response:
+        """代理 SpeechRail 仅校验、不注册的克隆质量报告。"""
+        guard = _voice_workshop_guard(context, request)
+        if guard is not None:
+            return guard
+
+        content_type = request.headers.get("content-type", "")
+        if not content_type.lower().startswith("multipart/form-data"):
+            return _error_response(
+                request,
+                status_code=415,
+                code="unsupported_media_type",
+                message="音色质量校验请求必须使用 multipart/form-data",
+                retryable=False,
+            )
+        declared_size_error = _declared_body_size(
+            request, limit=_VOICE_CLONE_MAX_BODY_BYTES
+        )
+        if declared_size_error is not None:
+            return declared_size_error
+
+        settings = context.settings
+        url = _speechrail_rest_path(
+            settings.interaction.speechrail_tts_rest_url, "/voices/clone/validate"
+        )
+        try:
+            headers = _proxy_request_headers(
+                request,
+                content_type=content_type,
+                api_key=settings.interaction.speechrail_api_key,
+                preserve_content_length=True,
+            )
+            async with local_async_client(
+                timeout=settings.interaction.speechrail_tts_request_timeout_secs
+            ) as client:
+                resp = await client.post(
+                    url,
+                    content=_bounded_request_stream(
+                        request, limit=_VOICE_CLONE_MAX_BODY_BYTES
+                    ),
+                    headers=headers,
+                )
+                return _proxy_response(resp)
+        except _PayloadTooLargeError:
+            return _error_response(
+                request,
+                status_code=413,
+                code="payload_too_large",
+                message="录音音频过大（上限 15 MiB）",
+                retryable=False,
+            )
+        except httpx.HTTPError as exc:
+            logger.warning("Sona: SpeechRail POST /v1/voices/clone/validate 请求失败: %s", exc)
+            return _speechrail_transport_error(
+                request,
+                exc,
+                message="SpeechRail 音色质量校验服务不可用",
+            )
+        except Exception as exc:
+            logger.error("Sona: 处理音色质量校验上传异常: %s", type(exc).__name__)
+            return _error_response(
+                request,
+                status_code=500,
+                code="internal_error",
+                message="音色质量校验请求处理失败",
+                retryable=False,
+            )
+
+    @router.post("/v1/voices/{voice_id}/quality-runs")
+    async def run_voice_quality(request: Request, voice_id: str) -> Response:
+        """代理 SpeechRail 对已注册音色执行固定质量探针。"""
+        guard = _voice_workshop_guard(context, request)
+        if guard is not None:
+            return guard
+
+        content_type = request.headers.get("content-type", "application/json")
+        if not content_type.lower().startswith("application/json"):
+            return _error_response(
+                request,
+                status_code=415,
+                code="unsupported_media_type",
+                message="音色质量探针请求必须使用 application/json",
+                retryable=False,
+            )
+        declared_size_error = _declared_body_size(
+            request, limit=_VOICE_QUALITY_RUN_MAX_BODY_BYTES
+        )
+        if declared_size_error is not None:
+            return declared_size_error
+
+        settings = context.settings
+        url = _speechrail_rest_path(
+            settings.interaction.speechrail_tts_rest_url,
+            f"/voices/{voice_id}/quality-runs",
+        )
+        try:
+            body = await request.body()
+            if len(body) > _VOICE_QUALITY_RUN_MAX_BODY_BYTES:
+                return _error_response(
+                    request,
+                    status_code=413,
+                    code="payload_too_large",
+                    message="音色质量探针请求体过大",
+                    retryable=False,
+                )
+            headers = _proxy_request_headers(
+                request,
+                content_type=content_type,
+                api_key=settings.interaction.speechrail_api_key,
+            )
+            async with local_async_client(
+                timeout=settings.interaction.speechrail_tts_request_timeout_secs
+            ) as client:
+                resp = await client.post(url, content=body, headers=headers)
+                return _proxy_response(resp)
+        except httpx.HTTPError as exc:
+            logger.warning(
+                "Sona: SpeechRail POST /v1/voices/%s/quality-runs 请求失败: %s",
+                voice_id,
+                exc,
+            )
+            return _speechrail_transport_error(
+                request,
+                exc,
+                message="SpeechRail 音色质量探针不可用",
             )
 
     @router.post("/v1/voices")

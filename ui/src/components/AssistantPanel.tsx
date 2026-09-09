@@ -92,6 +92,8 @@ const VOICE_CLONE_ACCEPTANCE_STEPS: readonly Exclude<VoiceCloneAcceptanceStep, "
   "self_intro",
 ];
 
+export const VOICE_CLONE_ACCEPTANCE_SETTLE_MS = 5_000;
+
 const VOICE_CLONE_ACCEPTANCE_STEP_LABEL: Record<Exclude<VoiceCloneAcceptanceStep, "idle" | "complete" | "failed">, string> = {
   clear_context: "清空上下文记忆",
   clear_transcript: "清空本轮屏幕记录",
@@ -515,6 +517,7 @@ export default function AssistantPanel({
       setVoiceCloneAcceptanceStep("restart_pipeline");
       await commandSocket.sendCommand({ cmd: "restart" });
       setVoiceCloneAcceptanceCompletedSteps((steps) => [...steps, "restart_pipeline"]);
+      await new Promise((resolve) => setTimeout(resolve, VOICE_CLONE_ACCEPTANCE_SETTLE_MS));
 
       setVoiceCloneAcceptanceStep("self_intro");
       await commandSocket.sendCommand({ cmd: "send_text", text: "请进行自我介绍" });
