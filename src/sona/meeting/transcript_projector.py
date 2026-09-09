@@ -42,6 +42,7 @@ class TranscriptPresentationProjector:
         partial_text: str = "",
         partial_speaker_key: str | None = None,
         partial_speaker_name: str | None = None,
+        partial_speaker_status: SpeakerStatus | None = None,
         profile: ProjectorProfile | None = None,
     ) -> tuple[DisplayBlock, ...]:
         profile = profile or ProjectorProfile()
@@ -68,6 +69,7 @@ class TranscriptPresentationProjector:
                     partial_text,
                     partial_speaker_key=partial_speaker_key,
                     partial_speaker_name=partial_speaker_name,
+                    partial_speaker_status=partial_speaker_status,
                 )
             )
         return tuple(blocks)
@@ -186,8 +188,14 @@ class TranscriptPresentationProjector:
         *,
         partial_speaker_key: str | None,
         partial_speaker_name: str | None,
+        partial_speaker_status: SpeakerStatus | None,
     ) -> DisplayBlock:
-        status: SpeakerStatus = "anonymous" if partial_speaker_key else "pending"
+        status: SpeakerStatus = partial_speaker_status or (
+            "anonymous" if partial_speaker_key else "pending"
+        )
+        if status in {"off", "pending", "degraded"}:
+            partial_speaker_key = None
+            partial_speaker_name = None
         color_key = partial_speaker_key or status
         return DisplayBlock(
             block_id="partial",

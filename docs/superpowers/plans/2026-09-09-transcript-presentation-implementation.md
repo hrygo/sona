@@ -79,10 +79,10 @@
 | AC-AI-03 | issue/spec 6.4 | evidence 使用 `[B0001]` 级完整 block alias，可回定位 block/time | T4,T6 | summary validator + API/UI link tests | pass (T4 model/evidence) |
 | AC-AI-04 | project AGENTS | 模型固定 `local/kat-coder-2.5`，调用原生 `/api/v1/chat` | T4 | gateway request contract tests | pass (existing gateway tests retained) |
 | AC-AI-05 | project AGENTS | summary/Inner OS 失败不影响正文入库、字幕和阅读展示 | T3,T4,T5 | failure isolation integration tests | pass (existing failure isolation + new adapter) |
-| AC-SUB-01 | spec 6.2 | 字幕无 PostgreSQL 仍运行 | T5 | no-DB unit/integration test | pending |
-| AC-SUB-02 | spec 6.2 | partial 始终一个底部 block，delta 原位更新 | T5 | proxy/session state tests | pending |
-| AC-SUB-03 | spec 6.2 | reconnect 重放 snapshot，不重复/丢失 confirmed 文本 | T5 | reconnect replay tests | pending |
-| AC-SUB-04 | spec 6.2 | 字幕启用 speaker 时只接收 metadata，不重建正文 | T5 | patch-only tests | pending |
+| AC-SUB-01 | spec 6.2 | 字幕无 PostgreSQL 仍运行 | T5 | pure projector + focused no-DB tests | pass |
+| AC-SUB-02 | spec 6.2 | partial 始终一个底部 block，delta 原位更新 | T5 | projector/session state tests | pass |
+| AC-SUB-03 | spec 6.2 | reconnect 重放 snapshot，不重复/丢失 confirmed 文本 | T5 | existing reconnect replay tests + stable display blocks | pass |
+| AC-SUB-04 | spec 6.2 | 字幕启用 speaker 时只接收 metadata，不重建正文 | T5 | speaker revision identity/text conservation test | pass |
 | AC-UI-01 | issue/spec 7 | 只有一个可读会议 transcript 视图，移除逐字/原子/时序入口 | T6 | component tree + UI tests + rg audit | pending |
 | AC-UI-02 | spec 7 | block 显示 speaker 文本标签、状态徽标、轻量时间和完整正文 | T6 | component tests | pending |
 | AC-UI-03 | spec 7 | 不用颜色单独表达身份，深浅主题符合 WCAG 2.1 AA/AAA | T6 | contrast test/manual screenshot | pending |
@@ -240,12 +240,22 @@
 - Subtitle state owns only bounded confirmed/partial memory; no PostgreSQL dependency.
 - Reconnect replay uses a snapshot of confirmed items and one partial block.
 
-- [ ] Step 1: Write RED tests for no-DB startup, partial in-place delta, confirmed replacement, reconnect replay, duplicate suppression and speaker metadata-only updates.
-- [ ] Step 2: Run focused subtitle tests and confirm failure.
-- [ ] Step 3: Implement in-memory projector integration and preserve `SrtArchive` compatibility behavior.
-- [ ] Step 4: Run focused tests with PostgreSQL unavailable and assert no database calls are required.
-- [ ] Step 5: Verify AC-SUB-01–04 and AC-PROJ-05/07; update matrix.
-- [ ] Step 6: Commit `feat(subtitles): 使用内存可读投影维护字幕快照`.
+- [x] Step 1: Write RED tests for no-DB startup, partial in-place delta, confirmed replacement, reconnect replay, duplicate suppression and speaker metadata-only updates.
+- [x] Step 2: Run focused subtitle tests and confirm failure.
+- [x] Step 3: Implement in-memory projector integration and preserve `SrtArchive` compatibility behavior.
+- [x] Step 4: Run focused tests with PostgreSQL unavailable and assert no database calls are required.
+- [x] Step 5: Verify AC-SUB-01–04 and AC-PROJ-05/07; update matrix.
+- [x] Step 6: Commit `feat(subtitles): 使用内存可读投影维护字幕快照`.
+
+#### 验收记录
+
+- RED: `rtk uv run pytest tests/test_subtitle_presentation.py -q` → `KeyError: 'display_blocks'`（实现前失败，覆盖率失败为聚焦运行的附带结果）。
+- Tests: `rtk uv run pytest tests/test_subtitle_components.py tests/test_subtitle_presentation.py tests/asr/test_proxy_contract.py --no-cov -q` → `44 passed, 1 warning`。
+- Lint: `rtk uv run ruff check src/sona/asr/presenters.py src/sona/meeting/transcript_projector.py src/sona/subtitles/proxy.py tests/test_subtitle_presentation.py` → `All checks passed!`
+- Types: `rtk uv run mypy src/sona/asr/presenters.py src/sona/meeting/transcript_projector.py src/sona/subtitles/proxy.py` → `Success: no issues found in 3 source files`。
+- No-DB evidence: subtitle projection is pure `ASRWindow` → `TranscriptItem`/`TranscriptAttributionSpan` → `TranscriptPresentationProjector`; focused tests run without `SONA_TEST_DATABASE_URL` and no repository/DB fixture。
+- AC: `AC-SUB-01–04`、`AC-PROJ-05`、`AC-PROJ-07` 在 T5 范围内 pass；confirmed/reconnect 的既有 session tests保留，speaker revision 仅改变 `speaker_status/key`，正文/item/source identity 不变。
+- Scope: `CHANGES MADE` 为旧字幕 payload 增加 `display_blocks`、语义 speaker status、稳定 item/block/source identity 和清空快照字段；`DIDN'T TOUCH` PostgreSQL schema、SRT body semantics、主 worktree 用户-owned voice 文件；`POTENTIAL CONCERNS` 旧 `lines` 仍作为迁移兼容字段，后续 T6 需优先消费 `display_blocks`。
 
 ## Task 6: Frontend Reading UX and Contracts
 
