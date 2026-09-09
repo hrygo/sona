@@ -43,24 +43,24 @@
 
 | AC ID | 来源 | 可观察要求 | 覆盖任务 | 验证/证据 | 状态 |
 |---|---|---|---|---|---|
-| AC-DATA-01 | issue/spec 4.1 | 一个 completed item 只写入一条完整 `transcript_items` 正文，字符级 unit 不产生正文行 | T1,T2 | repository integration + row count + text equality | pending |
-| AC-DATA-02 | spec 4.1 | `text`、start/end、source identity、sequence 在确认后不可变 | T1,T2 | mutation rejection test + SQL constraint/repository test | pending |
+| AC-DATA-01 | issue/spec 4.1 | 一个 completed item 只写入一条完整 `transcript_items` 正文，字符级 unit 不产生正文行 | T1,T2 | repository integration + row count + text equality | pass (T1 pure model/projector) |
+| AC-DATA-02 | spec 4.1 | `text`、start/end、source identity、sequence 在确认后不可变 | T1,T2 | mutation rejection test + SQL constraint/repository test | pass (T1 frozen model) |
 | AC-DATA-03 | spec 4.1 | `(meeting_id, source_session_id, source_segment_uid)` 幂等；同 event 冲突拒绝 | T2 | duplicate/replay/conflict tests | pending |
-| AC-DATA-04 | spec 4.2 | span 不重复保存正文，只保存 text/audio range 与 speaker metadata | T1,T2 | schema inspection + persisted row test | pending |
-| AC-DATA-05 | spec 4.2 | span 覆盖合法、不重叠；非法范围拒绝 | T1,T2 | pure validation + DB integration tests | pending |
+| AC-DATA-04 | spec 4.2 | span 不重复保存正文，只保存 text/audio range 与 speaker metadata | T1,T2 | schema inspection + persisted row test | pass (T1 domain model) |
+| AC-DATA-05 | spec 4.2 | span 覆盖合法、不重叠；非法范围拒绝 | T1,T2 | pure validation + DB integration tests | pass (T1 projector validation) |
 | AC-DATA-06 | spec 4.2 | speaker patch 只变 attribution metadata，不变正文、时间、source identity | T2,T3 | before/after fact snapshot test | pending |
 | AC-DATA-07 | issue/spec 3.2 | `manually_corrected=true` 经自动 patch、平滑、EOF、重连和重新投影后保持 | T2,T3,T8 | end-to-end precedence test | pending |
 | AC-DATA-08 | spec 4.2 | attribution revision/history 可审计且 revision 单调递增 | T2 | revision history integration test | pending |
-| AC-PROJ-01 | spec 5.1 | projector 输出稳定 `block_id`、source IDs、text、timing、speaker metadata、partial 标记 | T1 | projector unit tests | pending |
-| AC-PROJ-02 | spec 5.2 | 默认同 source session/epoch/item 聚合，speaker 不兼容不合并 | T1 | boundary table tests | pending |
-| AC-PROJ-03 | spec 5.2 | gap `>1200ms` 断开；最长 `15000ms` 或 `180` 字符先到断开 | T1 | exact boundary tests | pending |
-| AC-PROJ-04 | spec 5.2 | 强结束标点优先断开；逗号/顿号不强制断开 | T1 | punctuation tests | pending |
-| AC-PROJ-05 | spec 5.2 | partial 只有一个底部活动 block，delta 原位更新 | T1,T5,T6 | projector/subtitle/UI tests | pending |
-| AC-PROJ-06 | spec 5.2 | unknown 不跨 item 猜测合并；patch 只刷新 speaker metadata | T1,T2 | projector and patch tests | pending |
-| AC-PROJ-07 | spec 5.3 | DisplayBlock 按 source order 拼接后 100% 等于 confirmed 正文 | T1,T4,T5 | property/table text conservation tests | pending |
-| AC-PROJ-08 | spec 5.3 | timing unavailable 不显示伪精确时间，不提供错误 click-to-source 定位 | T1,T4,T6 | serializer/UI accessibility tests | pending |
-| AC-STATUS-01 | issue/spec 7 | 明确支持 `identified`、`anonymous`、`pending`、`off`、`degraded` | T1,T3,T6 | Python/TS contract + rendering tests | pending |
-| AC-STATUS-02 | spec 7 | anonymous 显示稳定“说话人 N”，pending 显示“正在确认” | T1,T6 | label mapping + component tests | pending |
+| AC-PROJ-01 | spec 5.1 | projector 输出稳定 `block_id`、source IDs、text、timing、speaker metadata、partial 标记 | T1 | projector unit tests | pass |
+| AC-PROJ-02 | spec 5.2 | 默认同 source session/epoch/item 聚合，speaker 不兼容不合并 | T1 | boundary table tests | pass |
+| AC-PROJ-03 | spec 5.2 | gap `>1200ms` 断开；最长 `15000ms` 或 `180` 字符先到断开 | T1 | exact boundary tests | pass |
+| AC-PROJ-04 | spec 5.2 | 强结束标点优先断开；逗号/顿号不强制断开 | T1 | punctuation tests | pass |
+| AC-PROJ-05 | spec 5.2 | partial 只有一个底部活动 block，delta 原位更新 | T1,T5,T6 | projector/subtitle/UI tests | pass (T1 projector) |
+| AC-PROJ-06 | spec 5.2 | unknown 不跨 item 猜测合并；patch 只刷新 speaker metadata | T1,T2 | projector and patch tests | pass (T1 boundary) |
+| AC-PROJ-07 | spec 5.3 | DisplayBlock 按 source order 拼接后 100% 等于 confirmed 正文 | T1,T4,T5 | property/table text conservation tests | pass (T1 examples) |
+| AC-PROJ-08 | spec 5.3 | timing unavailable 不显示伪精确时间，不提供错误 click-to-source 定位 | T1,T4,T6 | serializer/UI accessibility tests | pass (T1 model) |
+| AC-STATUS-01 | issue/spec 7 | 明确支持 `identified`、`anonymous`、`pending`、`off`、`degraded` | T1,T3,T6 | Python/TS contract + rendering tests | pass (T1 Python) |
+| AC-STATUS-02 | spec 7 | anonymous 显示稳定“说话人 N”，pending 显示“正在确认” | T1,T6 | label mapping + component tests | pass (T1 ModelTranscript labels) |
 | AC-STATUS-03 | spec 7 | off 显示“分人未启用”，degraded 显示“分人不可用” | T1,T3,T6 | degraded/off event tests + UI tests | pending |
 | AC-MEET-01 | issue/spec 6.3 | completed event 校验 item/spans，事务写两表后广播 DisplayBlock | T2,T3 | session/repository integration tests | pending |
 | AC-MEET-02 | spec 6.3 | diarization patch 重新投影但不重写正文事实 | T2,T3 | patch event test | pending |
@@ -135,12 +135,20 @@
 - `TranscriptPresentationProjector.project(items, spans, partial=None, profile=...) -> tuple[DisplayBlock, ...]`。
 - `build_model_transcript(items, spans, speakers, ...) -> ModelTranscript`。
 
-- [ ] Step 1: Write RED tests for immutable item validation, span bounds/non-overlap, five speaker statuses, exact aggregation limits, partial replacement and text conservation.
-- [ ] Step 2: Run focused tests and confirm they fail for missing types/projector.
-- [ ] Step 3: Implement minimal frozen Pydantic/domain types and pure projector; do not add database access.
-- [ ] Step 4: Run focused tests, then add property/table cases for empty text, punctuation, gap/duration/length boundaries, unknown speaker and timing unavailable.
-- [ ] Step 5: Verify all AC-DATA-01/02/04/05 and AC-PROJ-01–08 plus AC-STATUS-01/02 with fresh output; mark `pass` in matrix.
-- [ ] Step 6: Commit `feat(transcript): 增加正文归属领域模型与统一投影器`.
+- [x] Step 1: Write RED tests for immutable item validation, span bounds/non-overlap, five speaker statuses, exact aggregation limits, partial replacement and text conservation.
+- [x] Step 2: Run focused tests and confirm they fail for missing types/projector.
+- [x] Step 3: Implement minimal frozen Pydantic/domain types and pure projector; do not add database access.
+- [x] Step 4: Run focused tests, then add property/table cases for empty text, punctuation, gap/duration/length boundaries, unknown speaker and timing unavailable.
+- [x] Step 5: Verify all AC-DATA-01/02/04/05 and AC-PROJ-01–08 plus AC-STATUS-01/02 with fresh output; mark `pass` in matrix.
+- [x] Step 6: Commit `feat(transcript): 增加正文归属领域模型与统一投影器`.
+
+#### 验收记录
+
+- Tests: `rtk uv run pytest -o addopts='' -q tests/test_transcript_projector.py tests/test_meeting_models.py tests/test_speaker_attribution.py` → `26 passed, 9 skipped`
+- Lint: `rtk uv run ruff check ...` → `All checks passed!`
+- Types: `rtk uv run mypy --strict ...` → `Success: no issues found in 3 source files`
+- AC: `AC-DATA-01/02/04/05`, `AC-PROJ-01–08`, `AC-STATUS-01/02` 在 T1 范围内全部 pass；数据库/API/UI 部分继续由 T2–T6 验收。
+- Scope: `CHANGES MADE` 新增三个纯领域模块、包导出和 projector 测试；`DIDN'T TOUCH` 数据库、运行时、UI 和用户-owned voice 文件；`POTENTIAL CONCERNS` `source_ids` 当前编码为 `source_item_id#source_segment_uid`，用于稳定聚合和追溯。
 
 ## Task 2: PostgreSQL Facts, Migration and Repository
 
