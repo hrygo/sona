@@ -28,7 +28,7 @@ Sona 是应用层，不是把模型全部打包进来的单体发行版。ASR、
 
 | 项目 | 当前基线 |
 | --- | --- |
-| 发布版本 | `1.5.1` · Beta |
+| 发布版本 | `1.6.0` · Beta |
 | 目标平台 | Apple Silicon · macOS 14+ |
 | Python | `>=3.12,<3.13` |
 | Realtime 协议 | SpeechRail v2 OpenAI Realtime；协议基线为 v2.0.0 |

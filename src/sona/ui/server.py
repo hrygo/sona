@@ -85,7 +85,7 @@ def create_app(
         finally:
             await context.close()
 
-    app = FastAPI(title="Sona", version="1.5.1", lifespan=lifespan)
+    app = FastAPI(title="Sona", version="1.6.0", lifespan=lifespan)
     attach_app_context(app, context)
     app.add_middleware(SecurityHeadersMiddleware)
     app.add_middleware(

@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.6.0] - 2026-09-09
+
+### Added
+
+- 接入 SpeechRail `2.1.0` 克隆音色参考音频质量验收与质量复测接口。
+- 增加声音工坊质量卡片、克隆前预检、失败原因展示与克隆验收诊断流程。
+
+### Changed
+
+- Sona 代理转发 `clone/validate` 与 `quality-runs`，统一复用 SpeechRail 认证和错误响应。
+- 自我介绍验收流程在重启管道后等待运行时稳定，再发送固定测试文本，降低启动竞态误判。
+
+### Verification
+
+- Python：`1143 passed`，覆盖率 `83.23%`；`mypy` strict 与 `ruff` 全通过。
+- Frontend：`381 passed`；TypeScript/Vite production build 通过。
+- SpeechRail `2.1.0` 真实联调：参考音频校验、clone、3 次质量复测与 TTS 输出均通过；物理扬声器回录噪声仍需真实用户录音 A/B 验收。
+
 ## [1.5.1] - 2026-09-09
 
 ### Added
