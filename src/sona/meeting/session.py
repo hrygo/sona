@@ -519,6 +519,7 @@ class MeetingSession:
                     segment.start_ms for segment in patch_result.segments
                 ),
                 segments=patch_result.segments,
+                display_blocks=await self._persistence.get_display_blocks(meeting_id),
             )
 
     async def _diarization_barrier(self, stream: Any, deadline: float) -> None:
@@ -613,6 +614,7 @@ class MeetingSession:
                         content_revision=int(result.content_revision),
                         replace_from_ms=int(result.replace_from_ms),
                         segments=result.segments,
+                        display_blocks=await self._persistence.get_display_blocks(meeting_id),
                     )
             if window.partial:
                 await self._emit_partial(meeting_id, window)
@@ -643,6 +645,10 @@ class MeetingSession:
                     self._segment_payload(segment, speaker_names)
                     for segment in window.segments
                 ],
+                "display_blocks": [
+                    self._display_block_payload(block)
+                    for block in await self._persistence.get_display_blocks(meeting_id)
+                ],
             },
         )
 
@@ -671,6 +677,7 @@ class MeetingSession:
         content_revision: int,
         replace_from_ms: int,
         segments: Any,
+        display_blocks: Any = (),
     ) -> None:
         """按既有 replace_from_ms 语义广播完整受影响后缀。"""
         speaker_names = await self._load_speaker_names(meeting_id)
@@ -684,6 +691,9 @@ class MeetingSession:
                 "segments": [
                     self._segment_payload(segment, speaker_names)
                     for segment in segments
+                ],
+                "display_blocks": [
+                    self._display_block_payload(block) for block in display_blocks
                 ],
             },
         )
@@ -750,6 +760,12 @@ class MeetingSession:
             payload["speaker_name"] = speaker_names[speaker_key]
         else:
             payload["speaker_name"] = MeetingSession._speaker_name_from_key(speaker_key)
+        return cast(dict[str, object | None], payload)
+
+    @staticmethod
+    def _display_block_payload(block: Any) -> dict[str, object | None]:
+        model_dump = getattr(block, "model_dump", None)
+        payload = model_dump(mode="json") if model_dump is not None else dict(block)
         return cast(dict[str, object | None], payload)
 
     @staticmethod

@@ -53,9 +53,11 @@ from .speaker_attribution import (
 from .speaker_labels import speaker_display_label
 from .transcript_models import (
     AttributionRevision,
+    DisplayBlock,
     TranscriptAttributionSpan,
     TranscriptItem,
 )
+from .transcript_projector import TranscriptPresentationProjector
 
 _MEETING_COLUMNS = """
     id, title, status, language, audio_source, started_at, ended_at,
@@ -1520,6 +1522,14 @@ class PostgresMeetingRepository:
                 )
                 for row in await cursor.fetchall()
             )
+
+    async def get_display_blocks(self, meeting_id: UUID) -> tuple[DisplayBlock, ...]:
+        """从新正文/归属事实临时投影可读 block，不持久化派生结果。"""
+        items = await self.get_transcript_items(meeting_id)
+        if not items:
+            return ()
+        spans = await self.get_transcript_attribution_spans(meeting_id)
+        return TranscriptPresentationProjector().project(items, spans)
 
     async def get_transcript(self, meeting_id: UUID) -> TranscriptDocument:
         async with self._connection() as connection:
