@@ -1,386 +1,293 @@
-# Sona 实时转录展示与会议/字幕 UX 重构规格
+---
+title: "Sona × SpeechRail 统一转录事实、展示投影与跨模式 UX 设计规格"
+description: "以正文表和独立 attribution span 表统一支撑语音助手、会议、内心 OS 与实时字幕，消除逐字展示并保持正文与分人修订不变量"
+status: accepted
+type: technical_spec
+category: architecture
+version: "1.0.0"
+date: 2026-09-09
+last_updated: 2026-09-09
+owners:
+  - "sona-core"
+  - "speechrail"
+scope:
+  - "sona.interaction"
+  - "sona.meeting"
+  - "sona.subtitles"
+  - "sona.ui"
+  - "SpeechRail realtime"
+contracts:
+  - "contracts/meeting-assistant/v1/"
+---
 
-- 日期：2026-09-09
-- 状态：待评审
-- 范围：Sona 与 SpeechRail 的实时字幕、会议转录、说话人展示、可读导出
-- 前置结论：保留原子转录事实；在 Sona 侧统一生成可读展示投影
+# Sona × SpeechRail 统一转录事实、展示投影与跨模式 UX 设计规格
 
-## 1. 摘要
+> 状态：accepted。本文是当前跨模式转录展示、会议 AI 输入和持久化重构的唯一执行基线。
+>
+> 模型边界：会议纪要与 Inner OS 固定使用 `local/kat-coder-2.5`。本规格不引入模型路由、模型替换或模型加载配置变更。
 
-当前系统把 ASR / diarization 的内部原子单元直接暴露给用户。中文 ASR 可能按字符产生 token，SpeechRail 又将每个 token 转为一个 `AttributionUnit`，Sona 再将其逐个转换为 `ASRSegment`、字幕 cue 和会议卡片，因而出现“一个字一段”。这不是人类阅读层的问题，而是事实层与展示层边界缺失。
+## 1. 决策摘要
 
-本规格确定以下方案：
+当前系统把 ASR / diarization 的内部原子单元直接暴露给用户。中文 ASR 可能按字符产生 token，SpeechRail 又将每个 token 转为一个 `AttributionUnit`，Sona 再将其逐个写入 `transcript_segments`、字幕 cue 和会议卡片，因而出现“一个字一段”。会议纪要和 Inner OS 也直接遍历这些碎片，导致 AI 消费不可读稿件。
 
-1. SpeechRail 继续输出可追溯、可修订的原子事实，不在协议层偷偷合并或重写正文。
-2. Sona 新增统一的、无持久化副作用的 `TranscriptPresentationProjector`，将原子事实投影为可读 `DisplayBlock`。
-3. 实时字幕、会议阅读视图、SRT/Markdown/TXT 导出统一使用展示投影；JSON、后台审计和开发诊断保留原子片段，普通 UI 不展示。
-4. 会议 PostgreSQL 仍只保存 canonical completed item 与 speaker metadata；展示块每次按当前事实重新计算，收到说话人 patch 后原位刷新。
-5. 说话人标签不再通过解析不透明 `speaker_key` 猜测数字。服务端返回稳定的匿名标签与明确状态，前端只消费 `speaker_status` / `speaker_name`。
-6. UI 只提供可读阅读体验；原子/逐字事实不作为用户页面或页面内的“高级视图”，仅保留在后台事实、JSON 导出和开发诊断能力中。
-7. 会议纪要和 Inner OS 的模型输入也只消费可读 `DisplayBlock` / `ModelTranscript`，绝不把逐字原子片段直接拼进 prompt；原子片段只通过内部 evidence mapping 支撑可追溯性。
+最终方案如下：
 
-该方案与项目已有的“正文不可变、分人原位修订、人工更正绝对优先”设计保持一致，且不要求 SpeechRail 更改现有 `speechrail.diarization.*` 协议。
+1. SpeechRail 保留可追溯的原子对齐事实；字符级 unit 只能作为事件内的对齐元数据，不能成为数据库正文行、UI 项或 AI evidence 行。
+2. Sona 采用两张核心表：`transcript_items` 保存不可变完整正文，`transcript_attribution_spans` 保存可修订的说话人/时间对齐范围。
+3. Sona 提供无持久化副作用的 `TranscriptPresentationProjector`，统一生成可读 `DisplayBlock`。
+4. 会议实时展示、实时字幕、SRT/Markdown/TXT 导出和 AI 输入均从 projector 生成；普通 UI 不提供逐字版、原子版或时序调试页。
+5. 会议纪要和 Inner OS 统一消费 `ModelTranscript`，模型固定为 `local/kat-coder-2.5`。
+6. 语音助手保留自己的低延迟 turn 链，不依赖会议数据库、会议 projector 或 EOF barrier。
+7. `RuntimeModeCoordinator` 继续保证单一 PCM owner；模式之间共享类型和校验，不共享不适用的状态与存储。
 
-## 2. 调研结论与设计依据
+该方案与 SPK-E2E-1 的“正文不可变、分人原位修订、人工更正绝对优先”保持一致。SpeechRail 只需补充 source item、sequence、event version 和结构化诊断字段，不承担 UI 合并逻辑。
 
-### 2.1 行业产品
+## 2. 当前证据与行业依据
 
-Microsoft Teams 将 live transcript 作为带说话人和时间戳的会议记录展示，而不是将底层 token 暴露给用户；其实时字幕与 transcript 也是可独立选择的体验。[Teams live transcription](https://support.microsoft.com/en-gb/office/view-live-transcription-in-microsoft-teams-meetings-dc1a8f23-2e20-4684-885e-2152e06a4a8b?wapp_id=236c8229-99fc-4702-9960-d79daf8ee38d)
+- 当前 `append_completed_item` 按 attribution unit 插入数据库，造成正文与对齐范围耦合；summary formatter 和 Inner OS context formatter 又按 segment 构造 evidence。
+- 截至 2026-09-09，`sona.transcript_segments` 约 40% 为单字记录；当前表规模约 352 KB，主要问题是语义错误而非性能瓶颈。
+- AWS Transcribe、Azure Speech 和 Google Speech-to-Text 都将完整 phrase/transcript 与 word-level timestamp 分开；Teams 的会议 transcript 也以可读发言和匿名说话人标签为用户层表达。[AWS Transcribe](https://docs.aws.amazon.com/transcribe/latest/dg/how-input.html)、[Azure Speech](https://learn.microsoft.com/en-us/rest/api/speechtotext/transcriptions/transcribe?tabs=HTTP&view=rest-speechtotext-2024-05-15-preview)、[Google Speech-to-Text](https://docs.cloud.google.com/speech-to-text/docs/v1/async-time-offsets)、[Teams transcript](https://support.microsoft.com/en-gb/office/view-live-transcription-in-microsoft-teams-meetings-dc1a8f23-2e20-4684-885e-2152e06a4a8b?wapp_id=236c8229-99fc-4702-9960-d79daf8ee38d)。
+- NIST 将 STT、句边界、diarization 和 Speaker-Attributed STT 分开评估，支持将文字可读性和说话人可靠性作为不同质量维度。[NIST Rich Transcription](https://www.nist.gov/itl/iad/mltg/rich-transcription-evaluation)
 
-当无法将声音映射到真实身份时，Teams Rooms 使用 `Speaker 1`、`Speaker 2` 这类稳定匿名标签，并允许撤销识别；这比“Unknown”更能表达“系统区分出了不同声音，但不知道姓名”。[Teams intelligent speakers](https://support.microsoft.com/en-us/teams/calls-devices/use-microsoft-teams-intelligent-speakers-to-identify-in-room-participants-in-a-meeting-transcription)
-
-### 2.2 评测与标准
-
-NIST Rich Transcription 将 STT、句边界检测、说话人 diarization 与 Speaker-Attributed STT 分开评估。这说明“文字是否可读”和“说话人是否可靠”是不同质量维度，不能用 segment 数量或一个“识别成功/失败”字段代替。[NIST Rich Transcription Evaluation](https://www.nist.gov/itl/iad/mltg/rich-transcription-evaluation)
-
-W3C 对动态状态消息的建议是：状态变化应以不抢焦点的方式暴露，live region 不应对每个微小变化都播报；`role="status"` 应保持礼貌通知，完整状态需要时使用原子更新。[WCAG 4.1.3 Status Messages](https://www.w3.org/WAI/WCAG22/Understanding/status-messages.html)、[ARIA22](https://www.w3.org/WAI/WCAG21/Techniques/aria/ARIA22)
-
-### 2.3 结合当前代码与日志的判断
-
-- SpeechRail `alignment.py` 保留 Qwen3 ASR 的原始字符级范围；`realtime_openai.py::_build_units()` 每个 `TextUnit` 生成一个 `AttributionUnit`。
-- Sona `transcriber.py::_segments_from_units()`、会议 repository、字幕 archive 和会议 SRT export 均沿用逐 unit 输出。
-- 前端会议阅读视图已有局部 `deriveReadingBlocks()`，但字幕实时流和导出仍未复用，造成不同入口的阅读体验不一致。
-- 当前 `speaker_display_label()` 与前端 `isRecognizedSpeakerKey()` 都对 opaque key 做数字格式猜测，A/B/UUID 等合法匿名 cluster key 被误显示为“未识别说话人”。
-- 字幕设置默认关闭 diarization；因此“分人未启用”不能显示为“未识别”。
-- 最新会议日志显示 EOF barrier、diarization done 与仓储水位对齐正常，没有证据表明“一个字一段”是断线或 EOF 故障。历史日志中的队列溢出、旧 worker 错误属于需补充可观测性验证的风险，不能直接归因到当前会议。
-- 当前 `MeetingSummaryClient` 的 transcript formatter 和 Inner OS 的 context formatter 都需要从“逐 canonical segment 拼接”迁移到统一的可读模型输入投影；否则即使 UI 合并了，AI 仍可能消费字符级碎片。
-
-### 2.4 模型边界
-
-模型选型不属于本次转录展示与 UX 改造范围。会议纪要和 Inner OS 均继续使用项目既定的 `local/kat-coder-2.5`，不新增模型路由、不更换模型、不修改模型加载配置，也不在 UI 暴露模型选择器。
-
-行业调研只用于确认输出形态：会议纪要应结构化呈现概览、主题、决策、行动项、负责人、截止时间和待解决问题；Inner OS 应保留证据引用、明确不确定性并支持拒答。[Fireflies summary schema](https://docs.fireflies.ai/schema/summary)、[Fireflies meeting recap](https://fireflies.ai/blog/how-to-write-a-meeting-recap)
-
-LM Studio 仍统一使用原生 `/api/v1/chat`，保留现有 `reasoning`、`max_output_tokens`、`store: false` 和 token/TTFT 统计约束；这些是接入方式，不构成模型更换。[LM Studio REST API](https://lmstudio.ai/docs/developer/rest)、[LM Studio chat](https://lmstudio.ai/docs/developer/rest/chat)
-
-## 3. 产品目标与非目标
+## 3. 领域边界与不变量
 
 ### 3.1 目标
 
 - 用户看到的是连续、可扫读的语义发言块，而非 ASR 内部 token。
 - 字幕低延迟，但不会因每个 delta 产生新行、新卡片或屏幕阅读器播报。
 - 会议转录、实时字幕、可读导出在相同事实下具有一致的分块和标签。
-- 任一展示块都能展开回原子 `segment_uid`，满足审计、修订和问题排查。
-- 说话人状态可解释：用户能知道是待确认、未启用还是服务降级，而不是面对含义不明的“未识别”。
-- 保持正文、时间和原子 ID 的不可变性，人工说话人更正不会被后续自动 patch 覆盖。
+- 任一展示块都能定位回一个或多个不可变 source item，满足审计、修订和问题排查。
+- 说话人状态可解释：待确认、未启用、匿名稳定或服务不可用必须区分。
+- 正文、时间和 source identity 不变；人工说话人更正不会被后续自动 patch 覆盖。
 
 ### 3.2 非目标
 
 - 不在 Sona 重装、下载或运行 ASR/TTS/diarization 模型。
 - 不在 SpeechRail 端做面向 UI 的句子重写、摘要或跨事实单元合并。
 - 不把匿名声纹 cluster 推断为真实姓名。
-- 不用展示合并替代数据库 canonical segments，也不删除已有原子数据。
-- 不在本次方案中改变 OpenAI Realtime 或 `speechrail.diarization.v1` 的既有事件语义。
+- 不用展示合并替代数据库正文；历史数据迁移必须保留 source UID。
+- 不更换 `local/kat-coder-2.5`，不改变 LM Studio 原生 `/api/v1/chat` 约束。
 
-## 4. 核心架构决策
+### 3.3 既有硬不变量
 
-### 4.1 两层模型
+- completed 正文、时间和 `segment_uid` 不可变。
+- diarization patch 只更新 speaker metadata，且人工更正具有最高优先级。
+- PostgreSQL 不保存音频；会议数据库是会议元数据、正文、分人元数据和纪要的事实源。
+- 会议 EOF 继续遵守 commit、`speechrail.diarization.done` 和持久化水位屏障。
+- AudioHub 只有一个 PCM owner；语音助手、字幕和会议不会并行录音。
+
+## 4. 核心数据模型
 
 ```text
-SpeechRail 原子事件
+SpeechRail completed event
         │
         ▼
-Sona canonical facts
-  completed text/time/segment_uid
-  speaker metadata + revision history
+sona.transcript_items
+  完整正文、时间、source identity（不可变）
+        │
+        ├── sona.transcript_attribution_spans
+        │     文本范围、音频范围、speaker metadata（可修订）
         │
         ▼
-TranscriptPresentationProjector（纯函数、可重算）
-        │
-        ├── 实时字幕 payload / SRT cue
-        ├── 会议阅读视图 display_blocks
-        ├── 可读 SRT / Markdown / TXT
-        └── 后台审计 / JSON 导出的 source references
+TranscriptPresentationProjector
+        ├── DisplayBlock / subtitle / SRT / export
+        └── ModelTranscript / summary / Inner OS
 ```
 
-canonical facts 是唯一事实源；`DisplayBlock` 是派生对象，不进入 PostgreSQL，不参与 speaker patch，不获得独立事实身份。展示投影必须保留 `source_segment_uids`，并在任何一个源片段发生 speaker 修订后重新计算。AI 使用的 `ModelTranscript` 继续基于同一展示投影生成，不另造一套逐片段 prompt 格式。
+### 4.1 `transcript_items` 正文表
 
-### 4.2 Sona 与 SpeechRail 的职责
+每个 completed item 一行：
 
-SpeechRail：
+```text
+item_id, meeting_id, source_session_id, source_epoch
+source_segment_uid, source_item_id, sequence
+start_ms, end_ms, text, language, status, created_at
+```
 
-- 保持原始 token/时间范围与 `AttributionUnit` 的可追溯性。
-- 继续发送 completed 文本、音频范围、attribution units 与 diarization patch。
-- 增加必要的结构化观测字段和测试，验证 unit 数量、source item 边界、序列号与 event version；不增加 UI 专用“句子合并”逻辑。
+约束：`text`、时间范围、source identity 和顺序确认后不可修改；字符级 unit 不得拆成多行。唯一性使用 `(meeting_id, source_session_id, source_segment_uid)`，并保留幂等 event identity。
 
-Sona：
+### 4.2 `transcript_attribution_spans` 归属表
 
-- 在 `sona.asr` 或 `sona.meeting` 的展示层提供统一 projector。
-- 用 projector 供字幕 session、会议 API/export 和前端阅读视图使用。
-- 将 speaker 状态和匿名标签作为服务端语义输出给 UI。
-- 保留 raw timeline / audit 入口，供调试与证据核对。
+每个正文范围一行，不重复存文本：
 
-### 4.3 为什么不直接修改 SpeechRail 合并
+```text
+span_id, item_id, text_start, text_end
+audio_start_ms, audio_end_ms, timing_quality
+speaker_key, speaker_status, speaker_confidence
+speaker_revision, manually_corrected, candidates
+```
 
-在 SpeechRail 合并会把事实层、实时协议层和 UI 展示层耦合。它还可能掩盖 `segment_uid` 对应关系，使 Sona 无法安全应用 speaker-only patch。展示合并属于消费方语义：字幕、会议阅读、SRT 和审计视图的边界不同，应该由 Sona 统一但可配置地生成。
+约束：span 覆盖 `item.text` 的合法范围且同一 item 内不重叠；只允许修改 speaker、confidence、timing quality 和 revision 相关字段；`manually_corrected = true` 的 span 永远跳过自动 patch、平滑和 EOF 冲刷。
 
-## 5. DisplayBlock 规则
+说话人修订历史使用独立的 `transcript_attribution_revisions` 审计表或等价事件表，不污染正文表。
+
+### 4.3 所有权
+
+SpeechRail 保持原始 token/时间范围与 `AttributionUnit` 的可追溯性，发送 completed 文本、音频范围、attribution units 与 diarization patch，并补充 source item、sequence、event version 和结构化诊断字段。
+
+Sona 负责两张表的事务、幂等、修订屏障、speaker 语义、展示投影、可读导出和 AI 输入构造。`DisplayBlock` 是派生对象，不进入 PostgreSQL，不参与事实修订，也不获得独立事实身份。
+
+## 5. TranscriptPresentationProjector
 
 ### 5.1 输入与输出
 
 输入至少包含：
 
-- `segment_uid`
-- `text`
-- `start_ms`、`end_ms`（若 unavailable，不伪造精确定位）
-- `speaker_key`、`speaker_status`、`speaker_name`
-- `source_epoch` / `source_session`
-- `source_item_id`（内部字段，优先于猜测 opaque `source_uid`）
-- `manually_corrected`
+- `item_id` / `source_segment_uid`、完整 `text`、`start_ms`、`end_ms`；
+- `source_session_id`、`source_epoch`、`source_item_id`；
+- attribution spans、`speaker_key`、`speaker_status`、`speaker_name`、`manually_corrected`。
 
 输出 `DisplayBlock`：
 
-- `block_id`：派生稳定 ID，不作为事实主键
-- `text`
-- `start_ms`、`end_ms`
-- `speaker_name`
-- `speaker_status`
-- `speaker_color_token`
-- `source_segment_uids`
-- `is_partial`
-- `timing_quality`
+```text
+block_id                 # 派生稳定 ID，不是事实主键
+item_ids / source_ids
+text
+start_ms / end_ms
+speaker_name / speaker_status
+speaker_color_token
+timing_quality
+is_partial
+```
 
-### 5.2 默认聚合算法
+### 5.2 默认聚合规则
 
-默认值沿用现有阅读视图的有效经验，并收敛为后端单一实现：
-
-1. 仅在同一 `source_session`、`source_epoch`、`source_item_id` 范围内聚合；稳定 speaker 的连续 completed item 可在明确连续条件下跨 item 聚合。
+1. `transcript_item` 是最小事实输入；默认先在同一 `source_session`、`source_epoch`、`source_item_id` 内聚合。
 2. `speaker_key` 和 `speaker_status` 必须兼容，不能跨 speaker 聚合。
 3. 相邻片段间隔超过 `1200ms` 时断开。
 4. 单个 block 最长 `15000ms` 或 `180` 个字符，先满足的条件生效。
-5. `。！？!?；;` 等强结束标点后优先断开；逗号、顿号、短语停顿不强制断开。
-6. partial 只允许存在一个位于列表底部的活动 block；delta 更新原 block，不追加新 block。
-7. unknown speaker 只在同一 source item 且时间连续时聚合；不跨 item 猜测合并，避免把两个未知说话人拼成一段。
-8. 收到 speaker patch 后不改动文字、时间或 source IDs，只刷新 block 的 speaker 元数据并重新计算相邻边界。
-9. timing unavailable 时允许展示文本块，但不显示伪精确时间，也不提供错误的点击定位。
+5. `。！？!?；;` 等强结束标点后优先断开；逗号、顿号和短语停顿不强制断开。
+6. partial 只允许存在一个位于列表底部的活动 block；delta 原位更新，不追加新 block。
+7. `unknown` speaker 只在同一 source item 且时间连续时聚合，不跨 item 猜测合并。
+8. speaker patch 不改文字、时间或 source IDs，只刷新 speaker 元数据并重新投影。
+9. timing unavailable 时可展示文本块，但不显示伪精确时间，也不提供错误的点击定位。
 
-这些值不是事实约束，而是展示 profile 的默认值；后续可以为字幕、会议阅读和导出定义不同 profile，但必须复用同一套边界语义和测试 fixtures。
+这些值是展示 profile 的默认值，不是事实约束。字幕、会议阅读和导出可以使用不同的长度/延迟 profile，但必须复用同一套边界语义、speaker 状态和 text conservation fixtures。
 
-### 5.3 后台可追溯性
+### 5.3 文本守恒与追溯
 
-`DisplayBlock` 必须保留 `source_segment_uids`、revision 和 timing metadata，供服务端对账、AI 证据引用、JSON 导出和开发诊断使用；这些字段不在普通 UI 页面渲染，也不提供逐字/原子片段页面。
+按 source order 拼接 DisplayBlock 的文本，必须等于 `transcript_items` 的 confirmed 正文；不可通过 trim、重写、去重或 overlap merge 改变正文。DisplayBlock 保留 source IDs、revision 和 timing metadata，供对账、AI evidence、JSON 导出和开发诊断使用，但这些字段不在普通 UI 页面渲染。
 
-用户侧只提供“定位到这段可读发言”的能力：跳转到对应的阅读块或时间位置，不打开字符级拆分结果。展示块的文本仍必须满足守恒：按 source order 拼接 display blocks 的文本，等于 canonical completed segments 的文本；不可通过 trim、重写、去重或 overlap merge 改变正文。
+## 6. 四种模式的边界
 
-### 5.4 AI 模型输入
+| 模式 | 事实/处理路径 | 数据库 | 用户输出 | AI 输入 |
+|---|---|---:|---|---|
+| 语音助手 | Pipecat + VAD + 回声抑制 + 当前 turn | 否 | 对话气泡 | 当前 user turn |
+| 实时字幕 | SpeechRail ASR + 内存 projector | 否 | DisplayBlock + 一个 partial | 无会议 AI |
+| 会议实时展示 | completed event + 两表事务 + projector | 是 | 会议阅读块 | 不直接消费 span |
+| 会议纪要 | 封存后读取正文并构造 ModelTranscript | 是 | 结构化纪要 | `local/kat-coder-2.5` |
+| 会议 Inner OS | 会中读取 confirmed 正文并构造 ModelTranscript | 可选保存 | 私密卡片 | `local/kat-coder-2.5` |
 
-会议纪要与 Inner OS 的模型输入必须使用 `ModelTranscript`，其来源是同一个 `TranscriptPresentationProjector`：
+### 6.1 语音助手
+
+保持现有 `AudioHub → EchoSuppressionProcessor → SpeechRail STT → SelfEchoFilter → VAD/turn aggregation → local/kat-coder-2.5 → SpeechRail TTS` 热路径。语音助手不得依赖 PostgreSQL、meeting repository、会议 EOF barrier 或 attribution span；可共享底层事件解析和文本校验类型，但不共享会议事实生命周期。
+
+### 6.2 实时字幕
+
+字幕只维护有界内存 confirmed/partial snapshot，重连时重放 snapshot；不依赖 PostgreSQL。默认不启用 diarization，启用时只接收 speaker metadata。partial 只有一个底部活动块，confirmed 到达时替换/追加可读 block，不逐字符创建 DOM 节点。
+
+### 6.3 会议实时展示
 
 ```text
-[B0001][00:00-00:36][说话人 1] 本周先不发布移动端，等支付回归通过；如果周三通过，周四上午发布。
-[B0002][00:37-00:44][说话人 2] 我负责支付回归，周三 18 点前给结果。
+completed event
+ → 校验完整 item 与 spans
+ → 事务写 transcript_items + transcript_attribution_spans
+ → projector 生成 DisplayBlock
+ → WebSocket 广播
 ```
 
-模型看到的是完整可读发言块，不是 `[S0001] 本`、`[S0002] 周` 这种字符级输入。`B0001` 是模型可引用的展示证据别名，服务端再将其映射到一个或多个不可变 `source_segment_uids`；模型不需要知道内部原子分段方式。
+diarization patch 只更新 span 的 speaker 元数据，重新投影并广播；不能修改正文、时间或 source identity。
 
-- 会议纪要：按 `DisplayBlock` 生成带 block alias 的 map 输入；reduce 只接收已验证的结构化 map 结果，不重新读取逐字原子稿。
-- Inner OS：上下文窗口按可读 block 截取，证据 alias 指向完整发言块；答案点击证据后定位到阅读视图中的 block，不打开原子片段。
-- speaker patch：重新投影 block 的说话人标签和证据映射后，新的模型请求使用最新 `content_revision`；正文守恒，旧答案按既有 revision 规则标记。
-- partial：不进入正式纪要；Inner OS 只使用 confirmed block，避免模型把未确认的半句话当事实。
+### 6.4 会议纪要与 Inner OS
 
-这是硬约束，不是仅供 UI 优化的实现建议：任何直接遍历 canonical segments 形成会议纪要或 Inner OS prompt 的代码都必须移除或改为调用 projector。
+两者只读取 confirmed `transcript_items`，通过同一 `ModelTranscript` builder 生成 `[B0001]` 级完整发言输入。partial 不进入正式纪要；Inner OS 请求取消不阻塞会议 EOF 和封存；会后即焚仍遵守现有浏览器内存生命周期，只有用户主动保存才持久化。
 
-## 6. 会议与字幕 UX 重构
+## 7. UX 规则
 
-### 6.1 信息架构
+- UI 只有一个会议主 transcript：可读阅读视图；删除逐字版、原子版和时序调试入口。
+- 每个 block 显示 speaker 文本标签、状态徽标、轻量时间戳和完整正文；不通过颜色单独表达身份。
+- 服务端返回明确状态：`identified`、`anonymous`、`pending`、`off`、`degraded`；前端不得解析 opaque `speaker_key` 猜测“是否识别”。
+- `anonymous` 显示稳定的“说话人 1/2”；`pending` 显示“正在确认”；`off` 显示“分人未启用”；`degraded` 显示“分人不可用”。不再使用无解释的“未识别说话人”。
+- 用户上移阅读时暂停自动跟随，显示“有新内容 · 回到底部”；speaker patch 只更新标签和颜色，不使全文跳动。
+- partial 固定在底部、delta 原位更新；只对完整 block 确认、重连恢复和分人降级发送 `role="status"` 通知，不对每个字符播报。
+- 纪要/Inner OS 证据点击后定位到可读 block 或时间点，不打开逐字稿。
+- 深浅主题、键盘焦点、`role="log"` / `role="status"` 和对比度遵守项目 WCAG 2.1 AA/AAA 约束。
 
-主界面分为三层：
+## 8. 接口、兼容与故障隔离
 
-1. 顶部状态栏：录音状态、麦克风、连接状态、分人状态和已记录时长。
-2. 主阅读区：默认“阅读视图”，显示 DisplayBlock。
-3. 辅助工具区：搜索、回到底部、导出和说话人管理；不提供逐字版、原子版或时序调试页面。
+### 8.1 API
 
-不再把“19 个 segments”作为主信息。用户更关心“已记录多久、当前有几位匿名说话人、是否仍在识别”。原子数量不展示在用户 UI，仅写入后台观测和开发诊断数据。
+- 会议 v1 既有 `segments` 字段在迁移窗口内保留，由兼容适配器生成；新客户端优先使用可选 `display_blocks`。
+- `display_blocks` 是服务端派生输出，客户端不能提交回服务器作为事实。
+- 默认 API 不暴露 span 明细；JSON/开发诊断接口显式请求后才返回 source IDs、spans 和 revision。
+- 字幕 payload 保留旧客户端所需字段，同时补充语义化 speaker status；旧客户端不会因新增字段失败。
 
-### 6.2 阅读视图
+### 8.2 模式隔离
 
-每个发言块包含：
+- `RuntimeModeCoordinator` 保证 `assistant`、`subtitles`、`meeting`、`idle` 的单一 PCM owner 和原子切换。
+- 语音助手和字幕不因会议数据库不可用而失败；会议数据库失败时使用 recovery journal。
+- AI 纪要或 Inner OS 失败不影响会议录音、正文入库和字幕/阅读展示。
+- diarization 降级只改变 speaker status，不阻塞正文和 EOF 封存。
+- projector 异常时最多退回完整 `transcript_item`，禁止退回逐字展示。
+- SpeechRail 重连使用 snapshot、source UID 和幂等事务恢复，禁止重复正文。
 
-- 左侧稳定 speaker color rail；颜色只作辅助，不是唯一身份线索。
-- `speaker_name` 与状态徽标。
-- 轻量时间戳；时间不可用时隐藏精确时间并显示“时间信息有限”。
-- 大字号、舒适行高的正文；块间留白优先于密集卡片边框。
-- hover/focus 后显示“重命名”“定位到此处”。
+### 8.3 LM Studio
 
-默认滚动策略：用户接近底部时自动跟随；用户向上阅读后暂停自动滚动，显示“有新内容 · 回到底部”，点击后恢复跟随。speaker patch 只更新现有块的标签和颜色，不导致全文跳动。
+会议纪要和 Inner OS 固定使用 `local/kat-coder-2.5`，继续调用原生 `/api/v1/chat`，保留 `reasoning`、`max_output_tokens`、`store: false`、token/TTFT 统计和既有调度约束。不得把历史 assistant 压成 user text，也不得改回 OpenAI 兼容端点。
 
-### 6.3 实时字幕
+## 9. 迁移与实施顺序
 
-- partial 固定在底部一个“正在识别”区域，delta 只更新文字。
-- completed 到达时平滑替换 partial，不闪烁、不重复、不产生一个字一行。
-- 确认块以 1–2 行为优先目标，过长才换行/换块；字幕不能因追求块少而延迟过长。
-- 连接重连时显示状态提示，但不把技术错误插入字幕正文。
-- SRT 预览使用同一 DisplayBlock projector；用户下载“可读字幕”时获得语义块，下载 JSON 时获得原子事实。
+1. 增加领域类型、两张表 migration、projector、ModelTranscript builder 和纯单元测试；不改变语音助手热路径。
+2. repository 增加新表双读/幂等写入，旧 `transcript_segments` 只读兼容；新会议开始写入新表。
+3. 会议实时展示、导出和 API 增量接入 DisplayBlock；前端取消逐字/原子页面入口。
+4. 会议 summary 与 Inner OS 改为读取 ModelTranscript，并增加“禁止单字 evidence”测试。
+5. 字幕接入内存 projector，验证重连、partial 替换和无数据库运行。
+6. 完成历史数据校验和可回滚切换后，停止新写入旧 `transcript_segments`；旧兼容读取在一个发布窗口后移除。
+7. SpeechRail 仅补 source identity、event version、结构化日志和契约测试，不改变 diarization 事实语义。
 
-### 6.4 会议阅读与后台证据定位
+每一步均可独立回退；禁止一次性删除旧数据库数据，历史数据迁移必须先完成 source UID 对账和 text conservation 校验。
 
-会议 UI 只有一个面向用户的主 transcript：阅读视图。它面向持续阅读和会后回看，按说话人和语义边界分块。partial、speaker pending、degraded、timing unavailable 等状态以用户语言显示在阅读块或顶部状态栏中，不把内部事件列表变成另一个页面。
+## 10. 验收矩阵
 
-后台仍需维护 raw canonical segments、source references 和 revision history，用于 AI 证据、JSON 导出、日志排查和自动化测试；这属于系统可验证性，不属于普通用户 UX。用户从纪要或 Inner OS 证据点击后，只定位到可读发言块/时间点，不进入逐字版。
+### 数据与事实
 
-阅读视图与后台事实必须保持：
+- 一个 completed item 对应一条完整正文记录；字符级 attribution unit 不产生正文行。
+- span 覆盖合法、不重叠，且不重复存正文。
+- speaker patch 只改 span；正文、时间、source identity 不变。
+- 人工修正经过自动 patch、EOF、重连和重新投影后 100% 保持。
+- display block 文本守恒 100%，source UID 可双向定位。
 
-- 正文完全一致；
-- source segment 可由服务端双向定位；
-- speaker patch 的结果一致；
-- 阅读视图不重写事实，只改变分组和默认信息密度；原子事实不在 UI 展示。
+### 模式回归
 
-### 6.5 说话人展示与操作
+- 语音助手连续 20 轮保持既有 VAD、回声抑制、TTS 和上下文行为，不访问会议表。
+- 字幕在无 PostgreSQL 时仍可运行；partial 不产生逐字列表；重连无重复/丢失。
+- 会议实时展示在 diarization `off` / `pending` / `degraded` 下均能继续显示正文。
+- 纪要和 Inner OS prompt 只出现完整 block alias，不出现字符级 evidence；模型 ID 始终为 `local/kat-coder-2.5`。
+- 模式切换不产生双重 PCM consumer；会议 EOF barrier、journal 和封存语义保持。
 
-服务端语义优先级：
+### UX 与无障碍
 
-| 状态 | 默认显示 | 用户解释 |
-|---|---|---|
-| `stable` | `说话人 1` | 已形成稳定匿名声纹簇，尚未证明真实姓名 |
-| `tentative` | `正在确认 · 说话人 1` | 当前归属可能被后续证据修订 |
-| `unknown` | `说话人待确定` | 暂无可靠说话人归属 |
-| `disabled` | `分人未启用` | 当前模式没有请求 diarization |
-| `degraded` | `分人不可用` | 分人服务异常或已降级，但文字仍继续记录 |
-| 用户命名 | 用户自定义名称 | 人工更正优先，自动 patch 不得覆盖 |
+- 普通连续中文不出现单字独立展示块，除非原文确实是单字/极短 utterance。
+- UI 不存在逐字版入口；证据只定位到可读 block。
+- `identified`、`anonymous`、`pending`、`off`、`degraded` 可区分。
+- 用户上移阅读时不被新内容抢滚动位置；键盘、屏幕阅读器、深浅主题和对比度测试通过。
 
-“说话人 1/2”是匿名区分，不代表系统知道真实姓名。详情提示明确写出：“系统只区分声音簇，不会自动推断真实身份；你可以手动重命名。”
-
-前端禁止通过 `speaker_key` 格式判断是否识别；只能消费 `speaker_status`、`speaker_name` 和服务端提供的稳定颜色 token。所有 speaker 列表按首次出现顺序稳定编号，不能因重连或 patch 重新洗牌。
-
-## 7. 无障碍与视觉规范
-
-- 新增内容使用 `role="log"` 或等价的可读区域；状态变化使用 `role="status"`，不抢焦点。
-- 每个字符 delta 不触发屏幕阅读器播报；只对“开始录音、连接恢复、分人降级、一个完整发言块确认”等有意义事件做节流通知。
-- `aria-live="polite"` 为默认；焦点在用户上移阅读时不自动移动。
-- speaker 不能只靠颜色区分，必须同时有文本标签和状态。
-- 遵守项目现有 WCAG 2.1 AA/AAA 对比度要求；状态徽标、边框、按钮与浅色/深色主题均需复核。
-- 阅读区使用明确的键盘焦点样式；“回到底部”“定位到此处”“重命名说话人”均可键盘操作。
-
-## 8. 接口与兼容性策略
-
-### 8.1 第一阶段：内部 projector，无破坏性协议变更
-
-- 保持会议 v1 `segments` 为 canonical raw segments。
-- 字幕实时 payload、字幕归档、会议 SRT/Markdown/TXT export 改用 projector。
-- 会议前端在兼容窗口内继续支持本地 `deriveReadingBlocks()`，但其规则必须与后端 fixtures 对齐；用户界面不提供 raw/逐字切换。
-- 增加 `source_item_id` 到内部模型链路，避免从 opaque ID 推断 item 边界。
-
-### 8.2 第二阶段：会议 API 增量提供 display blocks
-
-在 `transcript-response` 与 `event-transcript-reconciled` 增加可选 `display_blocks`，保持 `additionalProperties: false` 下的 schema、OpenAPI、AsyncAPI、fixtures 同步更新。旧客户端只读 `segments` 仍可工作；新客户端优先使用服务端 block，断线或旧服务时回退本地 projector。
-
-`display_blocks` 不写数据库，不替代 `segments`，不允许客户端提交回服务器作为事实。服务端发出的 block 必须含 `source_segment_uids`，以便校验守恒与 speaker patch 后刷新。
-
-### 8.3 SpeechRail 改动边界
-
-SpeechRail 本次只补：
-
-- realtime unit 构造的 source item / sequence / event version 观测字段；
-- 字符级 unit、空文本、重复 UID、越界时间的契约测试；
-- 对 Sona 可诊断的结构化日志。
-
-不改变 completed 事件的正文和 attribution semantics，不引入展示 block 字段，不在 SpeechRail 端做跨 unit 的可读合并。
-
-### 8.4 模型配置边界
-
-会议纪要和 Inner OS 继续共用 `local/kat-coder-2.5`。本次不拆分模型字段，不新增 fallback，不修改模型加载或运行配置；仅保留现有的 reasoning、输出上限、`store: false`、prompt version 和 token stats 约束。
-
-## 9. 可观测性与验收指标
-
-### 9.1 必备指标
-
-分别统计，禁止用一个“segment count”代表整体质量：
-
-- `raw_segment_count`
-- `display_block_count`
-- `display_compression_ratio = raw_segment_count / display_block_count`
-- `partial_to_completed_replacement_ms`
-- `display_block_update_count`
-- `speaker_status_counts`：stable / tentative / unknown / disabled / degraded
-- `speaker_patch_latency_ms`
-- `speaker_patch_overwrite_attempts`（manual correction 被跳过应计数）
-- `text_conservation_failures`
-- `source_uid_or_item_boundary_violations`
-- `timing_unavailable_count`
-
-### 9.2 质量目标
-
-- 普通中文连续发言不出现单字独立展示块，除非原文确实是单字/极短 utterance。
-- 相邻普通发言块达到可读密度；默认规则下不会因合并而跨说话人、跨 source epoch 或跨不安全 item 边界。
-- 字幕实时更新不因每个字符产生 DOM 列表项或屏幕阅读器通知。
-- display block 文本守恒 100%。
-- 人工 speaker override 在自动 patch、EOF flush、重连恢复和重新投影后 100% 保持。
-- `unknown`、`disabled`、`degraded` 在 UI 上可区分，且都不再显示笼统“未识别说话人”。
-- 断线重连后不重复、不丢失已确认 display block；必要时通过 source UID 去重。
-
-### 9.3 必测场景
-
-1. 中文逐字 ASR unit 连续输入，最终显示为一个或少量语义块。
-2. 两个说话人交替，绝不跨 speaker 合并。
-3. 同一 speaker 长段发言，按时间/字符上限稳定断开。
-4. unknown 连续片段与不同 source item 的边界。
-5. stable → tentative → stable 的 speaker 更新只改标签，不改正文。
-6. 人工更正后接收自动 patch、EOF flush、重连恢复。
-7. subtitle diarization disabled / degraded / available 三种 UI。
-8. 用户上移阅读时继续来字，不抢滚动位置；回到底部后恢复跟随。
-9. 页面刷新/重连与 SRT、Markdown、TXT、JSON 导出的文本守恒。
-10. 键盘操作、屏幕阅读器状态节流与深浅主题对比度。
-
-## 10. 分阶段实施顺序
-
-### P0：统一展示投影与标签语义
-
-- 实现 projector 与单元/集成测试。
-- 接入字幕实时展示和所有可读导出。
-- 修复服务端 speaker label/status 语义，移除前端 opaque-key 猜测。
-- 保持会议纪要与 Inner OS 使用 `local/kat-coder-2.5`，仅补充展示投影、UX 和文本守恒评测。
-- 让会议纪要与 Inner OS 统一消费 `ModelTranscript`，禁止直接遍历字符级 canonical segments 形成 prompt。
-- 增加 display/raw 计数与文本守恒日志。
-
-### P1：会议 API 与前端主体验
-
-- 增加可选 `display_blocks` 契约字段。
-- 会议阅读视图优先消费服务端 block，保留兼容回退。
-- 重构滚动跟随、partial 替换、speaker 状态徽标和可读证据定位。
-- 删除逐字/原子/时序页面入口；原子数据只保留在后台和 JSON/开发诊断路径。
-
-### P2：联调与体验验收
-
-- 用真实 SpeechRail realtime payload 覆盖字符级 token、patch、重连、EOF。
-- 对最新发现的 unavailable unit 数量不一致问题增加 session/run/version 关联日志，确认是否存在旧进程、回退路径或 payload 版本差异。
-- 完成前端无障碍与视觉验收、导出对账、性能回归。
-
-## 11. 方案取舍
+## 11. 取舍与被替代内容
 
 | 方案 | 结论 | 原因 |
 |---|---|---|
-| 直接在 SpeechRail 合并 token | 不采用 | 事实层与展示层耦合，可能破坏 patch 对账；字幕/会议/审计需求不同 |
-| 只在前端合并 | 不采用 | 导出和字幕仍会碎片化；多端实现漂移；屏幕阅读器仍可能收到高频 delta |
-| 只把 ASR window 调大 | 不采用 | 无法解决 speaker 边界、标点、导出一致性和 unknown 语义 |
-| 激活现有 `diarization_smoother` | 不采用 | 当前逻辑会重建 normalized segment，可能丢失 SPK-E2E 字段并改变原始事实 |
-| 后端 projector + 前端兼容回退 | 采用 | 统一跨入口体验，同时保持 v1 客户端与分阶段发布的可回退性 |
+| SpeechRail 直接合并成 UI 句子 | 不采用 | 事实、协议和展示耦合，削弱 patch 对账 |
+| 只在前端合并 | 不采用 | 字幕、导出和 AI 仍会碎片化，多端规则漂移 |
+| `transcript_segments` 同时保存正文和 attribution span | 不采用 | 一个字一行，正文与 speaker 修订耦合 |
+| `transcript_items` + `transcript_attribution_spans` + Sona projector | 采用 | 正文不可变、分人可修订、展示和 AI 可读、模式可隔离 |
+| 会议纪要/Inner OS 直接读取 span | 不采用 | 模型消费噪声且无法形成稳定证据语义 |
 
-## 12. 评审结论
+本规格替代旧的 `docs/solutions/会议助手实时转录体验优化方案.md`；该旧方案已删除，不再作为执行依据。历史 ADR、验收记录和 SpeechRail 协议归档仍保留，仅用于溯源，不得覆盖本文的当前决策。
 
-本规格建议先提交评审，再进入 implementation plan。评审重点不是是否允许“合并”，而是确认：
-
-- `DisplayBlock` 作为派生展示对象的边界；
-- unknown speaker 只在安全 source item 内聚合的保守规则；
-- 会议 API 是否在 P1 增加可选 `display_blocks`；
-- “UI 只提供阅读视图，原子事实不作为页面入口”的产品边界；模型固定为 `local/kat-coder-2.5`，不纳入本次改造讨论。
-
-确认后再按 P0 → P1 → P2 编写实施计划与测试矩阵。
-
-## 13. 参考资料
-
-### 外部资料
-
-1. Microsoft. [View live transcription in Microsoft Teams meetings](https://support.microsoft.com/en-gb/office/view-live-transcription-in-microsoft-teams-meetings-dc1a8f23-2e20-4684-885e-2152e06a4a8b?wapp_id=236c8229-99fc-4702-9960-d79daf8ee38d)。用于说话人、时间戳和 transcript 与 live captions 分层的产品依据。
-2. Microsoft. [Use Microsoft Teams intelligent speakers to identify in-room participants](https://support.microsoft.com/en-us/teams/calls-devices/use-microsoft-teams-intelligent-speakers-to-identify-in-room-participants-in-a-meeting-transcription)。用于匿名 `Speaker 1/2` 与人工撤销识别的产品依据。
-3. NIST. [Rich Transcription Evaluation](https://www.nist.gov/itl/iad/mltg/rich-transcription-evaluation)。用于将 STT、句边界、diarization 和 speaker-attributed STT 分开评估的依据。
-4. W3C. [Understanding Success Criterion 4.1.3: Status Messages](https://www.w3.org/WAI/WCAG22/Understanding/status-messages.html)；[ARIA22](https://www.w3.org/WAI/WCAG21/Techniques/aria/ARIA22)。用于 live region、状态播报和不抢焦点的无障碍依据。
-5. Fireflies. [Summary schema](https://docs.fireflies.ai/schema/summary)；[How to Write a Meeting Recap](https://fireflies.ai/blog/how-to-write-a-meeting-recap)。用于会议纪要结构、行动项和证据定位的行业产品参考。
-6. LM Studio. [REST API](https://lmstudio.ai/docs/developer/rest)；[Chat API](https://lmstudio.ai/docs/developer/rest/chat)。用于本地原生 `/api/v1/chat`、reasoning、输出上限和性能统计的接口依据。
-
-### 项目内资料
+## 12. 关联资料
 
 - [SPK-E2E-1 端到端分人设计](/Users/hrygo/Documents/sona/docs/architecture/speaker-diarization-e2e-design.md:102)
-- [会议助手实时转录体验优化方案](/Users/hrygo/Documents/sona/docs/solutions/会议助手实时转录体验优化方案.md:141)
+- [会议助手后端运行与前后端联调](/Users/hrygo/Documents/sona/docs/manuals/会议助手后端运行与前后端联调.md:1)
 - [ADR-007：有界会议纪要生成](/Users/hrygo/Documents/sona/docs/decisions/0007-bounded-meeting-summary-generation.md:40)
 - [ADR-009：共享本地推理平台](/Users/hrygo/Documents/sona/docs/decisions/0009-shared-local-inference-platform.md:41)
 - [本机 LM Studio 最佳实践](/Users/hrygo/Documents/本机优化配置/LM-Studio最佳实践.md:1)

@@ -40,7 +40,7 @@
 | `src/sona/asr/models.py` | 没有 no_speech、ASR confidence 或有效发声时长字段 |
 | `tests/asr/test_speechrail_realtime.py` | 已覆盖空 completed、clear ack 竞态、重连与模式参数；应扩展而非重复实现 |
 | `tests/test_subtitle_components.py` | 已覆盖同文字不同时间、历史累积、重连、SRT 生命周期 |
-| `docs/superpowers/plans/2026-09-06-meeting-assistant-transcript-fragmentation.md` | 历史碎片化/展示方案；不改写为本次无声治理的验收结果 |
+| `docs/superpowers/specs/2026-09-09-transcript-presentation-and-ux-design.md` | 当前统一转录事实与展示投影规格；不改写为本次无声治理的验收结果 |
 
 源码证明需要客户端协议回归；是否必须修改每个生产文件应由新测试决定。当前没有真实语音回放结果可证明“所有嗯都来自 VAD 误启动”。
 

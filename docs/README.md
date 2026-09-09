@@ -77,7 +77,6 @@ docs/
 │
 ├── solutions/                             # 💡 专项技术方案与深度设计
 │   ├── 会议模式多说话人精准识别与声纹聚类技术方案.md # 历史本地声纹方案（已归档）；当前实现见 SpeechRail diarization
-│   ├── 会议助手实时转录体验优化方案.md     # 确认/修订/暂存状态分层、段落聚合与阅读视图优化
 │   └── Fun-ASR与现有ASR后端科学对比测试方案.md # SpeechRail 迁移前的 ASR 序贯盲测历史报告 (v1.3)
 │
 ├── manuals/                               # 📖 开发对接与运行手册
@@ -111,7 +110,7 @@ docs/
 │
 └── superpowers/                           # ⚡ 历史执行计划与规格 (Plans & Specs 归档)
     ├── plans/                             # 研发执行计划 (14 份，含当前草案与历史归档)
-    └── specs/                             # 设计规格 (12 份，含当前评审稿与历史归档)
+    └── specs/                             # 设计规格 (14 份，含当前接受规格与历史归档)
 ```
 
 ---
@@ -124,8 +123,8 @@ graph TD
     
     Role -->|系统架构 / 全局审计| Arc[1. 系统总体架构<br/>2. 决策记录 ADRs<br/>3. 工作负载仲裁]
     Role -->|后端研发| Be[1. 会议助手运行手册<br/>2. 架构详细设计<br/>3. 契约规范 contracts/]
-    Role -->|前端研发| Fe[1. Sona UI 方案<br/>2. 前后端联调手册<br/>3. 转录体验优化方案]
-    Role -->|AI / 算法评测| Algo[1. 实时转录体验优化方案<br/>2. SpeechRail 对接契约<br/>3. 历史评测与基准]
+    Role -->|前端研发| Fe[1. Sona UI 方案<br/>2. 前后端联调手册<br/>3. 统一转录展示规格]
+    Role -->|AI / 算法评测| Algo[1. 统一转录展示规格<br/>2. SpeechRail 对接契约<br/>3. 历史评测与基准]
     Role -->|QA / 发布联调| Qa[1. 接线验证记录<br/>2. 联调记录模板<br/>3. 交接清单]
 
     Arc --> ArcDocs[docs/architecture/ & docs/decisions/]
@@ -159,7 +158,6 @@ graph TD
 | 文档名称 | 状态 | 类型 | 版本 | 核心内容与设计要点 |
 |---|---|---|---|---|
 | [会议模式多说话人精准识别与声纹聚类技术方案](solutions/会议模式多说话人精准识别与声纹聚类技术方案.md) | 📦 `archived` | `domain_solution` | `v1.0` | 历史本地 CAM++/AHC 方案；当前实现为 SpeechRail diarization + speaker-only 映射，详见总体架构与 ADR-0011 |
-| [会议助手实时转录体验优化方案](solutions/会议助手实时转录体验优化方案.md) | 🟢 `active` | `domain_solution` | `v1.0` | 实时 ASR 状态分层、段落聚合、断线乱序状态一致性与阅读体验优化 |
 | [Fun-ASR与现有ASR后端科学对比测试方案](solutions/Fun-ASR与现有ASR后端科学对比测试方案.md) | 🟡 `completed` | `benchmark_report` | `v1.3` | SpeechRail 迁移前的 Qwen3-ASR / Fun-ASR / SenseVoiceSmall 序贯盲测历史报告（Core 已触发 futility） |
 
 ### 3. 开发对接与运行手册 (`docs/manuals/`)
@@ -209,8 +207,8 @@ graph TD
 
 | 目录 | 数量 | 状态 | 说明 |
 |---|---|---|---|
-| [superpowers/plans/](superpowers/plans/) | 执行计划集合 | 🟠 `draft` / 🟣 `implemented` | 当前研发计划与历史功能迭代任务清单；P0 见[音频源基础设施实施计划](superpowers/plans/2026-08-31-audio-source-foundation.md)，当前进入[P1 物理输出 Helper 实施计划](superpowers/plans/2026-08-31-physical-output-helper.md) |
-| [superpowers/specs/](superpowers/specs/) | 12 份设计规格 | 🟠 `under_review` / 🟣 `implemented` | 当前评审规格与历史技术整改设计及验证标准；新增[本地物理输出设备音频采集设计](superpowers/specs/2026-08-31-physical-output-audio-capture-design.md) |
+| [superpowers/plans/](superpowers/plans/) | 33 份执行计划 | 🟠 `draft` / 🟣 `implemented` | 当前研发计划与历史功能迭代任务清单；P0 见[音频源基础设施实施计划](superpowers/plans/2026-08-31-audio-source-foundation.md)，当前进入[P1 物理输出 Helper 实施计划](superpowers/plans/2026-08-31-physical-output-helper.md) |
+| [superpowers/specs/](superpowers/specs/) | 14 份设计规格 | 🔵 `accepted` / 🟠 `under_review` / 🟣 `implemented` | 当前接受规格与历史技术整改设计及验证标准；当前转录基线见[统一转录事实、展示投影与跨模式 UX 设计规格](superpowers/specs/2026-09-09-transcript-presentation-and-ux-design.md) |
 
 物理输出采集当前处于 P1 原生 Helper 阶段：IPC v1 契约位于
 [`contracts/audio-capture/v1/`](../contracts/audio-capture/v1/)，`.app` 构建与无权限静态/枚举检查入口为
