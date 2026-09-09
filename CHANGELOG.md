@@ -1,5 +1,29 @@
 # Changelog
 
+## [1.5.1] - 2026-09-09
+
+### Added
+
+- 增加 assistant / subtitles / meeting 三种语音端点策略的清晰边界：assistant 使用本地 VAD，字幕与会议分别使用 SpeechRail `400ms` / `900ms` server VAD。
+- 增加会议/字幕讲话人归属重入隔离、EOF speaker patch 保护与 SpeechRail v2.0.3 联合验收记录。
+
+### Changed
+
+- 音色工坊与 SpeechRail Realtime TTS 支持命名空间语速参数透传；克隆音色稳定性、参考音频校验和源码构建部署边界写入正式文档。
+- 文档中心、架构方案、运行手册与验收记录同步至当前 SpeechRail 源码构建发布流程。
+
+### Fixed
+
+- 修复实时字幕重入后继承旧 diarization terminal/degraded 状态的问题。
+- 修复字幕 EOF 最终窗口以 `unknown` 回写并覆盖已确认 speaker patch 的问题。
+- 修复从语音助手或普通字幕进入会议工作区时未先停止当前 PCM owner 的问题。
+
+### Verification
+
+- Python：`1138 passed`，覆盖率 `83.36%`；`mypy` strict 与 `ruff` 全通过。
+- Frontend：`361 passed`；TypeScript/Vite production build 通过。
+- SpeechRail `2.0.3` health、字幕重入、会议 EOF 水位屏障与 clone 稳定性专项复验已记录；DER/cpCER、长时资源和克隆主观音质仍不在本版本门禁内。
+
 ## [1.5.0] - 2026-09-09
 
 ### Added
