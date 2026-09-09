@@ -49,6 +49,8 @@ class TranscriptAttributionSpan(_FrozenModel):
 
     id: UUID = Field(default_factory=uuid4)
     item_id: UUID
+    source_session_id: str | None = Field(default=None, max_length=128)
+    source_segment_uid: str | None = Field(default=None, max_length=128)
     text_start: int = Field(ge=0)
     text_end: int = Field(gt=0)
     audio_start_ms: int = Field(ge=0)
@@ -60,6 +62,8 @@ class TranscriptAttributionSpan(_FrozenModel):
     speaker_confidence: float | None = Field(default=None, ge=0, le=1)
     speaker_revision: int = Field(default=0, ge=0)
     manually_corrected: bool = False
+    speaker_override_key: str | None = Field(default=None, max_length=200)
+    model_speaker_key: str | None = Field(default=None, max_length=200)
     candidates: tuple[str, ...] = Field(default=(), max_length=8)
 
     @model_validator(mode="after")

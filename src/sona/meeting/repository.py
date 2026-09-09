@@ -13,7 +13,7 @@ from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any, Literal, cast
-from uuid import UUID, uuid4
+from uuid import UUID, uuid4, uuid5
 
 from psycopg.rows import tuple_row
 from psycopg.types.json import Jsonb
@@ -51,6 +51,11 @@ from .speaker_attribution import (
     speaker_source_key,
 )
 from .speaker_labels import speaker_display_label
+from .transcript_models import (
+    AttributionRevision,
+    TranscriptAttributionSpan,
+    TranscriptItem,
+)
 
 _MEETING_COLUMNS = """
     id, title, status, language, audio_source, started_at, ended_at,
@@ -547,6 +552,9 @@ class PostgresMeetingRepository:
                 await self._register_transcription_source(
                     connection, meeting_id, item
                 )
+                await self._insert_transcript_item_and_spans(
+                    connection, meeting_id, meeting.language, item
+                )
                 rows = await self._insert_completed_segments(connection, meeting_id, item)
                 if not rows:
                     # 空 transcript 的 completed 也推进水位与版本事实。
@@ -641,6 +649,83 @@ class PostgresMeetingRepository:
                 item.meeting_start_sample,
                 committed_meeting_sample,
             ),
+        )
+
+    async def _insert_transcript_item_and_spans(
+        self,
+        connection: Any,
+        meeting_id: UUID,
+        language: str,
+        item: CompletedItem,
+    ) -> TranscriptItem | None:
+        """以一条完整正文 + 多条不含正文的 span 写入新事实表。"""
+        if not item.canonical_text.strip():
+            return None
+        item_uuid = uuid5(
+            meeting_id, f"transcript-item:{item.source_session_id}:{item.item_id}"
+        )
+        source_segment_uid = f"item:{item.item_id}"
+        start_ms = (item.meeting_start_sample + item.audio_start_sample) // 16
+        end_ms = (item.meeting_start_sample + item.audio_end_sample) // 16
+        await connection.execute(
+            f"""
+            INSERT INTO {self._schema}.transcript_items
+                (id, meeting_id, source_session_id, source_epoch, source_item_id,
+                 source_segment_uid, sequence, start_ms, end_ms, text, language)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (meeting_id, source_session_id, source_item_id) DO NOTHING
+            """,
+            (
+                item_uuid,
+                meeting_id,
+                item.source_session_id,
+                item.source_epoch,
+                item.item_id,
+                source_segment_uid,
+                item.sequence,
+                start_ms,
+                end_ms,
+                item.canonical_text,
+                language,
+            ),
+        )
+        for unit in item.units:
+            span_id = segment_identity(
+                meeting_id, item.source_session_id, unit.segment_uid
+            )
+            await connection.execute(
+                f"""
+                INSERT INTO {self._schema}.transcript_attribution_spans
+                    (id, item_id, source_session_id, source_segment_uid,
+                     text_start, text_end, audio_start_ms, audio_end_ms,
+                     timing_quality, speaker_status)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'pending')
+                ON CONFLICT (item_id, source_segment_uid) DO NOTHING
+                """,
+                (
+                    span_id,
+                    item_uuid,
+                    item.source_session_id,
+                    unit.segment_uid,
+                    unit.text_start,
+                    unit.text_end,
+                    (item.meeting_start_sample + unit.audio_start_sample) // 16,
+                    (item.meeting_start_sample + unit.audio_end_sample) // 16,
+                    unit.timing_quality,
+                ),
+            )
+        return TranscriptItem(
+            id=item_uuid,
+            meeting_id=meeting_id,
+            source_session_id=item.source_session_id,
+            source_epoch=item.source_epoch,
+            source_item_id=item.item_id,
+            source_segment_uid=source_segment_uid,
+            sequence=item.sequence,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            text=item.canonical_text,
+            language=language,
         )
 
     async def _insert_completed_segments(
@@ -812,6 +897,69 @@ class PostgresMeetingRepository:
                     )
                     if speaker_key != old_key:
                         changed.append(segment_id)
+                    new_status = "pending" if patch.status == "unknown" else "anonymous"
+                    effective_span_key = override_key or (
+                        None if speaker_key == SPEAKER_KEY_UNKNOWN else speaker_key
+                    )
+                    effective_span_status = "identified" if override_key else new_status
+                    await connection.execute(
+                        f"""
+                        UPDATE {self._schema}.transcript_attribution_spans
+                        SET model_speaker_key = %s,
+                            speaker_key = CASE
+                                WHEN manually_corrected THEN speaker_key
+                                ELSE %s
+                            END,
+                            speaker_status = CASE
+                                WHEN manually_corrected THEN speaker_status
+                                ELSE %s
+                            END,
+                            speaker_revision = %s,
+                            candidates = %s,
+                            updated_at = %s
+                        WHERE source_session_id = %s AND source_segment_uid = %s
+                        """,
+                        (
+                            model_speaker_key,
+                            effective_span_key,
+                            effective_span_status,
+                            patch.revision,
+                            Jsonb(
+                                [
+                                    {
+                                        "speaker": candidate.source_speaker,
+                                        "support_ratio": candidate.support_ratio,
+                                    }
+                                    for candidate in patch.candidates
+                                ]
+                            ),
+                            _utc_now(),
+                            event.source_session_id,
+                            patch.segment_uid,
+                        ),
+                    )
+                    await connection.execute(
+                        f"""
+                        INSERT INTO {self._schema}.transcript_attribution_revisions
+                            (id, span_id, revision, speaker_key, speaker_status,
+                             manually_corrected)
+                        SELECT %s, id, %s,
+                               CASE WHEN manually_corrected THEN speaker_key ELSE %s END,
+                               CASE WHEN manually_corrected THEN speaker_status ELSE %s END,
+                               manually_corrected
+                        FROM {self._schema}.transcript_attribution_spans
+                        WHERE source_session_id = %s AND source_segment_uid = %s
+                        ON CONFLICT (span_id, revision) DO NOTHING
+                        """,
+                        (
+                            uuid4(),
+                            patch.revision,
+                            effective_span_key,
+                            effective_span_status,
+                            event.source_session_id,
+                            patch.segment_uid,
+                        ),
+                    )
 
                 await connection.execute(
                     f"""
@@ -1061,6 +1209,18 @@ class PostgresMeetingRepository:
                 )
                 if await cursor.fetchone() is None:
                     raise MeetingNotFoundError("归属目标 segment 不存在")
+                await connection.execute(
+                    f"""
+                    UPDATE {self._schema}.transcript_attribution_spans
+                    SET speaker_override_key = %s,
+                        speaker_key = %s,
+                        speaker_status = 'identified',
+                        manually_corrected = true,
+                        updated_at = %s
+                    WHERE id = %s
+                    """,
+                    (override_key, override_key, _utc_now(), segment_id),
+                )
                 await self._bump_revisions_for_manual_change(
                     connection, meeting_id, meeting, "speaker_override_set",
                     {"segment_id": str(segment_id), "override_key": override_key},
@@ -1086,6 +1246,21 @@ class PostgresMeetingRepository:
                 )
                 if await cursor.fetchone() is None:
                     raise MeetingNotFoundError("归属目标 segment 不存在")
+                await connection.execute(
+                    f"""
+                    UPDATE {self._schema}.transcript_attribution_spans
+                    SET speaker_override_key = NULL,
+                        speaker_key = model_speaker_key,
+                        speaker_status = CASE
+                            WHEN model_speaker_key IS NULL THEN 'pending'
+                            ELSE 'anonymous'
+                        END,
+                        manually_corrected = false,
+                        updated_at = %s
+                    WHERE id = %s
+                    """,
+                    (_utc_now(), segment_id),
+                )
                 await self._bump_revisions_for_manual_change(
                     connection, meeting_id, meeting, "speaker_override_cleared",
                     {"segment_id": str(segment_id)},
@@ -1224,6 +1399,127 @@ class PostgresMeetingRepository:
                 if row is None:
                     raise RepositoryUnavailableError("封存后无法读取会议")
                 return _meeting_from_row(row)
+
+    async def get_transcript_items(self, meeting_id: UUID) -> tuple[TranscriptItem, ...]:
+        """读取新正文事实表；旧 ``get_transcript`` 保持兼容返回。"""
+        async with self._connection() as connection:
+            cursor = await connection.execute(
+                f"""
+                SELECT id, meeting_id, source_session_id, source_epoch,
+                       source_item_id, source_segment_uid, sequence,
+                       start_ms, end_ms, text, language, status, created_at
+                FROM {self._schema}.transcript_items
+                WHERE meeting_id = %s
+                ORDER BY sequence, start_ms, id
+                """,
+                (meeting_id,),
+            )
+            return tuple(
+                TranscriptItem(
+                    id=cast(UUID, row[0]),
+                    meeting_id=cast(UUID, row[1]),
+                    source_session_id=str(row[2]),
+                    source_epoch=int(row[3]),
+                    source_item_id=str(row[4]),
+                    source_segment_uid=str(row[5]),
+                    sequence=int(row[6]),
+                    start_ms=int(row[7]),
+                    end_ms=int(row[8]),
+                    text=str(row[9]),
+                    language=str(row[10]),
+                    status=cast(Literal["completed"], str(row[11])),
+                    created_at=cast(datetime, row[12]),
+                )
+                for row in await cursor.fetchall()
+            )
+
+    async def get_transcript_attribution_spans(
+        self, meeting_id: UUID
+    ) -> tuple[TranscriptAttributionSpan, ...]:
+        """读取不含正文的 speaker/timing attribution spans。"""
+        async with self._connection() as connection:
+            cursor = await connection.execute(
+                f"""
+                SELECT spans.id, spans.item_id, spans.source_session_id,
+                       spans.source_segment_uid, spans.text_start, spans.text_end,
+                       spans.audio_start_ms, spans.audio_end_ms, spans.timing_quality,
+                       spans.speaker_key, spans.speaker_status, spans.speaker_name,
+                       spans.speaker_confidence, spans.speaker_revision,
+                       spans.manually_corrected, spans.speaker_override_key,
+                       spans.model_speaker_key, spans.candidates
+                FROM {self._schema}.transcript_attribution_spans AS spans
+                JOIN {self._schema}.transcript_items AS items ON items.id = spans.item_id
+                WHERE items.meeting_id = %s
+                ORDER BY items.sequence, spans.text_start, spans.id
+                """,
+                (meeting_id,),
+            )
+            return tuple(
+                TranscriptAttributionSpan(
+                    id=cast(UUID, row[0]),
+                    item_id=cast(UUID, row[1]),
+                    source_session_id=str(row[2]),
+                    source_segment_uid=str(row[3]),
+                    text_start=int(row[4]),
+                    text_end=int(row[5]),
+                    audio_start_ms=int(row[6]),
+                    audio_end_ms=int(row[7]),
+                    timing_quality=cast(Literal["aligned", "unavailable"], str(row[8])),
+                    speaker_key=cast(str | None, row[9]),
+                    speaker_status=cast(
+                        Literal["identified", "anonymous", "pending", "off", "degraded"],
+                        str(row[10]),
+                    ),
+                    speaker_name=cast(str | None, row[11]),
+                    speaker_confidence=cast(float | None, row[12]),
+                    speaker_revision=int(row[13]),
+                    manually_corrected=bool(row[14]),
+                    speaker_override_key=cast(str | None, row[15]),
+                    model_speaker_key=cast(str | None, row[16]),
+                    candidates=tuple(
+                        json.dumps(candidate, ensure_ascii=False, sort_keys=True)
+                        if isinstance(candidate, Mapping)
+                        else str(candidate)
+                        for candidate in (row[17] or [])
+                    ),
+                )
+                for row in await cursor.fetchall()
+            )
+
+    async def get_attribution_revisions(
+        self, meeting_id: UUID
+    ) -> tuple[AttributionRevision, ...]:
+        """读取 attribution speaker-only 修订审计。"""
+        async with self._connection() as connection:
+            cursor = await connection.execute(
+                f"""
+                SELECT revisions.id, revisions.span_id, revisions.revision,
+                       revisions.speaker_key, revisions.speaker_status,
+                       revisions.manually_corrected, revisions.created_at
+                FROM {self._schema}.transcript_attribution_revisions AS revisions
+                JOIN {self._schema}.transcript_attribution_spans AS spans
+                  ON spans.id = revisions.span_id
+                JOIN {self._schema}.transcript_items AS items ON items.id = spans.item_id
+                WHERE items.meeting_id = %s
+                ORDER BY revisions.created_at, revisions.id
+                """,
+                (meeting_id,),
+            )
+            return tuple(
+                AttributionRevision(
+                    id=cast(UUID, row[0]),
+                    span_id=cast(UUID, row[1]),
+                    revision=int(row[2]),
+                    speaker_key=cast(str | None, row[3]),
+                    speaker_status=cast(
+                        Literal["identified", "anonymous", "pending", "off", "degraded"],
+                        str(row[4]),
+                    ),
+                    manually_corrected=bool(row[5]),
+                    created_at=cast(datetime, row[6]),
+                )
+                for row in await cursor.fetchall()
+            )
 
     async def get_transcript(self, meeting_id: UUID) -> TranscriptDocument:
         async with self._connection() as connection:

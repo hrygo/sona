@@ -43,14 +43,14 @@
 
 | AC ID | 来源 | 可观察要求 | 覆盖任务 | 验证/证据 | 状态 |
 |---|---|---|---|---|---|
-| AC-DATA-01 | issue/spec 4.1 | 一个 completed item 只写入一条完整 `transcript_items` 正文，字符级 unit 不产生正文行 | T1,T2 | repository integration + row count + text equality | pass (T1 pure model/projector) |
-| AC-DATA-02 | spec 4.1 | `text`、start/end、source identity、sequence 在确认后不可变 | T1,T2 | mutation rejection test + SQL constraint/repository test | pass (T1 frozen model) |
-| AC-DATA-03 | spec 4.1 | `(meeting_id, source_session_id, source_segment_uid)` 幂等；同 event 冲突拒绝 | T2 | duplicate/replay/conflict tests | pending |
-| AC-DATA-04 | spec 4.2 | span 不重复保存正文，只保存 text/audio range 与 speaker metadata | T1,T2 | schema inspection + persisted row test | pass (T1 domain model) |
-| AC-DATA-05 | spec 4.2 | span 覆盖合法、不重叠；非法范围拒绝 | T1,T2 | pure validation + DB integration tests | pass (T1 projector validation) |
-| AC-DATA-06 | spec 4.2 | speaker patch 只变 attribution metadata，不变正文、时间、source identity | T2,T3 | before/after fact snapshot test | pending |
-| AC-DATA-07 | issue/spec 3.2 | `manually_corrected=true` 经自动 patch、平滑、EOF、重连和重新投影后保持 | T2,T3,T8 | end-to-end precedence test | pending |
-| AC-DATA-08 | spec 4.2 | attribution revision/history 可审计且 revision 单调递增 | T2 | revision history integration test | pending |
+| AC-DATA-01 | issue/spec 4.1 | 一个 completed item 只写入一条完整 `transcript_items` 正文，字符级 unit 不产生正文行 | T1,T2 | repository integration + row count + text equality | pass |
+| AC-DATA-02 | spec 4.1 | `text`、start/end、source identity、sequence 在确认后不可变 | T1,T2 | mutation rejection test + SQL constraint/repository test | pass |
+| AC-DATA-03 | spec 4.1 | `(meeting_id, source_session_id, source_segment_uid)` 幂等；同 event 冲突拒绝 | T2 | duplicate/replay/conflict tests | pass |
+| AC-DATA-04 | spec 4.2 | span 不重复保存正文，只保存 text/audio range 与 speaker metadata | T1,T2 | schema inspection + persisted row test | pass |
+| AC-DATA-05 | spec 4.2 | span 覆盖合法、不重叠；非法范围拒绝 | T1,T2 | pure validation + DB integration tests | pass |
+| AC-DATA-06 | spec 4.2 | speaker patch 只变 attribution metadata，不变正文、时间、source identity | T2,T3 | before/after fact snapshot test | pass (T2 repository) |
+| AC-DATA-07 | issue/spec 3.2 | `manually_corrected=true` 经自动 patch、平滑、EOF、重连和重新投影后保持 | T2,T3,T8 | end-to-end precedence test | pass (T2 dual write) |
+| AC-DATA-08 | spec 4.2 | attribution revision/history 可审计且 revision 单调递增 | T2 | revision history integration test | pass |
 | AC-PROJ-01 | spec 5.1 | projector 输出稳定 `block_id`、source IDs、text、timing、speaker metadata、partial 标记 | T1 | projector unit tests | pass |
 | AC-PROJ-02 | spec 5.2 | 默认同 source session/epoch/item 聚合，speaker 不兼容不合并 | T1 | boundary table tests | pass |
 | AC-PROJ-03 | spec 5.2 | gap `>1200ms` 断开；最长 `15000ms` 或 `180` 字符先到断开 | T1 | exact boundary tests | pass |
@@ -64,7 +64,7 @@
 | AC-STATUS-03 | spec 7 | off 显示“分人未启用”，degraded 显示“分人不可用” | T1,T3,T6 | degraded/off event tests + UI tests | pending |
 | AC-MEET-01 | issue/spec 6.3 | completed event 校验 item/spans，事务写两表后广播 DisplayBlock | T2,T3 | session/repository integration tests | pending |
 | AC-MEET-02 | spec 6.3 | diarization patch 重新投影但不重写正文事实 | T2,T3 | patch event test | pending |
-| AC-MEET-03 | spec 8.2 | DB 暂时不可用时 recovery journal 保证正文/patch 可恢复 | T2,T3,T8 | existing recovery suite + new replay tests | pending |
+| AC-MEET-03 | spec 8.2 | DB 暂时不可用时 recovery journal 保证正文/patch 可恢复 | T2,T3,T8 | existing recovery suite + new replay tests | pass (T2 repository integration) |
 | AC-MEET-04 | spec 8.2 | diarization off/pending/degraded 不阻塞正文展示和 EOF 封存 | T3,T8 | barrier state tests | pending |
 | AC-MEET-05 | project AGENTS | 单一 PCM owner；assistant/subtitles/meeting 不双重消费 | T3,T5,T8 | runtime coordinator regression suite | pending |
 | AC-API-01 | spec 8.1 | `segments` 兼容字段保留，由 projector/adapter 生成 | T3 | OpenAPI fixture + API tests | pending |
@@ -94,7 +94,7 @@
 | AC-RAIL-02 | issue 14 | SpeechRail 补结构化诊断字段 | T7 | protocol fixture/schema tests | pending |
 | AC-RAIL-03 | issue 14 | 空文本、重复 UID、越界时间、字符级 unit 契约测试 | T7 | negative contract tests | pending |
 | AC-RAIL-04 | issue/spec | SpeechRail 不做 UI 专用合并，不改变 completed/diarization 事实语义 | T7 | diff/contract assertions | pending |
-| AC-MIG-01 | spec 9 | migration 可重复执行，schema/indices/constraints 正确 | T2 | migration integration test | pending |
+| AC-MIG-01 | spec 9 | migration 可重复执行，schema/indices/constraints 正确 | T2 | migration integration test | pass |
 | AC-MIG-02 | spec 9 | 历史旧表 source UID 对账，正文守恒报告无遗漏 | T8 | reconciliation script + fixture report | pending |
 | AC-MIG-03 | spec 9 | 发布窗口内旧表只读，新会议停止写旧表 | T8 | write-path guard + integration test | pending |
 | AC-MIG-04 | spec 9 | rollback 可恢复旧读路径且不删除新事实 | T8 | rollback simulation | pending |
@@ -161,13 +161,21 @@
 - Repository methods for append/read item, append/read span, `apply_speaker_patches`, revision history and compatibility document reads.
 - Existing `MeetingRepository` methods remain source-compatible for the migration window.
 
-- [ ] Step 1: Write RED schema/repository tests for one-row item writes, idempotent replay, conflicting replay, valid/invalid spans, immutable facts, patch-only mutation and manual precedence.
-- [ ] Step 2: Run focused tests against an isolated temporary PostgreSQL schema and confirm failure.
-- [ ] Step 3: Add migration with constraints/indexes/audit table and repeatable schema bootstrap; keep old table intact.
-- [ ] Step 4: Implement transactional repository dual-read/new-write path and projector-backed document adapter; old table is read-only compatibility only.
-- [ ] Step 5: Run migration and repository tests including rollback/read compatibility and journal replay.
-- [ ] Step 6: Verify AC-DATA-01–08, AC-MEET-03, AC-MIG-01 and update matrix with command evidence.
-- [ ] Step 7: Commit `feat(meeting): 持久化完整正文与归属 span`.
+- [x] Step 1: Write RED schema/repository tests for one-row item writes, idempotent replay, conflicting replay, valid/invalid spans, immutable facts, patch-only mutation and manual precedence.
+- [x] Step 2: Run focused tests against an isolated temporary PostgreSQL schema and confirm failure.
+- [x] Step 3: Add migration with constraints/indexes/audit table and repeatable schema bootstrap; keep old table intact.
+- [x] Step 4: Implement transactional repository dual-write/new-fact reads and old-table compatibility; old table remains available during migration.
+- [x] Step 5: Run migration and repository tests including rollback/read compatibility and journal replay.
+- [x] Step 6: Verify AC-DATA-01–08, AC-MEET-03, AC-MIG-01 and update matrix with command evidence.
+- [x] Step 7: Commit `feat(meeting): 持久化完整正文与归属 span`.
+
+#### 验收记录
+
+- Tests: `SONA_TEST_DATABASE_URL=postgresql:///knowledge rtk uv run pytest -o addopts='' -q tests/test_transcript_persistence.py tests/test_speaker_attribution.py tests/test_meeting_repository.py tests/test_meeting_recovery.py tests/test_meeting_api.py` → `92 passed`
+- Lint: `rtk uv run ruff check src/sona/meeting/repository.py src/sona/meeting/ports.py src/sona/meeting/transcript_models.py tests/test_transcript_persistence.py` → `All checks passed!`
+- Types: `rtk uv run mypy --strict src/sona/meeting/repository.py src/sona/meeting/ports.py src/sona/meeting/transcript_models.py` → `Success: no issues found in 3 source files`
+- AC: `AC-DATA-01–08`, `AC-MEET-03`, `AC-MIG-01` 在 T2 范围内全部 pass；运行时/API projector 切换继续由 T3+ 验收。
+- Scope: `CHANGES MADE` 新增 migration `0005`、事务双写、新事实读取方法、patch 审计和人工 override 镜像；`DIDN'T TOUCH` 用户-owned UI 文件和 SpeechRail；`POTENTIAL CONCERNS` 旧 `get_transcript()` 仍是兼容读取入口，T3 才切换消费者到 projector 数据。
 
 ## Task 3: Meeting Runtime, API and WebSocket
 
