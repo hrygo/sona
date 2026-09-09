@@ -13,10 +13,10 @@
 
 1. SpeechRail 继续输出可追溯、可修订的原子事实，不在协议层偷偷合并或重写正文。
 2. Sona 新增统一的、无持久化副作用的 `TranscriptPresentationProjector`，将原子事实投影为可读 `DisplayBlock`。
-3. 实时字幕、会议阅读视图、SRT/Markdown/TXT 导出统一使用展示投影；JSON 与审计/调试视图保留原子片段。
+3. 实时字幕、会议阅读视图、SRT/Markdown/TXT 导出统一使用展示投影；JSON、后台审计和开发诊断保留原子片段，普通 UI 不展示。
 4. 会议 PostgreSQL 仍只保存 canonical completed item 与 speaker metadata；展示块每次按当前事实重新计算，收到说话人 patch 后原位刷新。
 5. 说话人标签不再通过解析不透明 `speaker_key` 猜测数字。服务端返回稳定的匿名标签与明确状态，前端只消费 `speaker_status` / `speaker_name`。
-6. 阅读视图成为默认主体验；时序/原子视图成为可展开的审计与排障视图，而不是普通用户的首页。
+6. UI 只提供可读阅读体验；原子/逐字事实不作为用户页面或页面内的“高级视图”，仅保留在后台事实、JSON 导出和开发诊断能力中。
 
 该方案与项目已有的“正文不可变、分人原位修订、人工更正绝对优先”设计保持一致，且不要求 SpeechRail 更改现有 `speechrail.diarization.*` 协议。
 
@@ -42,6 +42,27 @@ W3C 对动态状态消息的建议是：状态变化应以不抢焦点的方式�
 - 当前 `speaker_display_label()` 与前端 `isRecognizedSpeakerKey()` 都对 opaque key 做数字格式猜测，A/B/UUID 等合法匿名 cluster key 被误显示为“未识别说话人”。
 - 字幕设置默认关闭 diarization；因此“分人未启用”不能显示为“未识别”。
 - 最新会议日志显示 EOF barrier、diarization done 与仓储水位对齐正常，没有证据表明“一个字一段”是断线或 EOF 故障。历史日志中的队列溢出、旧 worker 错误属于需补充可观测性验证的风险，不能直接归因到当前会议。
+
+### 2.4 模型调研与最终选型
+
+当前代码存在明确的模型职责缺口：`MeetingSummaryClient` 默认读取 `summary_model`，Inner OS 在 `app_context.py` 中也传入同一个 `settings.meeting.summary_model`。仓库默认值仍为 `local/kat-coder-2.5`，因此当前“会议纪要使用什么、Inner OS 使用什么”实际上是同一个可配置模型，而不是经过任务分工的选型。
+
+行业产品的稳定模式是会后生成结构化 recap，至少包含概览、主题/讨论、决策、行动项、负责人/截止时间和可定位的时间线；Fireflies 的公开 summary schema 也将 `overview`、`topics_discussed`、`action_items`、`outline` 等拆开，而不是只生成一段散文。[Fireflies summary schema](https://docs.fireflies.ai/schema/summary)、[Fireflies meeting recap](https://fireflies.ai/blog/how-to-write-a-meeting-recap)
+
+模型侧不应只看通用 benchmark：会议纪要首先是中文理解、证据约束、结构化输出和长上下文任务；Inner OS 还要满足交互延迟、拒答和意图路由。Qwen3.8 官方模型卡声明其支持 262,144 原生上下文、可调 reasoning，以及 instruct/non-thinking 采样路线；KAT-Coder-V2.5 的官方技术报告定位则是 coding-focused agentic model。因此 KAT-Coder 适合代码/工具任务，不应未经中文会议评测就作为会议纪要默认模型。[Qwen3.8-27B model card](https://huggingface.co/Qwen/Qwen3.8-27B)、[KAT-Coder-V2.5 technical report](https://arxiv.org/abs/2607.05471)
+
+2026-09-09 本机只做了小型固定样例探针，不将其冒充完整质量基准：`qwen/qwen3.8-27b` 在 `reasoning=off` 下生成合法结构化中文结果；`gemma-4-12b-it-qat` 速度较快，但在同一探针中把证据别名扩展成带时间的字符串，未满足严格的 `Sxxxx` 引用契约；`local/kat-coder-2.5` 当时处于 unloaded，`qwen/qwen3.6-35b-a3b` 的加载请求被取消。因此最终选型仍以角色匹配、本机已索引状态和后续固定评测集共同决定，不能只以一次 tok/s 比较。
+
+最终选型：
+
+| 业务 | 默认模型 | reasoning | 选择理由 |
+|---|---|---|---|
+| 会后 AI 会议纪要 map/reduce/title | `qwen/qwen3.8-27b` | `off` | 质量优先、中文与长上下文优先；抽取/归并/格式化不需要隐藏思考链 |
+| Inner OS `fact` / `draft` | `qwen/qwen3.6-35b-a3b` | `off` | 交互优先；事实回溯和发言草稿是受证据约束的快速任务 |
+| Inner OS `analysis` / `mixed` | `qwen/qwen3.8-27b` | `medium` | 需要权衡、冲突分析和回应策略时使用质量模型与有限 reasoning |
+| 备用候选 | `gemma-4-12b-it-qat` | 按固定评测决定 | 保留作低延迟/多模态候选；在严格中文证据与结构化评测通过前不进入默认路由 |
+
+该路由不在 UI 暴露模型选择器。模型 ID 应拆成 `summary_model`、`inner_os_fast_model`、`inner_os_reasoning_model` 三个配置字段；模型不可用时返回稳定错误，不静默切到未经验收的模型。LM Studio 统一继续使用原生 `/api/v1/chat`，因为官方文档明确推荐 v1 REST API，并提供 `reasoning`、`max_output_tokens` 与 token/TTFT 统计。[LM Studio REST API](https://lmstudio.ai/docs/developer/rest)、[LM Studio chat](https://lmstudio.ai/docs/developer/rest/chat)
 
 ## 3. 产品目标与非目标
 
@@ -146,11 +167,11 @@ Sona：
 
 这些值不是事实约束，而是展示 profile 的默认值；后续可以为字幕、会议阅读和导出定义不同 profile，但必须复用同一套边界语义和测试 fixtures。
 
-### 5.3 可追溯性
+### 5.3 后台可追溯性
 
-阅读块右侧提供“展开原始片段”入口。展开内容显示：原子文本、时间范围、`segment_uid`、speaker 状态、patch/revision 信息和 timing quality。普通用户不需要看到这些字段，但问题排查时必须可见。
+`DisplayBlock` 必须保留 `source_segment_uids`、revision 和 timing metadata，供服务端对账、AI 证据引用、JSON 导出和开发诊断使用；这些字段不在普通 UI 页面渲染，也不提供逐字/原子片段页面。
 
-展示块的文本必须满足守恒：按 source order 拼接 display blocks 的文本，等于 canonical completed segments 的文本；不可通过 trim、重写、去重或 overlap merge 改变正文。
+用户侧只提供“定位到这段可读发言”的能力：跳转到对应的阅读块或时间位置，不打开字符级拆分结果。展示块的文本仍必须满足守恒：按 source order 拼接 display blocks 的文本，等于 canonical completed segments 的文本；不可通过 trim、重写、去重或 overlap merge 改变正文。
 
 ## 6. 会议与字幕 UX 重构
 
@@ -160,9 +181,9 @@ Sona：
 
 1. 顶部状态栏：录音状态、麦克风、连接状态、分人状态和已记录时长。
 2. 主阅读区：默认“阅读视图”，显示 DisplayBlock。
-3. 辅助工具区：搜索、回到底部、导出、说话人管理，以及可展开的“时序/原始片段”视图。
+3. 辅助工具区：搜索、回到底部、导出和说话人管理；不提供逐字版、原子版或时序调试页面。
 
-不再把“19 个 segments”作为主信息。用户更关心“已记录多久、当前有几位匿名说话人、是否仍在识别”。原子数量只在审计视图或诊断面板显示。
+不再把“19 个 segments”作为主信息。用户更关心“已记录多久、当前有几位匿名说话人、是否仍在识别”。原子数量不展示在用户 UI，仅写入后台观测和开发诊断数据。
 
 ### 6.2 阅读视图
 
@@ -172,7 +193,7 @@ Sona：
 - `speaker_name` 与状态徽标。
 - 轻量时间戳；时间不可用时隐藏精确时间并显示“时间信息有限”。
 - 大字号、舒适行高的正文；块间留白优先于密集卡片边框。
-- hover/focus 后显示“重命名”“展开原始片段”。
+- hover/focus 后显示“重命名”“定位到此处”。
 
 默认滚动策略：用户接近底部时自动跟随；用户向上阅读后暂停自动滚动，显示“有新内容 · 回到底部”，点击后恢复跟随。speaker patch 只更新现有块的标签和颜色，不导致全文跳动。
 
@@ -184,18 +205,18 @@ Sona：
 - 连接重连时显示状态提示，但不把技术错误插入字幕正文。
 - SRT 预览使用同一 DisplayBlock projector；用户下载“可读字幕”时获得语义块，下载 JSON 时获得原子事实。
 
-### 6.4 会议阅读与审计视图
+### 6.4 会议阅读与后台证据定位
 
-阅读视图：面向持续阅读和会后回看，按说话人和语义边界分块。
+会议 UI 只有一个面向用户的主 transcript：阅读视图。它面向持续阅读和会后回看，按说话人和语义边界分块。partial、speaker pending、degraded、timing unavailable 等状态以用户语言显示在阅读块或顶部状态栏中，不把内部事件列表变成另一个页面。
 
-时序视图：面向工程排查和证据核对，按 canonical segment 展示，明确标注 partial、completed、speaker pending、degraded、timing unavailable。
+后台仍需维护 raw canonical segments、source references 和 revision history，用于 AI 证据、JSON 导出、日志排查和自动化测试；这属于系统可验证性，不属于普通用户 UX。用户从纪要或 Inner OS 证据点击后，只定位到可读发言块/时间点，不进入逐字版。
 
-两个视图之间必须保持：
+阅读视图与后台事实必须保持：
 
 - 正文完全一致；
-- source segment 可双向定位；
+- source segment 可由服务端双向定位；
 - speaker patch 的结果一致；
-- 阅读视图不隐藏事实，只改变分组和默认信息密度。
+- 阅读视图不重写事实，只改变分组和默认信息密度；原子事实不在 UI 展示。
 
 ### 6.5 说话人展示与操作
 
@@ -221,7 +242,7 @@ Sona：
 - `aria-live="polite"` 为默认；焦点在用户上移阅读时不自动移动。
 - speaker 不能只靠颜色区分，必须同时有文本标签和状态。
 - 遵守项目现有 WCAG 2.1 AA/AAA 对比度要求；状态徽标、边框、按钮与浅色/深色主题均需复核。
-- 阅读区使用明确的键盘焦点样式；“回到底部”“展开原始片段”“重命名说话人”均可键盘操作。
+- 阅读区使用明确的键盘焦点样式；“回到底部”“定位到此处”“重命名说话人”均可键盘操作。
 
 ## 8. 接口与兼容性策略
 
@@ -229,7 +250,7 @@ Sona：
 
 - 保持会议 v1 `segments` 为 canonical raw segments。
 - 字幕实时 payload、字幕归档、会议 SRT/Markdown/TXT export 改用 projector。
-- 会议前端在兼容窗口内继续支持本地 `deriveReadingBlocks()`，但其规则必须与后端 fixtures 对齐。
+- 会议前端在兼容窗口内继续支持本地 `deriveReadingBlocks()`，但其规则必须与后端 fixtures 对齐；用户界面不提供 raw/逐字切换。
 - 增加 `source_item_id` 到内部模型链路，避免从 opaque ID 推断 item 边界。
 
 ### 8.2 第二阶段：会议 API 增量提供 display blocks
@@ -247,6 +268,20 @@ SpeechRail 本次只补：
 - 对 Sona 可诊断的结构化日志。
 
 不改变 completed 事件的正文和 attribution semantics，不引入展示 block 字段，不在 SpeechRail 端做跨 unit 的可读合并。
+
+### 8.4 模型配置边界
+
+P0 不立即修改本机模型加载配置；先把应用配置和装配边界改成按业务分离：
+
+```text
+SONA_MEETING_SUMMARY_MODEL=qwen/qwen3.8-27b
+SONA_MEETING_INNER_OS_FAST_MODEL=qwen/qwen3.6-35b-a3b
+SONA_MEETING_INNER_OS_REASONING_MODEL=qwen/qwen3.8-27b
+```
+
+`summary_model` 负责会后 `map/reduce/title`；`inner_os_fast_model` 负责 `fact/draft`；`inner_os_reasoning_model` 负责 `analysis/mixed`。Inner OS 的 reasoning 级别也必须独立配置，默认 `off`（fact/draft）或 `medium`（analysis/mixed）。`MeetingSummaryClient` 与 `InnerOSModelClient` 仍共享 `LocalInferenceScheduler`，但不共享模型 ID。
+
+模型选择器不进入 UI；生成结果的元数据保留实际 `model`、prompt version、reasoning 和 token stats，便于质量回归。任何 fallback 都必须是配置中显式登记、通过固定评测的候选，不允许因为某模型 unloaded 就静默改用另一个模型。
 
 ## 9. 可观测性与验收指标
 
@@ -296,14 +331,15 @@ SpeechRail 本次只补：
 - 实现 projector 与单元/集成测试。
 - 接入字幕实时展示和所有可读导出。
 - 修复服务端 speaker label/status 语义，移除前端 opaque-key 猜测。
+- 拆分 `summary_model`、`inner_os_fast_model`、`inner_os_reasoning_model`，并补充固定中文会议评测集；在评测完成前不宣称模型已达到生产质量。
 - 增加 display/raw 计数与文本守恒日志。
 
 ### P1：会议 API 与前端主体验
 
 - 增加可选 `display_blocks` 契约字段。
 - 会议阅读视图优先消费服务端 block，保留兼容回退。
-- 重构滚动跟随、partial 替换、speaker 状态徽标、原始片段抽屉。
-- 将时序视图收敛为高级/审计入口。
+- 重构滚动跟随、partial 替换、speaker 状态徽标和可读证据定位。
+- 删除逐字/原子/时序页面入口；原子数据只保留在后台和 JSON/开发诊断路径。
 
 ### P2：联调与体验验收
 
@@ -328,6 +364,27 @@ SpeechRail 本次只补：
 - `DisplayBlock` 作为派生展示对象的边界；
 - unknown speaker 只在安全 source item 内聚合的保守规则；
 - 会议 API 是否在 P1 增加可选 `display_blocks`；
-- “阅读视图默认、时序视图高级化”的产品入口调整。
+- “UI 只提供阅读视图，原子事实不作为页面入口”的产品边界。
 
 确认后再按 P0 → P1 → P2 编写实施计划与测试矩阵。
+
+## 13. 参考资料
+
+### 外部资料
+
+1. Microsoft. [View live transcription in Microsoft Teams meetings](https://support.microsoft.com/en-gb/office/view-live-transcription-in-microsoft-teams-meetings-dc1a8f23-2e20-4684-885e-2152e06a4a8b?wapp_id=236c8229-99fc-4702-9960-d79daf8ee38d)。用于说话人、时间戳和 transcript 与 live captions 分层的产品依据。
+2. Microsoft. [Use Microsoft Teams intelligent speakers to identify in-room participants](https://support.microsoft.com/en-us/teams/calls-devices/use-microsoft-teams-intelligent-speakers-to-identify-in-room-participants-in-a-meeting-transcription)。用于匿名 `Speaker 1/2` 与人工撤销识别的产品依据。
+3. NIST. [Rich Transcription Evaluation](https://www.nist.gov/itl/iad/mltg/rich-transcription-evaluation)。用于将 STT、句边界、diarization 和 speaker-attributed STT 分开评估的依据。
+4. W3C. [Understanding Success Criterion 4.1.3: Status Messages](https://www.w3.org/WAI/WCAG22/Understanding/status-messages.html)；[ARIA22](https://www.w3.org/WAI/WCAG21/Techniques/aria/ARIA22)。用于 live region、状态播报和不抢焦点的无障碍依据。
+5. Fireflies. [Summary schema](https://docs.fireflies.ai/schema/summary)；[How to Write a Meeting Recap](https://fireflies.ai/blog/how-to-write-a-meeting-recap)。用于会议纪要结构、行动项和证据定位的行业产品参考。
+6. Qwen. [Qwen3.8-27B model card](https://huggingface.co/Qwen/Qwen3.8-27B)。用于模型上下文、reasoning 控制和 instruct/non-thinking 路线的模型依据。
+7. KAT-Coder. [KAT-Coder-V2.5 Technical Report](https://arxiv.org/abs/2607.05471)。用于 KAT-Coder coding-focused 定位的模型依据。
+8. LM Studio. [REST API](https://lmstudio.ai/docs/developer/rest)；[Chat API](https://lmstudio.ai/docs/developer/rest/chat)。用于本地原生 `/api/v1/chat`、reasoning、输出上限和性能统计的接口依据。
+
+### 项目内资料
+
+- [SPK-E2E-1 端到端分人设计](/Users/hrygo/Documents/sona/docs/architecture/speaker-diarization-e2e-design.md:102)
+- [会议助手实时转录体验优化方案](/Users/hrygo/Documents/sona/docs/solutions/会议助手实时转录体验优化方案.md:141)
+- [ADR-007：有界会议纪要生成](/Users/hrygo/Documents/sona/docs/decisions/0007-bounded-meeting-summary-generation.md:40)
+- [ADR-009：共享本地推理平台](/Users/hrygo/Documents/sona/docs/decisions/0009-shared-local-inference-platform.md:41)
+- [本机 LM Studio 最佳实践](/Users/hrygo/Documents/本机优化配置/LM-Studio最佳实践.md:1)
