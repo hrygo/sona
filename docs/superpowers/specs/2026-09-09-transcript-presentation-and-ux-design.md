@@ -17,6 +17,7 @@
 4. 会议 PostgreSQL 仍只保存 canonical completed item 与 speaker metadata；展示块每次按当前事实重新计算，收到说话人 patch 后原位刷新。
 5. 说话人标签不再通过解析不透明 `speaker_key` 猜测数字。服务端返回稳定的匿名标签与明确状态，前端只消费 `speaker_status` / `speaker_name`。
 6. UI 只提供可读阅读体验；原子/逐字事实不作为用户页面或页面内的“高级视图”，仅保留在后台事实、JSON 导出和开发诊断能力中。
+7. 会议纪要和 Inner OS 的模型输入也只消费可读 `DisplayBlock` / `ModelTranscript`，绝不把逐字原子片段直接拼进 prompt；原子片段只通过内部 evidence mapping 支撑可追溯性。
 
 该方案与项目已有的“正文不可变、分人原位修订、人工更正绝对优先”设计保持一致，且不要求 SpeechRail 更改现有 `speechrail.diarization.*` 协议。
 
@@ -42,6 +43,7 @@ W3C 对动态状态消息的建议是：状态变化应以不抢焦点的方式�
 - 当前 `speaker_display_label()` 与前端 `isRecognizedSpeakerKey()` 都对 opaque key 做数字格式猜测，A/B/UUID 等合法匿名 cluster key 被误显示为“未识别说话人”。
 - 字幕设置默认关闭 diarization；因此“分人未启用”不能显示为“未识别”。
 - 最新会议日志显示 EOF barrier、diarization done 与仓储水位对齐正常，没有证据表明“一个字一段”是断线或 EOF 故障。历史日志中的队列溢出、旧 worker 错误属于需补充可观测性验证的风险，不能直接归因到当前会议。
+- 当前 `MeetingSummaryClient` 的 transcript formatter 和 Inner OS 的 context formatter 都需要从“逐 canonical segment 拼接”迁移到统一的可读模型输入投影；否则即使 UI 合并了，AI 仍可能消费字符级碎片。
 
 ### 2.4 模型边界
 
@@ -88,10 +90,10 @@ TranscriptPresentationProjector（纯函数、可重算）
         ├── 实时字幕 payload / SRT cue
         ├── 会议阅读视图 display_blocks
         ├── 可读 SRT / Markdown / TXT
-        └── 原子时序 / 审计视图的 source references
+        └── 后台审计 / JSON 导出的 source references
 ```
 
-canonical facts 是唯一事实源；`DisplayBlock` 是派生对象，不进入 PostgreSQL，不参与 speaker patch，不获得独立事实身份。展示投影必须保留 `source_segment_uids`，并在任何一个源片段发生 speaker 修订后重新计算。
+canonical facts 是唯一事实源；`DisplayBlock` 是派生对象，不进入 PostgreSQL，不参与 speaker patch，不获得独立事实身份。展示投影必须保留 `source_segment_uids`，并在任何一个源片段发生 speaker 修订后重新计算。AI 使用的 `ModelTranscript` 继续基于同一展示投影生成，不另造一套逐片段 prompt 格式。
 
 ### 4.2 Sona 与 SpeechRail 的职责
 
@@ -159,6 +161,24 @@ Sona：
 `DisplayBlock` 必须保留 `source_segment_uids`、revision 和 timing metadata，供服务端对账、AI 证据引用、JSON 导出和开发诊断使用；这些字段不在普通 UI 页面渲染，也不提供逐字/原子片段页面。
 
 用户侧只提供“定位到这段可读发言”的能力：跳转到对应的阅读块或时间位置，不打开字符级拆分结果。展示块的文本仍必须满足守恒：按 source order 拼接 display blocks 的文本，等于 canonical completed segments 的文本；不可通过 trim、重写、去重或 overlap merge 改变正文。
+
+### 5.4 AI 模型输入
+
+会议纪要与 Inner OS 的模型输入必须使用 `ModelTranscript`，其来源是同一个 `TranscriptPresentationProjector`：
+
+```text
+[B0001][00:00-00:36][说话人 1] 本周先不发布移动端，等支付回归通过；如果周三通过，周四上午发布。
+[B0002][00:37-00:44][说话人 2] 我负责支付回归，周三 18 点前给结果。
+```
+
+模型看到的是完整可读发言块，不是 `[S0001] 本`、`[S0002] 周` 这种字符级输入。`B0001` 是模型可引用的展示证据别名，服务端再将其映射到一个或多个不可变 `source_segment_uids`；模型不需要知道内部原子分段方式。
+
+- 会议纪要：按 `DisplayBlock` 生成带 block alias 的 map 输入；reduce 只接收已验证的结构化 map 结果，不重新读取逐字原子稿。
+- Inner OS：上下文窗口按可读 block 截取，证据 alias 指向完整发言块；答案点击证据后定位到阅读视图中的 block，不打开原子片段。
+- speaker patch：重新投影 block 的说话人标签和证据映射后，新的模型请求使用最新 `content_revision`；正文守恒，旧答案按既有 revision 规则标记。
+- partial：不进入正式纪要；Inner OS 只使用 confirmed block，避免模型把未确认的半句话当事实。
+
+这是硬约束，不是仅供 UI 优化的实现建议：任何直接遍历 canonical segments 形成会议纪要或 Inner OS prompt 的代码都必须移除或改为调用 projector。
 
 ## 6. 会议与字幕 UX 重构
 
@@ -309,6 +329,7 @@ SpeechRail 本次只补：
 - 接入字幕实时展示和所有可读导出。
 - 修复服务端 speaker label/status 语义，移除前端 opaque-key 猜测。
 - 保持会议纪要与 Inner OS 使用 `local/kat-coder-2.5`，仅补充展示投影、UX 和文本守恒评测。
+- 让会议纪要与 Inner OS 统一消费 `ModelTranscript`，禁止直接遍历字符级 canonical segments 形成 prompt。
 - 增加 display/raw 计数与文本守恒日志。
 
 ### P1：会议 API 与前端主体验
