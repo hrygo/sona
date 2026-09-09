@@ -17,7 +17,7 @@ import {
   mockSegments,
 } from "../../test/fixtures/meetingFixtures";
 import { useInnerOSStore } from "../../features/innerOS";
-import type { TranscriptSegment } from "../../contracts/meetingContract";
+import type { DisplayBlock, TranscriptSegment } from "../../contracts/meetingContract";
 
 // Extend global for React 19 testing flag
 declare global {
@@ -436,13 +436,10 @@ describe("Meeting React Components DOM Rendering", () => {
     expect(container.textContent).toContain("0识别分组");
     expect(container.textContent).toContain("含未识别分组，待识别");
     expect(container.querySelector(".recording-compact-state.is-diarization-hint")).not.toBeNull();
-    expect(container.textContent).toContain("时序视图");
-    expect(container.textContent).toContain("阅读视图");
     expect(container.textContent).toContain("结束会议");
     expect(container.textContent).toContain("张三 (架构师)");
     expect(container.textContent).toContain("正在输入的临时转录片段...");
     expect(container.querySelector(".reading-block-card")).not.toBeNull();
-    expect(container.querySelector("button[title*='阅读视图']")?.getAttribute("aria-pressed")).toBe("true");
 
     // Verify de-duplication: no redundant inline sidebar/mic toggle in recording toolbar
     expect(container.querySelector(".btn-sidebar-toggle-inline")).toBeNull();
@@ -452,22 +449,9 @@ describe("Meeting React Components DOM Rendering", () => {
     expect(container.querySelector(".btn-inneros-toggle")).not.toBeNull();
     expect(container.querySelector(".btn-end-meeting")).not.toBeNull();
     expect(container.querySelector(".toolbar-kbd")).not.toBeNull();
-
-    // Switch to the raw timeline view and verify the original segment remains inspectable.
-    const timelineBtn = container.querySelector("button[title*='时序视图']") as HTMLButtonElement;
-    expect(timelineBtn).not.toBeNull();
-    act(() => {
-      timelineBtn.click();
-    });
-    expect(container.querySelector("#segment-seg-001-uuid")).not.toBeNull();
-    expect(container.querySelector(".reading-block-card")).toBeNull();
-
-    // Switch back to reading view.
-    const readingBtn = container.querySelector("button[title*='阅读视图']") as HTMLButtonElement;
-    expect(readingBtn).not.toBeNull();
-    act(() => {
-      readingBtn.click();
-    });
+    expect(container.querySelector("button[title*='时序视图']")).toBeNull();
+    expect(container.querySelector("button[title*='阅读视图']")).toBeNull();
+    expect(container.querySelector(".btn-expand-segments")).toBeNull();
     expect(container.querySelector(".reading-block-card")).not.toBeNull();
   });
 
@@ -541,7 +525,7 @@ describe("Meeting React Components DOM Rendering", () => {
       );
     });
 
-    expect(container.textContent).toContain("会议逐字转录");
+    expect(container.textContent).toContain("会议转录");
     expect(container.textContent).toContain("张三 (架构师)");
     expect(container.textContent).toContain("李四 (前端负责人)");
     expect(container.querySelector(".pane-actions-group")).not.toBeNull();
@@ -551,6 +535,133 @@ describe("Meeting React Components DOM Rendering", () => {
     const highlightedCard = container.querySelector(".segment-card.highlighted");
     expect(highlightedCard).not.toBeNull();
     expect(highlightedCard?.textContent).toContain("前端部分将严格依据 v1 OpenAPI");
+  });
+
+  it("renders backend display blocks as one accessible reading view", () => {
+    const displayBlocks: DisplayBlock[] = [
+      {
+        block_id: "block-001",
+        item_ids: ["item-001"],
+        source_ids: ["session-1#segment-1"],
+        order: 0,
+        speaker_key: "speaker-1",
+        speaker_name: "张三",
+        speaker_status: "identified",
+        speaker_color_token: "speaker-blue",
+        start_ms: 1000,
+        end_ms: 2200,
+        text: "这是完整的可读正文。",
+        timing_quality: "aligned",
+        is_partial: false,
+      },
+      {
+        block_id: "block-002",
+        item_ids: ["item-002"],
+        source_ids: ["session-1#segment-2"],
+        order: 1,
+        speaker_key: null,
+        speaker_name: null,
+        speaker_status: "pending",
+        speaker_color_token: "speaker-pending",
+        start_ms: null,
+        end_ms: null,
+        text: "时间与说话人仍在确认。",
+        timing_quality: "unavailable",
+        is_partial: false,
+      },
+      {
+        block_id: "block-003",
+        item_ids: ["item-003"],
+        source_ids: ["session-1#segment-3"],
+        order: 2,
+        speaker_key: null,
+        speaker_name: null,
+        speaker_status: "degraded",
+        speaker_color_token: "speaker-degraded",
+        start_ms: 2200,
+        end_ms: 3200,
+        text: "正文仍可读，但分人服务不可用。",
+        timing_quality: "aligned",
+        is_partial: false,
+      },
+    ];
+
+    act(() => {
+      root.render(
+        <MeetingTranscriptViewer
+          segments={[]}
+          displayBlocks={displayBlocks}
+          highlightedSegmentId={null}
+          onRenameSpeaker={vi.fn()}
+        />,
+      );
+    });
+
+    expect(container.textContent).toContain("这是完整的可读正文。");
+    expect(container.textContent).toContain("张三");
+    expect(container.textContent).toContain("正在确认");
+    expect(container.textContent).toContain("分人不可用");
+    expect(container.textContent).toContain("时间不可用");
+    expect(container.querySelector('[role="log"]')).not.toBeNull();
+    expect(container.querySelector('[role="status"]')).not.toBeNull();
+    expect(container.querySelector("[title='时序视图']")).toBeNull();
+    expect(container.querySelector(".btn-expand-segments")).toBeNull();
+  });
+
+  it("pauses auto-follow when the reader scrolls up and offers a return action", () => {
+    const makeBlock = (id: string, text: string): DisplayBlock => ({
+      block_id: id,
+      item_ids: [`item-${id}`],
+      source_ids: [`session#${id}`],
+      order: id === "block-001" ? 0 : 1,
+      speaker_key: "speaker-1",
+      speaker_name: "张三",
+      speaker_status: "identified",
+      speaker_color_token: "speaker-blue",
+      start_ms: 0,
+      end_ms: 1000,
+      text,
+      timing_quality: "aligned",
+      is_partial: false,
+    });
+    const initialBlocks = [makeBlock("block-001", "第一条正文")];
+
+    act(() => {
+      root.render(
+        <MeetingTranscriptViewer
+          segments={[]}
+          displayBlocks={initialBlocks}
+          highlightedSegmentId={null}
+          onRenameSpeaker={vi.fn()}
+        />,
+      );
+    });
+
+    const log = container.querySelector('[role="log"]') as HTMLDivElement;
+    Object.defineProperties(log, {
+      scrollHeight: { configurable: true, value: 300 },
+      clientHeight: { configurable: true, value: 100 },
+    });
+    act(() => {
+      log.scrollTop = 0;
+      log.dispatchEvent(new Event("scroll", { bubbles: true }));
+    });
+
+    act(() => {
+      root.render(
+        <MeetingTranscriptViewer
+          segments={[]}
+          displayBlocks={[...initialBlocks, makeBlock("block-002", "第二条正文") ]}
+          highlightedSegmentId={null}
+          onRenameSpeaker={vi.fn()}
+        />,
+      );
+    });
+
+    expect(container.textContent).toContain("有新内容 · 回到底部");
+    const backToBottom = container.querySelector(".transcript-new-content") as HTMLButtonElement;
+    act(() => backToBottom.click());
+    expect(container.textContent).toContain("跟随最新");
   });
 
   it("uses the clipboard fallback when copying a meeting transcript segment", async () => {

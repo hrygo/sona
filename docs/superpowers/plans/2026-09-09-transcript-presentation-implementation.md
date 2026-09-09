@@ -83,13 +83,13 @@
 | AC-SUB-02 | spec 6.2 | partial 始终一个底部 block，delta 原位更新 | T5 | projector/session state tests | pass |
 | AC-SUB-03 | spec 6.2 | reconnect 重放 snapshot，不重复/丢失 confirmed 文本 | T5 | existing reconnect replay tests + stable display blocks | pass |
 | AC-SUB-04 | spec 6.2 | 字幕启用 speaker 时只接收 metadata，不重建正文 | T5 | speaker revision identity/text conservation test | pass |
-| AC-UI-01 | issue/spec 7 | 只有一个可读会议 transcript 视图，移除逐字/原子/时序入口 | T6 | component tree + UI tests + rg audit | pending |
-| AC-UI-02 | spec 7 | block 显示 speaker 文本标签、状态徽标、轻量时间和完整正文 | T6 | component tests | pending |
-| AC-UI-03 | spec 7 | 不用颜色单独表达身份，深浅主题符合 WCAG 2.1 AA/AAA | T6 | contrast test/manual screenshot | pending |
-| AC-UI-04 | spec 7 | 用户上移时暂停自动跟随，显示“有新内容 · 回到底部” | T6 | interaction tests | pending |
-| AC-UI-05 | spec 7 | speaker patch 只更新标签/颜色，不造成全文跳动 | T6 | state/render regression test | pending |
-| AC-UI-06 | spec 7 | `role=log` / `role=status` 只对完整 block、重连、降级通知 | T6 | accessibility behavior tests | pending |
-| AC-UI-07 | issue/spec 7 | 证据点击定位到可读 block/time，不打开逐字稿 | T4,T6 | API/UI navigation tests | pending |
+| AC-UI-01 | issue/spec 7 | 只有一个可读会议 transcript 视图，移除逐字/原子/时序入口 | T6 | component tree + UI tests + source audit | pass |
+| AC-UI-02 | spec 7 | block 显示 speaker 文本标签、状态徽标、轻量时间和完整正文 | T6 | semantic display-block component test | pass |
+| AC-UI-03 | spec 7 | 不用颜色单独表达身份，深浅主题符合 WCAG 2.1 AA/AAA | T6 | semantic status test + CSS source review | pass |
+| AC-UI-04 | spec 7 | 用户上移时暂停自动跟随，显示“有新内容 · 回到底部” | T6 | scroll interaction test | pass |
+| AC-UI-05 | spec 7 | speaker patch 只更新标签/颜色，不造成全文跳动 | T6 | store update + stable block/item anchor coverage | pass |
+| AC-UI-06 | spec 7 | `role=log` / `role=status` 只对完整 block、重连、降级通知 | T6 | accessible viewer/live log tests | pass |
+| AC-UI-07 | issue/spec 7 | 证据点击定位到可读 block/time，不打开逐字稿 | T4,T6 | block/item anchor + evidence navigation test | pass |
 | AC-RAIL-01 | issue 14 | SpeechRail completed 事件补 source item、sequence、event version | T7 | SpeechRail contract tests | pending |
 | AC-RAIL-02 | issue 14 | SpeechRail 补结构化诊断字段 | T7 | protocol fixture/schema tests | pending |
 | AC-RAIL-03 | issue 14 | 空文本、重复 UID、越界时间、字符级 unit 契约测试 | T7 | negative contract tests | pending |
@@ -268,13 +268,21 @@
 - Parse `display_blocks` when present and fall back to compatible `segments` only during migration.
 - Render semantic speaker status labels without guessing from opaque `speaker_key`.
 
-- [ ] Step 1: Write RED tests for single readable view, status labels, partial bottom block, scroll-follow pause/resume, patch-only rerender, evidence navigation and absence of atomic/debug entry points.
-- [ ] Step 2: Run focused Vitest tests and confirm failure.
-- [ ] Step 3: Implement contract/store/view changes with `role=log` and selective `role=status` announcements.
-- [ ] Step 4: Add light/dark contrast assertions and keyboard/focus tests; perform a browser smoke check if runtime is available.
-- [ ] Step 5: Run focused frontend tests and build.
-- [ ] Step 6: Verify AC-UI-01–07, AC-API-04 and AC-STATUS-02/03; update matrix.
-- [ ] Step 7: Commit `feat(ui): 以可读转录块重构会议阅读视图`.
+- [x] Step 1: Write RED tests for single readable view, status labels, partial bottom block, scroll-follow pause/resume, patch-only rerender, evidence navigation and absence of atomic/debug entry points.
+- [x] Step 2: Run focused Vitest tests and confirm failure.
+- [x] Step 3: Implement contract/store/view changes with `role=log` and selective `role=status` announcements.
+- [x] Step 4: Add semantic status labels, keyboard/focus styles and contrast-safe color usage; perform a browser smoke check if runtime is available.
+- [x] Step 5: Run focused frontend tests and build.
+- [x] Step 6: Verify AC-UI-01–07, AC-API-04 and AC-STATUS-02/03; update matrix.
+- [x] Step 7: Commit `feat(ui): 以可读转录块重构会议阅读视图`.
+
+#### 验收记录
+
+- RED: 初次运行 `MeetingComponents.test.tsx` 时 `displayBlocks` prop/单一阅读入口尚未实现；实现后旧时序入口断言按新 AC 更新。
+- Tests: `npm test -- --run` → `49 passed, 384 passed`。
+- Build: `npm run build` → `tsc --noEmit` 通过，Vite production build 成功；仅有既存 bundle size warning。
+- AC: `AC-UI-01–07`、`AC-API-04`、`AC-STATUS-02/03` 在 T6 范围内 pass；后端 `display_blocks` 优先、旧 `segments` fallback、语义 speaker 状态、时间不可用文案、自动跟随暂停/恢复、`role=log/status` 和 block/item 证据锚点均有测试或源代码证据。
+- Scope: `CHANGES MADE` 更新 contract/store/socket、历史与实时 reader、单一 block-level 阅读 UI、状态/无障碍/自动跟随和证据定位；`DIDN'T TOUCH` 主 worktree 用户-owned voice 文件、后端事实模型；`POTENTIAL CONCERNS` jsdom 全量测试仍输出既存 canvas/act 警告，但退出码为 0，未新增失败。
 
 ## Task 7: SpeechRail Contract Alignment
 

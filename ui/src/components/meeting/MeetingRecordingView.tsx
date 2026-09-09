@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from "react";
-import type { TranscriptSegment } from "../../contracts/meetingContract";
+import type { DisplayBlock, SpeakerStatus, TranscriptSegment } from "../../contracts/meetingContract";
 import { formatTimeRange, MeetingGapAlert } from "./MeetingGapAlert";
 import type { TranscriptionGap } from "../../stores/meetingStore";
 import { showToast } from "../Toast";
@@ -9,7 +9,6 @@ import { copyTextToClipboard } from "../../utils/clipboard";
 import { InnerOSPanel, useInnerOSStore } from "../../features/innerOS";
 import { useUISettingsStore } from "../../stores/uiSettingsStore";
 import {
-  BookOpenIcon,
   ClockIcon,
   CopyIcon,
   EditIcon,
@@ -48,9 +47,44 @@ export function isRecognizedSpeakerKey(speakerKey: string): boolean {
   return RECOGNIZED_SPEAKER_KEY.test(rawSpeaker);
 }
 
+type LiveReadingBlock = {
+  readonly block_id: string;
+  readonly segment_ids: readonly string[];
+  readonly speaker_key: string;
+  readonly speaker_name: string;
+  readonly speaker_status: SpeakerStatus;
+  readonly start_ms: number | null;
+  readonly end_ms: number | null;
+  readonly text: string;
+  readonly isStarred: boolean;
+};
+
+function liveSpeakerLabel(block: DisplayBlock): string {
+  if (block.speaker_name) return block.speaker_name;
+  switch (block.speaker_status) {
+    case "identified":
+      return "已识别说话人";
+    case "anonymous":
+      return "匿名说话人";
+    case "off":
+      return "分人未启用";
+    case "degraded":
+      return "分人不可用";
+    default:
+      return "正在确认";
+  }
+}
+
+function liveTimeLabel(startMs: number | null, endMs: number | null): string {
+  return startMs === null || endMs === null
+    ? "时间不可用"
+    : formatTimeRange(startMs, endMs);
+}
+
 export interface MeetingRecordingViewProps {
   startedAt: string | null;
   segments: readonly TranscriptSegment[];
+  displayBlocks?: readonly DisplayBlock[];
   partialText: string | null;
   partialSpeaker: string | null;
   gaps: readonly TranscriptionGap[];
@@ -67,6 +101,7 @@ export interface MeetingRecordingViewProps {
 export function MeetingRecordingView({
   startedAt,
   segments,
+  displayBlocks,
   partialText,
   partialSpeaker,
   gaps,
@@ -82,10 +117,7 @@ export function MeetingRecordingView({
   const [elapsed, setElapsed] = useState(0);
   const [localStarredIds, setLocalStarredIds] = useState<Set<string>>(() => new Set());
   const starredIds = propStarredIds ?? localStarredIds;
-  const [selectedSegmentId, setSelectedSegmentId] = useState<string | null>(null);
   const [filterStarredOnly, setFilterStarredOnly] = useState(false);
-  const [viewMode, setViewMode] = useState<"timeline" | "reading">("reading");
-  const [expandedBlockIds, setExpandedBlockIds] = useState<Set<string>>(() => new Set());
   const scrollRef = useRef<HTMLDivElement>(null);
   const [autoScroll, setAutoScroll] = useState(true);
 
@@ -153,19 +185,13 @@ export function MeetingRecordingView({
   }, [propToggleStarSegment]);
 
   const handleStarSelectedOrLatest = useCallback(() => {
-    if (selectedSegmentId) {
-      toggleStarSegment(selectedSegmentId);
-      const isNowStarred = !starredIds.has(selectedSegmentId);
-      showToast(isNowStarred ? "已将当前选中片段标记为重点 ⭐" : "已取消该片段重点标记");
-      return;
-    }
     if (segments.length > 0) {
       const latest = segments[segments.length - 1];
       toggleStarSegment(latest.id);
       const isNowStarred = !starredIds.has(latest.id);
       showToast(isNowStarred ? "已将最新发言标记为重点 ⭐" : "已取消最新发言重点标记");
     }
-  }, [selectedSegmentId, segments, starredIds, toggleStarSegment]);
+  }, [segments, starredIds, toggleStarSegment]);
 
   // Keyboard shortcuts (Meta+K for InnerOS works everywhere, S/M only when not in input)
   useEffect(() => {
@@ -230,20 +256,23 @@ export function MeetingRecordingView({
   }, [segments, starredIds, filterStarredOnly]);
 
   const readingBlocks = useMemo(() => {
+    if (displayBlocks && displayBlocks.length > 0) {
+      return displayBlocks
+        .filter((block) => !block.is_partial)
+        .map<LiveReadingBlock>((block) => ({
+          block_id: block.block_id,
+          segment_ids: block.item_ids,
+          speaker_key: block.speaker_key || "",
+          speaker_name: liveSpeakerLabel(block),
+          speaker_status: block.speaker_status,
+          start_ms: block.start_ms,
+          end_ms: block.end_ms,
+          text: block.text,
+          isStarred: block.item_ids.some((id) => starredIds.has(id)) || starredIds.has(block.block_id),
+        }));
+    }
     return deriveReadingBlocks(displayedSegments, starredIds);
-  }, [displayedSegments, starredIds]);
-
-  const toggleBlockExpand = (blockId: string) => {
-    setExpandedBlockIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(blockId)) {
-        next.delete(blockId);
-      } else {
-        next.add(blockId);
-      }
-      return next;
-    });
-  };
+  }, [displayBlocks, displayedSegments, starredIds]);
 
   // Evidence smooth anchor and 3s annealing animation
   const handleSelectEvidence = useCallback((segmentId: string) => {
@@ -338,42 +367,17 @@ export function MeetingRecordingView({
           )}
         </div>
 
-        {/* Cluster 2 (Center): 视图模式与重点 */}
+        {/* Cluster 2 (Center): 阅读重点 */}
         <div className="toolbar-cluster cluster-views">
-          <div className="view-mode-toggle-group" role="radiogroup" aria-label="转录视图切换">
-            <button
-              type="button"
-              className={`btn-view-mode ${viewMode === "timeline" ? "active" : ""}`}
-              onClick={() => setViewMode("timeline")}
-              aria-pressed={viewMode === "timeline"}
-              title="时序视图：按原始 ASR 确认片段逐条展示"
-            >
-              <ClockIcon size={13} />
-              <span>时序视图</span>
-            </button>
-            <button
-              type="button"
-              className={`btn-view-mode ${viewMode === "reading" ? "active" : ""}`}
-              onClick={() => setViewMode("reading")}
-              aria-pressed={viewMode === "reading"}
-              title="阅读视图：聚合连续发言提升连贯性"
-            >
-              <BookOpenIcon size={13} />
-              <span>阅读视图</span>
-            </button>
-          </div>
-
-          <div className="toolbar-cluster-divider" />
-
           <button
             type="button"
-            className={`btn-toolbar-action btn-star-action ${selectedSegmentId ? "has-selection" : ""}`}
+            className="btn-toolbar-action btn-star-action"
             onClick={handleStarSelectedOrLatest}
-            aria-pressed={Boolean(selectedSegmentId && starredIds.has(selectedSegmentId))}
+            aria-pressed={false}
             title="标记重点发言 (快捷键 S)"
           >
             <SparklesIcon size={13} />
-            <span>{selectedSegmentId ? "标选中段" : "标重点"}</span>
+            <span>标重点</span>
             <kbd className="toolbar-kbd">S</kbd>
           </button>
 
@@ -426,7 +430,7 @@ export function MeetingRecordingView({
               isRecording={true}
               hasPartial={Boolean(partialText)}
               isMuted={micMuted}
-              activeTextTrigger={partialText || segments.length}
+              activeTextTrigger={partialText || displayBlocks?.length || segments.length}
             />
           </div>
 
@@ -434,6 +438,9 @@ export function MeetingRecordingView({
             className="live-transcript-container"
             ref={scrollRef}
             onScroll={handleScroll}
+            role="log"
+            aria-live="polite"
+            aria-label="实时会议转录"
           >
             {displayedSegments.length === 0 && !partialText && (
               <div className="history-empty">
@@ -445,104 +452,55 @@ export function MeetingRecordingView({
               </div>
             )}
 
-            {/* 1. 时序视图 (Timeline View) */}
-            {viewMode === "timeline" &&
-              displayedSegments.map((seg) => {
-                const isStarred = starredIds.has(seg.id);
-                const isSelected = selectedSegmentId === seg.id;
-                const speakerColor = speakerColorMap.get(seg.speaker_key) || "var(--color-accent)";
-                return (
-                  <div
-                    key={seg.id}
-                    id={`segment-${seg.id}`}
-                    className={`segment-card ${isStarred ? "is-starred" : ""} ${isSelected ? "is-selected" : ""}`}
-                    onClick={() => setSelectedSegmentId((curr) => (curr === seg.id ? null : seg.id))}
-                    title="点击可选中此发言片段以进行重点标记或复制"
-                    style={{ borderLeftColor: isStarred ? "var(--color-yellow)" : speakerColor }}
-                  >
-                    <div className="segment-top">
-                      <button
-                        type="button"
-                        className="speaker-tag-btn"
-                        title="点击修改此说话人名称"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onRenameSpeaker(seg.speaker_key, seg.speaker_name);
-                        }}
-                      >
-                        <span className="speaker-avatar-circle" style={{ backgroundColor: speakerColor }}>
-                          <UserIcon size={11} />
-                        </span>
-                        <span className="speaker-name-text">{seg.speaker_name}</span>
-                        <span className="speaker-edit-badge" title="可重命名"><EditIcon size={10} /></span>
-                      </button>
-                      <div className="segment-actions-group" style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                        {isStarred && (
-                          <span className="segment-starred-badge" title="重点发言片段">
-                            <SparklesIcon size={11} /> 重点
-                          </span>
-                        )}
-                        <span className="segment-time">
-                          {formatTimeRange(seg.start_ms, seg.end_ms)}
-                        </span>
-                        <button
-                          type="button"
-                          className={`segment-star-btn ${isStarred ? "active" : ""}`}
-                          title={isStarred ? "取消重点标记" : "标记此片段为重点 (快捷键 S)"}
-                          aria-pressed={isStarred}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            toggleStarSegment(seg.id);
-                          }}
-                        >
-                          <SparklesIcon size={12} />
-                          <span className="star-btn-text">{isStarred ? "已标记" : "标为重点"}</span>
-                        </button>
-                        <button
-                          type="button"
-                          className="segment-copy-btn"
-                          title="复制此发言内容"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            void handleCopyText(seg.text);
-                          }}
-                        >
-                          <CopyIcon size={12} />
-                        </button>
-                      </div>
-                    </div>
-                    <p className="segment-text">{seg.text}</p>
-                  </div>
-                );
-              })}
-
-            {/* 2. 阅读视图 (Reading View Blocks) */}
-            {viewMode === "reading" &&
-              readingBlocks.map((block) => {
-                const isExpanded = expandedBlockIds.has(block.block_id);
+            {/* One block-level reading surface for confirmed transcript facts. */}
+            {readingBlocks.map((block) => {
                 const speakerColor = speakerColorMap.get(block.speaker_key) || "var(--color-accent)";
+                const status = "speaker_status" in block ? block.speaker_status : "identified";
+                const canRename = Boolean(block.speaker_key) && (status === "identified" || status === "anonymous" || status === "stable");
                 return (
                   <div
                     key={block.block_id}
+                    id={`segment-${block.block_id}`}
                     className={`segment-card reading-block-card ${block.isStarred ? "is-starred" : ""}`}
+                    data-item-id={block.segment_ids[0] || undefined}
                     style={{ borderLeftColor: block.isStarred ? "var(--color-yellow)" : speakerColor }}
                   >
                     <div className="segment-top">
-                      <button
-                        type="button"
-                        className="speaker-tag-btn"
-                        title="点击修改此说话人名称"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onRenameSpeaker(block.speaker_key, block.speaker_name);
-                        }}
-                      >
-                        <span className="speaker-avatar-circle" style={{ backgroundColor: speakerColor }}>
-                          <UserIcon size={11} />
+                      {canRename ? (
+                        <button
+                          type="button"
+                          className="speaker-tag-btn"
+                          title="点击修改此说话人名称"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onRenameSpeaker(block.speaker_key, block.speaker_name);
+                          }}
+                        >
+                          <span className="speaker-avatar-circle" style={{ backgroundColor: speakerColor }}>
+                            <UserIcon size={11} />
+                          </span>
+                          <span className="speaker-name-text">{block.speaker_name}</span>
+                          <span className="speaker-edit-badge" title="可重命名"><EditIcon size={10} /></span>
+                        </button>
+                      ) : (
+                        <span className="speaker-tag-btn speaker-tag-static">
+                          <span className="speaker-avatar-circle" style={{ backgroundColor: speakerColor }}>
+                            <UserIcon size={11} />
+                          </span>
+                          <span className="speaker-name-text">{block.speaker_name}</span>
                         </span>
-                        <span className="speaker-name-text">{block.speaker_name}</span>
-                        <span className="speaker-edit-badge" title="可重命名"><EditIcon size={10} /></span>
-                      </button>
+                      )}
+                      <span className={`speaker-status-badge is-${status}`}>
+                        {status === "identified" || status === "stable"
+                          ? "已识别"
+                          : status === "anonymous"
+                            ? "匿名说话人"
+                            : status === "off"
+                              ? "分人未启用"
+                              : status === "degraded"
+                                ? "分人不可用"
+                                : "正在确认"}
+                      </span>
                       <div className="segment-actions-group" style={{ display: "flex", alignItems: "center", gap: "8px" }}>
                         {block.isStarred && (
                           <span className="segment-starred-badge" title="包含重点发言片段">
@@ -550,7 +508,7 @@ export function MeetingRecordingView({
                           </span>
                         )}
                         <span className="segment-time">
-                          {formatTimeRange(block.start_ms, block.end_ms)}
+                          {liveTimeLabel(block.start_ms, block.end_ms)}
                         </span>
                         <button
                           type="button"
@@ -566,46 +524,6 @@ export function MeetingRecordingView({
                       </div>
                     </div>
                     <p className="segment-text reading-block-text">{block.text}</p>
-                    {block.segment_ids.length > 1 && (
-                      <div className="reading-block-meta">
-                        <button
-                          type="button"
-                          className="btn-expand-segments"
-                          onClick={() => toggleBlockExpand(block.block_id)}
-                        >
-                          <span>{isExpanded ? "收起发言片段明细 ▴" : `聚合了 ${block.segment_ids.length} 个连续发言片段 ▾`}</span>
-                        </button>
-                      </div>
-                    )}
-                    {isExpanded && (
-                      <div className="reading-block-subsegments">
-                        {segments
-                          .filter((sub) => block.segment_ids.includes(sub.id))
-                          .map((sub) => {
-                            const isSubStarred = starredIds.has(sub.id);
-                            return (
-                              <div
-                                key={sub.id}
-                                id={`segment-${sub.id}`}
-                                className={`subsegment-item ${isSubStarred ? "is-starred" : ""}`}
-                              >
-                                <span className="subsegment-time">
-                                  {formatTimeRange(sub.start_ms, sub.end_ms)}
-                                </span>
-                                <span className="subsegment-text">{sub.text}</span>
-                                <button
-                                  type="button"
-                                  className={`segment-star-btn ${isSubStarred ? "active" : ""}`}
-                                  onClick={() => toggleStarSegment(sub.id)}
-                                  title={isSubStarred ? "取消重点标记" : "标记为重点"}
-                                >
-                                  <SparklesIcon size={12} />
-                                </button>
-                              </div>
-                            );
-                          })}
-                      </div>
-                    )}
                   </div>
                 );
               })}

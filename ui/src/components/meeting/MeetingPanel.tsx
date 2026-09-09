@@ -173,6 +173,7 @@ export default function MeetingPanel({ commandSocket }: MeetingPanelProps) {
           sessionStartedAt: new Date().toISOString(),
           sessionEndedAt: null,
           segments: [],
+          displayBlocks: [],
           gaps: [],
           minutes: null,
           minutesHistory: [],
@@ -392,6 +393,7 @@ export default function MeetingPanel({ commandSocket }: MeetingPanelProps) {
           <MeetingDetailView
             meeting={store.selectedMeeting}
             segments={store.selectedSegments}
+            displayBlocks={store.selectedDisplayBlocks}
             minutes={store.selectedMinutes}
             minutesList={store.selectedMinutesList}
             selectedMinutesVersion={store.selectedMinutesVersion}
@@ -438,6 +440,7 @@ export default function MeetingPanel({ commandSocket }: MeetingPanelProps) {
           <MeetingRecordingView
             startedAt={store.sessionStartedAt}
             segments={store.segments}
+            displayBlocks={store.displayBlocks}
             partialText={store.partialText}
             partialSpeaker={store.partialSpeaker}
             gaps={store.gaps}
@@ -469,6 +472,7 @@ export default function MeetingPanel({ commandSocket }: MeetingPanelProps) {
           <MeetingDetailView
             meeting={activeMeetingDetail}
             segments={store.segments}
+            displayBlocks={store.displayBlocks}
             minutes={store.minutes}
             minutesList={store.minutesHistory}
             selectedMinutesVersion={store.activeMinutesVersion}

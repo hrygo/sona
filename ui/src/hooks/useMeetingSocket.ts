@@ -132,6 +132,7 @@ export function useMeetingSocket(url = runtimeConfig.meetingWsUrl) {
               p.transcript_revision,
               p.content_revision,
               meeting_id,
+              p.display_blocks,
             );
           }
           break;

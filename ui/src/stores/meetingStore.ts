@@ -10,6 +10,7 @@ import {
   type MeetingSummary,
   type MinutesStatus,
   type StorageHealth,
+  type DisplayBlock,
   type TranscriptSegment,
 } from "../contracts/meetingContract";
 import { meetingApi } from "../services/meetingApi";
@@ -47,6 +48,7 @@ export interface MeetingStoreState {
   readonly activeMeeting: MeetingDetail | null;
   readonly status: MeetingStatus | "idle";
   readonly segments: readonly TranscriptSegment[];
+  readonly displayBlocks: readonly DisplayBlock[];
   readonly partialText: string | null;
   readonly partialSpeaker: string | null;
   readonly transcriptRevision: number;
@@ -78,6 +80,7 @@ export interface MeetingStoreState {
   readonly selectedMeetingId: string | null;
   readonly selectedMeeting: MeetingDetail | null;
   readonly selectedSegments: readonly TranscriptSegment[];
+  readonly selectedDisplayBlocks: readonly DisplayBlock[];
   readonly selectedMinutes: MeetingMinutesVersion | null;
   readonly selectedMinutesVersion: number | null;
   readonly selectedMinutesList: readonly MeetingMinutesVersion[];
@@ -95,6 +98,7 @@ export interface MeetingStoreState {
     transcriptRevision: number,
     contentRevision: number,
     meetingId?: string | null,
+    displayBlocks?: readonly DisplayBlock[],
   ) => void;
   readonly applySnapshot: (snapshot: MeetingSnapshotPayload) => void;
   readonly updateMeetingState: (
@@ -179,6 +183,7 @@ export const useMeetingStore = create<MeetingStoreState>((set, get) => ({
   activeMeeting: null,
   status: "idle",
   segments: [],
+  displayBlocks: [],
   partialText: null,
   partialSpeaker: null,
   transcriptRevision: 0,
@@ -243,6 +248,7 @@ export const useMeetingStore = create<MeetingStoreState>((set, get) => ({
   selectedMeetingId: null,
   selectedMeeting: null,
   selectedSegments: [],
+  selectedDisplayBlocks: [],
   selectedMinutes: null,
   selectedMinutesVersion: null,
   selectedMinutesList: [],
@@ -269,6 +275,7 @@ export const useMeetingStore = create<MeetingStoreState>((set, get) => ({
     transcriptRevision,
     contentRevision,
     meetingId,
+    displayBlocks,
   ) => {
     if (meetingId && meetingId !== get().activeMeetingId) return;
     const currentSegments = get().segments;
@@ -303,6 +310,7 @@ export const useMeetingStore = create<MeetingStoreState>((set, get) => ({
 
     set({
       segments: finalSegments,
+      displayBlocks: displayBlocks ?? get().displayBlocks,
       transcriptRevision,
       contentRevision,
       partialText: null, // 清空过时的 partial
@@ -337,6 +345,7 @@ export const useMeetingStore = create<MeetingStoreState>((set, get) => ({
       interruptionReason: occupiesActiveSession ? meeting.interruption_reason || null : null,
       // 换会或终态回落时原子重置旧会议的数据，避免残留
       segments: clearsActive ? [] : state.segments,
+      displayBlocks: clearsActive ? [] : state.displayBlocks,
       speakers: clearsActive ? {} : state.speakers,
       minutes: clearsActive ? null : state.minutes,
       minutesHistory: clearsActive ? [] : state.minutesHistory,
@@ -443,6 +452,12 @@ export const useMeetingStore = create<MeetingStoreState>((set, get) => ({
       const updatedSegments = state.segments.map((seg) =>
         seg.speaker_key === speakerKey ? { ...seg, speaker_name: displayName } : seg,
       );
+      const updatedDisplayBlocks = state.displayBlocks.map((block) =>
+        block.speaker_key === speakerKey ? { ...block, speaker_name: displayName } : block,
+      );
+      const updatedSelectedDisplayBlocks = state.selectedDisplayBlocks.map((block) =>
+        block.speaker_key === speakerKey ? { ...block, speaker_name: displayName } : block,
+      );
 
       // 若纪要已生成，标记旧版本纪要为 stale
       const updatedMinutes = state.minutes
@@ -452,6 +467,8 @@ export const useMeetingStore = create<MeetingStoreState>((set, get) => ({
       return {
         speakers: updatedSpeakers,
         segments: updatedSegments,
+        displayBlocks: updatedDisplayBlocks,
+        selectedDisplayBlocks: updatedSelectedDisplayBlocks,
         contentRevision,
         minutes: updatedMinutes,
       };
@@ -614,6 +631,7 @@ export const useMeetingStore = create<MeetingStoreState>((set, get) => ({
       activeMeeting: null,
       status: "idle",
       segments: [],
+      displayBlocks: [],
       partialText: null,
       partialSpeaker: null,
       transcriptRevision: 0,
@@ -632,6 +650,7 @@ export const useMeetingStore = create<MeetingStoreState>((set, get) => ({
       selectedMeetingId: null,
       selectedMeeting: null,
       selectedSegments: [],
+      selectedDisplayBlocks: [],
       selectedMinutes: null,
       selectedMinutesVersion: null,
       selectedMinutesList: [],
@@ -652,6 +671,7 @@ export const useMeetingStore = create<MeetingStoreState>((set, get) => ({
         if (get().activeMeetingId === meetingId) {
           set({
             segments: resp.segments,
+            displayBlocks: resp.display_blocks || [],
             transcriptRevision: resp.transcript_revision,
             contentRevision: resp.content_revision,
             isCalibrating: false,
@@ -686,6 +706,7 @@ export const useMeetingStore = create<MeetingStoreState>((set, get) => ({
       selectedMeetingId: null,
       selectedMeeting: null,
       selectedSegments: [],
+      selectedDisplayBlocks: [],
       selectedMinutes: null,
       selectedMinutesVersion: null,
       selectedMinutesList: [],
@@ -738,6 +759,7 @@ export const useMeetingStore = create<MeetingStoreState>((set, get) => ({
       set({
         selectedMeeting: detail,
         selectedSegments: transcript.segments,
+        selectedDisplayBlocks: transcript.display_blocks || [],
         selectedMinutes: latestMin,
         selectedMinutesVersion: latestMin ? latestMin.version : null,
         selectedMinutesList: latestMin ? [latestMin] : [],
@@ -838,6 +860,7 @@ export const useMeetingStore = create<MeetingStoreState>((set, get) => ({
       selectedMeetingId: state.selectedMeetingId === id ? null : state.selectedMeetingId,
       selectedMeeting: state.selectedMeetingId === id ? null : state.selectedMeeting,
       selectedSegments: state.selectedMeetingId === id ? [] : state.selectedSegments,
+      selectedDisplayBlocks: state.selectedMeetingId === id ? [] : state.selectedDisplayBlocks,
       selectedMinutes: state.selectedMeetingId === id ? null : state.selectedMinutes,
       selectedMinutesList: state.selectedMeetingId === id ? [] : state.selectedMinutesList,
       activeMeetingId: state.activeMeetingId === id ? null : state.activeMeetingId,
