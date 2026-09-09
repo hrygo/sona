@@ -125,6 +125,19 @@ async def test_completed_item_writes_one_full_body_and_character_spans(repositor
 
 
 @pytest.mark.asyncio
+async def test_repository_projects_new_facts_as_one_readable_block(repository) -> None:
+    repo, meeting_id, _ = repository
+    await repo.append_completed_item(meeting_id, _item())
+
+    blocks = await repo.get_display_blocks(meeting_id)
+
+    assert len(blocks) == 1
+    assert blocks[0].text == "你好世界"
+    assert blocks[0].speaker_status == "pending"
+    assert len(blocks[0].source_ids) == 1
+
+
+@pytest.mark.asyncio
 async def test_replaying_completed_item_is_idempotent_for_new_tables(repository) -> None:
     repo, meeting_id, _ = repository
     item = _item()
