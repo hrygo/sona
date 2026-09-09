@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from uuid import UUID
 
 from .transcript_models import DisplayBlock
 
@@ -12,6 +13,8 @@ from .transcript_models import DisplayBlock
 class ModelTranscriptEvidence:
     alias: str
     block_id: str
+    item_ids: tuple[UUID, ...]
+    speaker_key: str | None
     source_ids: tuple[str, ...]
     start_ms: int | None
     end_ms: int | None
@@ -23,9 +26,18 @@ class ModelTranscriptEvidence:
 class ModelTranscript:
     text: str
     evidence: tuple[ModelTranscriptEvidence, ...]
+    meeting_id: UUID | None = None
+    transcript_revision: int = 0
+    content_revision: int = 0
 
 
-def build_model_transcript(blocks: Sequence[DisplayBlock]) -> ModelTranscript:
+def build_model_transcript(
+    blocks: Sequence[DisplayBlock],
+    *,
+    meeting_id: UUID | None = None,
+    transcript_revision: int = 0,
+    content_revision: int = 0,
+) -> ModelTranscript:
     evidence: list[ModelTranscriptEvidence] = []
     lines: list[str] = []
     for index, block in enumerate((block for block in blocks if not block.is_partial), 1):
@@ -34,10 +46,12 @@ def build_model_transcript(blocks: Sequence[DisplayBlock]) -> ModelTranscript:
             ModelTranscriptEvidence(
                 alias=alias,
                 block_id=block.block_id,
+                item_ids=block.item_ids,
+                speaker_key=block.speaker_key,
+                speaker_name=block.speaker_name,
                 source_ids=block.source_ids,
                 start_ms=block.start_ms,
                 end_ms=block.end_ms,
-                speaker_name=block.speaker_name,
                 text=block.text,
             )
         )
@@ -48,7 +62,13 @@ def build_model_transcript(blocks: Sequence[DisplayBlock]) -> ModelTranscript:
         )
         speaker = block.speaker_name or _speaker_status_label(block.speaker_status)
         lines.append(f"[{alias}][{timing}][{speaker}] {block.text}")
-    return ModelTranscript(text="\n".join(lines), evidence=tuple(evidence))
+    return ModelTranscript(
+        text="\n".join(lines),
+        evidence=tuple(evidence),
+        meeting_id=meeting_id,
+        transcript_revision=transcript_revision,
+        content_revision=content_revision,
+    )
 
 
 def _format_timestamp(milliseconds: int) -> str:

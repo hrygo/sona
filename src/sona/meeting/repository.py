@@ -23,6 +23,7 @@ from sona.config import MeetingSettings
 from sona.meeting.minutes_rendering import render_minutes_markdown
 
 from .migrations import validate_schema_name
+from .model_transcript import ModelTranscript, build_model_transcript
 from .models import (
     DiarizationStatus,
     MeetingPage,
@@ -1530,6 +1531,16 @@ class PostgresMeetingRepository:
             return ()
         spans = await self.get_transcript_attribution_spans(meeting_id)
         return TranscriptPresentationProjector().project(items, spans)
+
+    async def get_model_transcript(self, meeting_id: UUID) -> ModelTranscript:
+        """为 AI consumer 生成只含完整 block evidence 的模型输入。"""
+        document = await self.get_transcript(meeting_id)
+        return build_model_transcript(
+            await self.get_display_blocks(meeting_id),
+            meeting_id=document.meeting_id,
+            transcript_revision=document.transcript_revision,
+            content_revision=document.content_revision,
+        )
 
     async def get_transcript(self, meeting_id: UUID) -> TranscriptDocument:
         async with self._connection() as connection:

@@ -663,7 +663,13 @@ def create_meeting_router(
             if meeting is None:
                 raise MeetingAPIError("not_found", "会议或资源不存在", status_code=404)
             document = await repo.get_transcript(meeting_id)
-            transcript = _transcript_json(document)
+            display_blocks: Any = ()
+            get_blocks = getattr(repo, "get_display_blocks", None)
+            if get_blocks is not None:
+                display_blocks = get_blocks(meeting_id)
+                if inspect.isawaitable(display_blocks):
+                    display_blocks = await display_blocks
+            transcript = _transcript_json(document, display_blocks=display_blocks)
             if export_format == "json":
                 body = json.dumps(
                     {"meeting": await _meeting_detail(repo, meeting), "transcript": transcript},
@@ -725,11 +731,14 @@ def _render_text_export(meeting: Any, transcript: Mapping[str, Any], *, markdown
     title = str(_attr(meeting, "title", "会议"))
     lines = [f"# {title}" if markdown else title, ""]
     for segment in transcript.get("segments", []):
-        start = int(segment["start_ms"])
-        seconds, millis = divmod(start, 1000)
-        hours, remainder = divmod(seconds, 3600)
-        minutes, seconds = divmod(remainder, 60)
-        stamp = f"{hours:02d}:{minutes:02d}:{seconds:02d}.{millis:03d}"
+        start = segment.get("start_ms")
+        if start is None:
+            stamp = "time:unavailable"
+        else:
+            seconds, millis = divmod(int(start), 1000)
+            hours, remainder = divmod(seconds, 3600)
+            minutes, seconds = divmod(remainder, 60)
+            stamp = f"{hours:02d}:{minutes:02d}:{seconds:02d}.{millis:03d}"
         prefix = f"- [{stamp}]" if markdown else f"[{stamp}]"
         lines.append(f"{prefix} {segment['speaker_name']}: {segment['text']}")
     return "\n".join(lines).rstrip() + "\n"
@@ -744,6 +753,8 @@ def _render_srt(transcript: Mapping[str, Any]) -> str:
 
     blocks: list[str] = []
     for index, segment in enumerate(transcript.get("segments", []), start=1):
+        if segment.get("start_ms") is None or segment.get("end_ms") is None:
+            continue
         blocks.extend(
             [
                 str(index),

@@ -148,6 +148,12 @@ class InnerOSQueryService:
                     "inner_os_not_active", "当前会议不在录音状态"
                 )
             document = await self.repository.get_transcript(meeting_id)
+            get_model_transcript = getattr(self.repository, "get_model_transcript", None)
+            if get_model_transcript is not None:
+                model_document = get_model_transcript(meeting_id)
+                if hasattr(model_document, "__await__"):
+                    model_document = await model_document
+                document = model_document
             snapshot = build_context_snapshot(
                 document,
                 question=question,

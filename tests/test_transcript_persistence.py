@@ -138,6 +138,18 @@ async def test_repository_projects_new_facts_as_one_readable_block(repository) -
 
 
 @pytest.mark.asyncio
+async def test_repository_builds_model_transcript_from_display_blocks(repository) -> None:
+    repo, meeting_id, _ = repository
+    await repo.append_completed_item(meeting_id, _item())
+
+    model_transcript = await repo.get_model_transcript(meeting_id)
+
+    assert model_transcript.text.startswith("[B0001]")
+    assert [item.alias for item in model_transcript.evidence] == ["B0001"]
+    assert model_transcript.evidence[0].text == "你好世界"
+
+
+@pytest.mark.asyncio
 async def test_replaying_completed_item_is_idempotent_for_new_tables(repository) -> None:
     repo, meeting_id, _ = repository
     item = _item()

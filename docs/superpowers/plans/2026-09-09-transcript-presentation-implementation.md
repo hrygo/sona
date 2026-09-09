@@ -71,14 +71,14 @@
 | AC-API-02 | spec 8.1 | 新增可选 `display_blocks`，客户端不能提交为事实 | T3,T6 | schema/API request rejection tests | pass (T3 schema/event) |
 | AC-API-03 | spec 8.1 | 默认不返回 span 明细，显式诊断请求才返回 | T3 | API permission/shape tests | pass |
 | AC-API-04 | spec 8.1 | subtitle payload 兼容旧客户端并增加语义化 speaker status | T3,T5,T6 | fixture validation + TS decoder tests | pass (T3 additive contract) |
-| AC-EXPORT-01 | issue/spec 6 | SRT/Markdown/TXT/JSON 统一从 projector 生成 | T4 | export tests across formats | pending |
-| AC-EXPORT-02 | spec 5.3 | 导出文本守恒，不 trim、重写、去重或 overlap merge | T4 | exact output/text conservation tests | pending |
-| AC-EXPORT-03 | project AGENTS | 会议不写 `runtime/subtitles/current.srt` 作为事实源 | T4,T5 | filesystem side-effect test | pending |
-| AC-AI-01 | issue/spec 6.4 | summary 只消费 confirmed `ModelTranscript`，不消费 span/fragment | T4 | prompt/evidence fixture assertions | pending |
-| AC-AI-02 | issue/spec 6.4 | Inner OS 使用相同 `ModelTranscript` builder，focus/recent 截断不产生字符证据 | T4 | context snapshot tests | pending |
-| AC-AI-03 | issue/spec 6.4 | evidence 使用 `[B0001]` 级完整 block alias，可回定位 block/time | T4,T6 | summary validator + API/UI link tests | pending |
-| AC-AI-04 | project AGENTS | 模型固定 `local/kat-coder-2.5`，调用原生 `/api/v1/chat` | T4 | gateway request contract tests | pending |
-| AC-AI-05 | project AGENTS | summary/Inner OS 失败不影响正文入库、字幕和阅读展示 | T3,T4,T5 | failure isolation integration tests | pending |
+| AC-EXPORT-01 | issue/spec 6 | SRT/Markdown/TXT/JSON 统一从 projector 生成 | T4 | export tests across formats | pass |
+| AC-EXPORT-02 | spec 5.3 | 导出文本守恒，不 trim、重写、去重或 overlap merge | T4 | exact output/text conservation tests | pass |
+| AC-EXPORT-03 | project AGENTS | 会议不写 `runtime/subtitles/current.srt` 作为事实源 | T4,T5 | filesystem side-effect test | pass (T4 export path no new side effect) |
+| AC-AI-01 | issue/spec 6.4 | summary 只消费 confirmed `ModelTranscript`，不消费 span/fragment | T4 | prompt/evidence fixture assertions | pass |
+| AC-AI-02 | issue/spec 6.4 | Inner OS 使用相同 `ModelTranscript` builder，focus/recent 截断不产生字符证据 | T4 | context snapshot tests | pass |
+| AC-AI-03 | issue/spec 6.4 | evidence 使用 `[B0001]` 级完整 block alias，可回定位 block/time | T4,T6 | summary validator + API/UI link tests | pass (T4 model/evidence) |
+| AC-AI-04 | project AGENTS | 模型固定 `local/kat-coder-2.5`，调用原生 `/api/v1/chat` | T4 | gateway request contract tests | pass (existing gateway tests retained) |
+| AC-AI-05 | project AGENTS | summary/Inner OS 失败不影响正文入库、字幕和阅读展示 | T3,T4,T5 | failure isolation integration tests | pass (existing failure isolation + new adapter) |
 | AC-SUB-01 | spec 6.2 | 字幕无 PostgreSQL 仍运行 | T5 | no-DB unit/integration test | pending |
 | AC-SUB-02 | spec 6.2 | partial 始终一个底部 block，delta 原位更新 | T5 | proxy/session state tests | pending |
 | AC-SUB-03 | spec 6.2 | reconnect 重放 snapshot，不重复/丢失 confirmed 文本 | T5 | reconnect replay tests | pending |
@@ -214,13 +214,21 @@
 - All AI/evidence/export formatters consume `ModelTranscript` or `DisplayBlock`; no formatter iterates raw attribution units.
 - Evidence alias format is `[B0001]` and maps to source block/time without exposing character-level evidence.
 
-- [ ] Step 1: Write RED tests for export text conservation, block aliases, summary/Inner OS fragment rejection, model endpoint/model ID, cancellation/failure isolation and no pseudo-timestamps.
-- [ ] Step 2: Run focused tests and confirm failure.
-- [ ] Step 3: Implement shared ModelTranscript formatting and update summary/Inner OS/export consumers.
-- [ ] Step 4: Preserve existing LM Studio native streaming and bounds; add request contract assertions.
-- [ ] Step 5: Run focused tests and verify failure isolation with fake model/database failures.
-- [ ] Step 6: Verify AC-EXPORT-01–03, AC-AI-01–05 and AC-PROJ-08; update matrix.
-- [ ] Step 7: Commit `feat(transcript): 统一导出与 AI 可读会议稿`.
+- [x] Step 1: Write RED tests for export text conservation, block aliases, summary/Inner OS fragment rejection, model endpoint/model ID, cancellation/failure isolation and no pseudo-timestamps.
+- [x] Step 2: Run focused tests and confirm failure.
+- [x] Step 3: Implement shared ModelTranscript formatting and update summary/Inner OS/export consumers.
+- [x] Step 4: Preserve existing LM Studio native streaming and bounds; add request contract assertions.
+- [x] Step 5: Run focused tests and verify failure isolation with fake model/database failures.
+- [x] Step 6: Verify AC-EXPORT-01–03, AC-AI-01–05 and AC-PROJ-08; update matrix.
+- [x] Step 7: Commit `feat(transcript): 统一导出与 AI 可读会议稿`.
+
+#### 验收记录
+
+- Tests: `rtk uv run pytest -o addopts='' -q tests/test_transcript_runtime.py tests/test_transcript_ai_consumers.py tests/test_meeting_summary.py tests/test_inner_os_context.py tests/test_inner_os_service.py` → `66 passed`
+- Lint: `rtk uv run ruff check ...` → `All checks passed!`
+- Types: `rtk uv run mypy --strict ...` → `Success: no issues found in 7 source files`
+- AC: `AC-EXPORT-01–03`, `AC-AI-01–05` pass; exports preserve `time:unavailable` instead of inventing timestamps, and SRT skips untimed blocks.
+- Scope: `CHANGES MADE` connected repository `ModelTranscript`, summary evidence aliases, Inner OS block selection and export paths; `DIDN'T TOUCH` subtitle state machine and frontend rendering; `POTENTIAL CONCERNS` Inner OS model contract still expects numeric times, so untimed blocks use the existing bounded fallback at the AI boundary and never enter UI timestamps.
 
 ## Task 5: Subtitle Memory Projector
 

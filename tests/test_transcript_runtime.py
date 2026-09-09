@@ -9,7 +9,7 @@ from uuid import UUID, uuid4
 
 from jsonschema import Draft202012Validator, FormatChecker
 
-from sona.meeting.api import _transcript_json
+from sona.meeting.api import _render_srt, _render_text_export, _transcript_json
 from sona.meeting.events import make_event
 from sona.meeting.transcript_models import DisplayBlock
 
@@ -102,3 +102,24 @@ def _display_block_json_for_contract() -> dict[str, object]:
         ),
         display_blocks=(_block(),),
     )["display_blocks"][0]
+
+
+def test_exports_preserve_block_text_without_pseudo_timestamps() -> None:
+    block = _block().model_copy(
+        update={"start_ms": None, "end_ms": None, "timing_quality": "unavailable"}
+    )
+    document = SimpleNamespace(
+        meeting_id=MEETING_ID,
+        transcript_revision=1,
+        content_revision=1,
+        segments=(),
+        speakers=(),
+    )
+    transcript = _transcript_json(document, display_blocks=(block,))
+    meeting = SimpleNamespace(title="测试会议")
+
+    text_export = _render_text_export(meeting, transcript, markdown=False)
+
+    assert "time:unavailable" in text_export
+    assert "完整发言" in text_export
+    assert _render_srt(transcript) == ""
