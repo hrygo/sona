@@ -509,7 +509,7 @@ interface CloneFetchResult {
   fetchMock: ReturnType<typeof vi.fn>;
 }
 
-function stubCloneFetch(): CloneFetchResult {
+function stubCloneFetch(cloneQuality?: Record<string, unknown>): CloneFetchResult {
   const cloneBodies: FormData[] = [];
   const fetchMock = vi.fn(async (url: unknown, init?: RequestInit) => {
     const path = String(url);
@@ -554,7 +554,13 @@ function stubCloneFetch(): CloneFetchResult {
       cloneBodies.push(init.body as FormData);
       return {
         ok: true,
-        json: async () => ({ id: "cloned_voice", name: "测试音色", is_system: false, mode: "clone" }),
+        json: async () => ({
+          id: "cloned_voice",
+          name: "测试音色",
+          is_system: false,
+          mode: "clone",
+          ...(cloneQuality ? { quality: cloneQuality } : {}),
+        }),
       };
     }
     return { ok: true, json: async () => ({ object: "list", data: [] }) };
@@ -679,6 +685,50 @@ it("submits loudness-normalized WAV audio when cloning a recorded voice", async 
   );
   expect(onSelectVoice).not.toHaveBeenCalled();
   expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/v1/voices/clone/validate"))).toBe(true);
+});
+
+it("runs synthesis probes when clone quality only contains reference evidence", async () => {
+  const events: string[] = [];
+  const { recorders } = stubRecordingEnvironment(events);
+  const decoded = new Float32Array(2000);
+  for (let i = 0; i < decoded.length; i++) decoded[i] = i % 2 === 0 ? 0.5 : -0.5;
+  vi.stubGlobal("AudioContext", class {
+    state: AudioContextState = "running";
+    createMediaStreamSource() { return { connect: vi.fn() }; }
+    createAnalyser() {
+      return { fftSize: 256, frequencyBinCount: 2, getByteFrequencyData: (data: Uint8Array) => data.fill(0) };
+    }
+    decodeAudioData() {
+      return Promise.resolve({
+        sampleRate: 48000,
+        numberOfChannels: 1,
+        length: decoded.length,
+        getChannelData: () => decoded,
+      } as unknown as AudioBuffer);
+    }
+    close() { this.state = "closed"; return Promise.resolve(); }
+  } as unknown as typeof AudioContext);
+  const { cloneBodies, fetchMock } = stubCloneFetch({
+    policy_version: "voice_quality_v1",
+    status: "pass",
+    run_id: "vqr-reference-only",
+    tested_at: "2026-09-09T10:00:00Z",
+    synthesis: { probe_count: 0, successful_probe_count: 0 },
+    reference: { duration_seconds: 8, estimated_snr_db: 28 },
+    failure_codes: [],
+  });
+
+  try {
+    await recordSampleAudio(events, recorders);
+    await submitCloneWith("参考证据测试");
+    await waitForCloneRequest(cloneBodies);
+  } finally {
+    vi.useRealTimers();
+  }
+
+  expect(fetchMock.mock.calls.filter(([url]) => String(url).includes("/quality-runs"))).toHaveLength(1);
+  expect(container.textContent).toContain("3 / 3");
+  expect(container.textContent).not.toContain("0 / 0");
 });
 
 it("falls back to uploading the raw recording when loudness normalization fails", async () => {

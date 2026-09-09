@@ -63,3 +63,43 @@ it("does not claim quality when the server report is unavailable", () => {
   expect(container.textContent).not.toContain("质量良好");
   expect(container.textContent).toContain("服务端尚未返回质量报告");
 });
+
+it("does not render zero probe counts for a reference-only report", () => {
+  act(() => root.render(createElement(VoiceQualityCard, {
+    title: "参考音频验收",
+    evidence: "reference",
+    report: {
+      ...baseReport,
+      synthesis: {
+        probe_count: 0,
+        successful_probe_count: 0,
+        peak_dbfs: 0,
+        deterministic: false,
+      },
+      reference: {
+        duration_seconds: 8,
+        estimated_snr_db: 28,
+        speech_active_ratio: 0.8,
+      },
+    },
+  })));
+
+  expect(container.textContent).toContain("参考音频");
+  expect(container.textContent).toContain("8.0 s");
+  expect(container.textContent).not.toContain("0 / 0");
+});
+
+it("does not mark a zero-probe report as passed synthesis quality", () => {
+  act(() => root.render(createElement(VoiceQualityCard, {
+    title: "服务端质量验收",
+    evidence: "synthesis",
+    report: {
+      ...baseReport,
+      synthesis: { probe_count: 0, successful_probe_count: 0 },
+    },
+  })));
+
+  expect(container.textContent).toContain("尚未评估");
+  expect(container.textContent).not.toContain("质量良好");
+  expect(container.textContent).not.toContain("0 / 0");
+});

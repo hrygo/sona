@@ -11,6 +11,8 @@ import {
 import { showToast } from "./Toast";
 import { SoundWaveAnimatedIcon } from "./Icons";
 import {
+  hasPassingSynthesisProbe,
+  hasSynthesisProbeEvidence,
   supportsVoiceCapability,
   type VoiceQualityReport,
   type VoiceModelCapabilities,
@@ -583,16 +585,20 @@ export function VoiceStudioModal({
 
       const createdVoice = await voiceService.clone(formData);
       setLastClonedVoice(createdVoice);
-      setServerQuality(createdVoice.quality);
+      setServerQuality(
+        hasSynthesisProbeEvidence(createdVoice.quality) ? createdVoice.quality : undefined,
+      );
       let voiceForCatalog = createdVoice;
-      if (!createdVoice.quality) {
+      if (!hasSynthesisProbeEvidence(createdVoice.quality)) {
         setQualityRunPending(true);
         try {
           const quality = await voiceService.qualityRun(createdVoice.id);
           setServerQuality(quality);
+          setLastClonedVoice({ ...createdVoice, quality });
           voiceForCatalog = { ...createdVoice, quality };
         } catch {
           // 旧版 SpeechRail 没有质量运行端点时保持未评估，不阻断试听。
+          setServerQuality(undefined);
         } finally {
           setQualityRunPending(false);
         }
@@ -779,8 +785,10 @@ export function VoiceStudioModal({
                         <span className={`deck-type-badge type-${vMode}`}>{modeMeta.badge}</span>
                         {vMode === "clone" && (
                           <span className={`deck-quality-tag quality-${item.quality?.status ?? "unevaluated"}`}>
-                            {item.quality?.status === "pass"
+                            {item.quality?.status === "pass" && hasSynthesisProbeEvidence(item.quality)
                               ? "质量良好"
+                              : item.quality?.status === "pass"
+                                ? "参考音频合格"
                               : item.quality?.status === "warn"
                                 ? "存在风险"
                                 : item.quality?.status === "reject"
@@ -1039,7 +1047,7 @@ export function VoiceStudioModal({
                             <span>🚀 提交克隆此声音</span>
                           )}
                         </button>
-                      ) : serverQuality?.status === "pass" ? (
+                      ) : hasPassingSynthesisProbe(serverQuality) ? (
                         <button
                           type="button"
                           className="btn-apply-success"
@@ -1064,6 +1072,7 @@ export function VoiceStudioModal({
                       <VoiceQualityCard
                         title="录音预检"
                         localResult={localQuality}
+                        evidence="local"
                         onRerecord={handleResetRecording}
                       />
                     )}
@@ -1072,6 +1081,7 @@ export function VoiceStudioModal({
                       <VoiceQualityCard
                         title="SpeechRail 参考音频验收"
                         report={serverValidation}
+                        evidence="reference"
                         pending={serverValidationPending}
                         onRerecord={handleResetRecording}
                       />
@@ -1081,6 +1091,7 @@ export function VoiceStudioModal({
                       <VoiceQualityCard
                         title="服务端质量验收"
                         report={serverQuality}
+                        evidence="synthesis"
                         pending={qualityRunPending}
                         onRetry={retryQualityRun}
                         onRerecord={handleResetRecording}
