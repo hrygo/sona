@@ -307,7 +307,9 @@ export function VoiceStudioModal({
           // 声音工坊打开期间语音助手已被租约暂停，无自播回声风险；
           // 浏览器 AEC/AGC 的自适应增益是"录音前响后轻"的根因，克隆采集必须关闭以保真音色电平。
           echoCancellation: false,
-          noiseSuppression: true,
+          // Preserve the reference timbre; browser NS can gate consonants and
+          // introduce artifacts that the clone model learns as part of the voice.
+          noiseSuppression: false,
           autoGainControl: false,
           sampleRate: 24000,
         },

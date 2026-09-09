@@ -112,7 +112,13 @@ def test_tts_client_sends_openai_session_and_yields_pcm() -> None:
                     "content": [{"type": "input_text", "text": "你好"}],
                 },
             },
-            {"type": "response.create", "response": {"voice": "warm"}},
+            {
+                "type": "response.create",
+                "response": {
+                    "voice": "warm",
+                    "speechrail": {"tts": {"speed": 1.1}},
+                },
+            },
         ]
 
     asyncio.run(scenario())

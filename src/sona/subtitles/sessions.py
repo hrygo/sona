@@ -10,7 +10,7 @@ import asyncio
 import contextlib
 import logging
 import re
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Literal
@@ -423,6 +423,13 @@ class StandardSubtitleSession:
             self._reset_audio_timeline()
         self._epoch += 1
         self._epoch_open = True
+        # Diarization state belongs to the SpeechRail stream, not to the
+        # browser subscription.  A re-entry/reconnect must not inherit the
+        # previous stream's terminal barrier or degraded status.
+        self._diarization_status = "off"
+        self._diarization_reason = None
+        self._diarization_done = False
+        self._diarization_revisions.clear()
         if notify:
             self._on_epoch_opened()
         self._ready.clear()
@@ -615,7 +622,7 @@ class StandardSubtitleSession:
             await self._on_payload(legacy_subtitle_payload(self._full_window(window)))
 
     def _set_diarization_state_from_metadata(self, metadata: object) -> None:
-        if not isinstance(metadata, dict):
+        if not isinstance(metadata, Mapping):
             return
         status = metadata.get("diarization_status")
         if status in {"off", "active", "degraded"}:
@@ -724,6 +731,20 @@ class StandardSubtitleSession:
         if not incoming:
             return
 
+        # Resolve the speaker before revision-window replacement below.  The
+        # raw final window can repeat a segment after a speaker-only patch and
+        # still carry the initial unknown speaker.
+        resolved_incoming: list[ASRSegment] = []
+        for segment in incoming:
+            if segment.speaker_key == "unknown":
+                index = self._find_segment_index(segment)
+                if index is not None:
+                    existing = self._confirmed_segments[index]
+                    if existing.speaker_key != "unknown":
+                        segment = replace(segment, speaker_key=existing.speaker_key)
+            resolved_incoming.append(segment)
+        incoming = tuple(resolved_incoming)
+
         previous = self._last_confirmed_window
         if previous and _same_revision_window(previous, incoming):
             previous_indices = self._find_segment_indices(previous)
@@ -742,6 +763,13 @@ class StandardSubtitleSession:
                 self._confirmed_segments.append(segment)
                 matched_indices.add(index)
             else:
+                existing = self._confirmed_segments[index]
+                if segment.speaker_key == "unknown" and existing.speaker_key != "unknown":
+                    # The final ASR window is a text/timing snapshot.  It may
+                    # still carry the initial unknown speaker while the
+                    # speaker-only diarization patch has already resolved this
+                    # segment; never regress that patch during EOF drain.
+                    segment = replace(segment, speaker_key=existing.speaker_key)
                 self._confirmed_segments[index] = segment
                 matched_indices.add(index)
         self._last_confirmed_window = tuple(incoming)

@@ -1225,6 +1225,20 @@
   color: var(--color-red);
 }
 
+.btn-action-ghost.session-action-recovery {
+  color: var(--color-accent-light);
+  border-color: color-mix(in srgb, var(--color-accent) 32%, var(--border));
+}
+
+.btn-action-ghost.session-action-recovery .btn-action-icon {
+  color: var(--color-accent-light);
+}
+
+[data-theme="light"] .btn-action-ghost.session-action-recovery,
+[data-theme="light"] .btn-action-ghost.session-action-recovery .btn-action-icon {
+  color: var(--color-accent);
+}
+
 .btn-action-ghost:disabled {
   opacity: 0.45;
   cursor: not-allowed;

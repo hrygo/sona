@@ -4,10 +4,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AssistantErrorNotice } from "./AssistantErrorNotice";
 import type { CommandSocketApi } from "../hooks/useCommandSocket";
+import type { RuntimeStateSnapshot } from "../protocol";
 import AssistantPanel, {
   DUPLEX_MODE_PRESENTATION,
   canRequestDuplexModeChange,
   getAssistantInputPresentation,
+  getAssistantSessionControlPresentation,
   getTelemetryBadge,
   TELEMETRY_HELP_STEPS,
   getAssistantPhaseTransitionDelay,
@@ -82,6 +84,18 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
 let root: Root;
 let container: HTMLDivElement;
+
+function runtimeSnapshot(overrides: Partial<RuntimeStateSnapshot> = {}): RuntimeStateSnapshot {
+  return {
+    mode: "assistant",
+    pcm_owner: "assistant",
+    pipeline: "running",
+    subtitle: "idle",
+    mic_muted: false,
+    runtime_revision: 1,
+    ...overrides,
+  };
+}
 
 beforeEach(() => {
   container = document.createElement("div");
@@ -163,6 +177,90 @@ describe("voice audition presentation", () => {
     })).toBe("系统预设音色");
   });
 
+});
+
+describe("assistant session control state", () => {
+  it("offers resume after the server confirms that the assistant session stopped", () => {
+    const presentation = getAssistantSessionControlPresentation(runtimeSnapshot({
+      mode: "idle",
+      pcm_owner: "none",
+      pipeline: "stopped",
+    }));
+
+    expect(presentation.command).toBe("start_assistant");
+    expect(presentation.label).toBe("恢复会话");
+    expect(presentation.title).toContain("恢复");
+  });
+
+  it("closes the stop and resume loop from the rendered control", async () => {
+    const sendCommand = vi
+      .fn()
+      .mockResolvedValueOnce(runtimeSnapshot({
+        mode: "idle",
+        pcm_owner: "none",
+        pipeline: "stopped",
+        runtime_revision: 2,
+      }))
+      .mockResolvedValueOnce(runtimeSnapshot({ runtime_revision: 3 }));
+    let commandSocket: CommandSocketApi = {
+      state: "open",
+      ready: true,
+      snapshot: runtimeSnapshot(),
+      highestRuntimeRevision: 1,
+      sendCommand,
+      reconcileRuntime: vi.fn().mockResolvedValue(runtimeSnapshot()),
+    };
+
+    act(() => {
+      root.render(createElement(AssistantPanel, { commandSocket }));
+    });
+
+    const stopButton = container.querySelector<HTMLButtonElement>("[data-testid='assistant-session-toggle']");
+    expect(stopButton?.textContent).toContain("停止会话");
+    await act(async () => {
+      stopButton?.click();
+      await Promise.resolve();
+    });
+    expect(sendCommand).toHaveBeenCalledWith({ cmd: "stop_session" });
+
+    commandSocket = {
+      ...commandSocket,
+      snapshot: runtimeSnapshot({ mode: "idle", pcm_owner: "none", pipeline: "stopped", runtime_revision: 2 }),
+      highestRuntimeRevision: 2,
+    };
+    act(() => {
+      root.render(createElement(AssistantPanel, { commandSocket }));
+    });
+
+    const resumeButton = container.querySelector<HTMLButtonElement>("[data-testid='assistant-session-toggle']");
+    expect(resumeButton?.textContent).toContain("恢复会话");
+    await act(async () => {
+      resumeButton?.click();
+      await Promise.resolve();
+    });
+    expect(sendCommand).toHaveBeenCalledWith({ cmd: "start_assistant" });
+  });
+
+  it("does not expose an assistant stop command while a meeting owns the microphone", () => {
+    const sendCommand = vi.fn().mockResolvedValue(runtimeSnapshot({ mode: "meeting", pcm_owner: "meeting" }));
+    const commandSocket: CommandSocketApi = {
+      state: "open",
+      ready: true,
+      snapshot: runtimeSnapshot({ mode: "meeting", pcm_owner: "meeting", pipeline: "stopped" }),
+      highestRuntimeRevision: 2,
+      sendCommand,
+      reconcileRuntime: vi.fn().mockResolvedValue(runtimeSnapshot()),
+    };
+
+    act(() => {
+      root.render(createElement(AssistantPanel, { commandSocket, isMeetingRecording: true }));
+    });
+
+    const meetingButton = container.querySelector<HTMLButtonElement>("[data-testid='assistant-session-toggle']");
+    expect(meetingButton?.textContent).toContain("会议录制中");
+    expect(meetingButton?.disabled).toBe(true);
+    expect(sendCommand).not.toHaveBeenCalled();
+  });
 });
 
 describe("voice switching presentation", () => {

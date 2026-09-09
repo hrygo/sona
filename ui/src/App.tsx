@@ -52,7 +52,8 @@ export function resolveWorkspaceTab(
 }
 
 interface PendingWorkspaceSwitch {
-  readonly tab: Exclude<WorkspaceTab, "meeting">;
+  readonly tab: WorkspaceTab;
+  readonly runtimeMode: RuntimeMode;
   readonly startedRevision: number;
   readonly generation: number;
 }
@@ -195,7 +196,8 @@ export default function App() {
     }
 
     const isNewer = snapshot.runtime_revision > pending.startedRevision;
-    const targetMatches = snapshot.mode === pending.tab;
+    const targetMatches = snapshot.mode === pending.runtimeMode
+      && snapshot.pcm_owner === (pending.runtimeMode === "idle" ? "none" : pending.runtimeMode);
     if (
       snapshot.mode !== "meeting"
       && !isNewer
@@ -266,13 +268,20 @@ export default function App() {
         showToast("会议录制中，请先结束会议再切换模式", "warning");
         return;
       }
+      if (pendingSwitchRef.current) return;
       if (newTab === "meeting") {
-        commitWorkspaceTab("meeting");
-        setSwitchError(null);
-        return;
+        if (
+          (commandSocket.snapshot.mode === "idle" && commandSocket.snapshot.pcm_owner === "none")
+          || commandSocket.snapshot.mode === "meeting"
+          || commandSocket.snapshot.pcm_owner === "meeting"
+        ) {
+          commitWorkspaceTab("meeting");
+          setSwitchError(null);
+          return;
+        }
       }
 
-      if (pendingSwitchRef.current || activeTab === newTab) return;
+      if (newTab !== "meeting" && activeTab === newTab) return;
 
       const startedRevision = commandSocket.highestRuntimeRevision
         ?? commandSocket.snapshot.runtime_revision;
@@ -280,6 +289,7 @@ export default function App() {
       switchGenerationRef.current = generation;
       const pendingSwitch: PendingWorkspaceSwitch = {
         tab: newTab,
+        runtimeMode: newTab === "meeting" ? "idle" : newTab,
         startedRevision,
         generation,
       };
@@ -291,7 +301,9 @@ export default function App() {
 
       const command = newTab === "subtitles"
         ? { cmd: "start_subtitles" as const }
-        : { cmd: "start_assistant" as const };
+        : newTab === "assistant"
+          ? { cmd: "start_assistant" as const }
+          : { cmd: "stop_active_mode" as const };
       void commandSocket.sendCommand(command).then(
         (snapshot) => {
           if (pendingSwitchRef.current?.generation !== generation) return;

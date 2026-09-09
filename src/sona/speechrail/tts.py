@@ -128,7 +128,13 @@ class SpeechRailTTSClient:
                 }
             )
             await transport.send_event(
-                {"type": "response.create", "response": {"voice": self._voice}}
+                {
+                    "type": "response.create",
+                    "response": {
+                        "voice": self._voice,
+                        "speechrail": {"tts": {"speed": speed}},
+                    },
+                }
             )
             while True:
                 event = await transport.receive()

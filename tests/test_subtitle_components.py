@@ -17,6 +17,7 @@ from sona.asr.models import ASRSegment, ASRWindow
 from sona.asr.presenters import legacy_subtitle_payload
 from sona.config import SubtitleSettings
 from sona.meeting.models import PCMOwner
+from sona.speechrail.transcription_events import DiarizationUpdate, DiarizationUpdatedEvent
 from sona.subtitles import (
     FinalizationTimeoutError,
     SubtitleProxy,
@@ -121,6 +122,19 @@ class GracefulDiarizationTranscriber(FakeTranscriber):
     async def finish(self) -> ASRWindow:
         self.order.append("finish")
         return await super().finish()
+
+
+class ReadyDiarizationTranscriber(FakeTranscriber):
+    """ready 事件携带真实转录器使用的只读 metadata。"""
+
+    async def connect(self) -> None:
+        self.connected = True
+        self._events.put_nowait(
+            ASREvent(
+                kind="ready",
+                metadata={"diarization_status": "active"},
+            )
+        )
 
 
 def _flapping_proxy(
@@ -1168,6 +1182,127 @@ async def test_standard_subtitle_session_drops_standalone_filler_and_preserves_r
     assert last_payload["lines"][0]["text"] == "大家好，开会了"  # type: ignore[index]
 
     await session.close_stream()
+
+
+async def test_standard_subtitle_session_applies_read_only_ready_diarization_metadata(
+    tmp_path: Path,
+) -> None:
+    from sona.subtitles.sessions import StandardSubtitleSession
+
+    transcriber = ReadyDiarizationTranscriber(source_epoch=1)
+    queue: asyncio.Queue[bytes] = asyncio.Queue()
+    stop_event = asyncio.Event()
+
+    async def record_payload(_payload: dict[str, object]) -> None:
+        return None
+
+    async def noop_epoch_closed(_epoch: int) -> None:
+        return None
+
+    session = StandardSubtitleSession(
+        audio_queue=queue,
+        transcriber_factory=lambda _ctx: transcriber,
+        backoff_delays=(0.01,),
+        stop_event=stop_event,
+        running=lambda: True,
+        capture_active=lambda: False,
+        on_payload=record_payload,
+        on_state=lambda _s: None,
+        on_epoch_opened=lambda: None,
+        on_epoch_closed=noop_epoch_closed,
+        on_reconnect=lambda: None,
+        on_last_event=lambda: None,
+        on_last_error=lambda _e: None,
+        on_dropped_chunk=lambda: None,
+        on_gap=lambda: None,
+    )
+
+    preparation = await session.prepare(timeout_secs=1.0)
+    assert session.diarization_status == "active"
+    session.commit(preparation)
+    await session.close_stream()
+
+
+async def test_standard_subtitle_finish_does_not_overwrite_speaker_patch(
+    tmp_path: Path,
+) -> None:
+    proxy = _proxy(tmp_path)
+    await proxy.start()
+    session = proxy._subtitle_session
+    await session._open_epoch()
+
+    def segment(speaker_key: str) -> ASRSegment:
+        return ASRSegment(
+            order=0,
+            source_epoch=1,
+            speaker_key=speaker_key,
+            start_ms=0,
+            end_ms=1000,
+            text="测试发言",
+            source_uid="seg-1",
+            source_session_id="rail-1",
+        )
+
+    raw_window = ASRWindow(
+        source_epoch=1,
+        source_session_id="rail-1",
+        diarization_status="active",
+        segments=(segment("unknown"),),
+    )
+    await session._handle_stream_event(ASREvent(kind="final", window=raw_window))
+    await session._handle_stream_event(
+        ASREvent(
+            kind="diarization",
+            metadata={
+                "event": DiarizationUpdatedEvent(
+                    event_id="event-1",
+                    session_id="rail-1",
+                    sequence=1,
+                    stable_through_sample=16_000,
+                    updates=(
+                        DiarizationUpdate(
+                            segment_uid="seg-1",
+                            revision=1,
+                            status="stable",
+                            speaker="A",
+                            coverage_ratio=1.0,
+                            overlap_ratio=0.0,
+                            candidates=(),
+                        ),
+                    ),
+                )
+            },
+        )
+    )
+
+    transcriber = GracefulDiarizationTranscriber(source_epoch=1)
+    transcriber._finish_result = raw_window
+    await session._graceful_finish(transcriber)
+
+    assert proxy._last_payload is not None
+    assert [line["speaker"] for line in proxy._last_payload["lines"]] == ["会话 1 · A"]
+    await proxy.stop()
+
+
+async def test_standard_subtitle_new_epoch_resets_diarization_state(
+    tmp_path: Path,
+) -> None:
+    proxy = _proxy(tmp_path)
+    await proxy.start()
+    session = proxy._subtitle_session
+    await session._open_epoch()
+    session._diarization_status = "degraded"
+    session._diarization_reason = "old-session"
+    session._diarization_done = True
+    session._diarization_revisions[("old-rail", "seg-1")] = (1, object())
+
+    await session._open_epoch()
+
+    assert session.diarization_status == "off"
+    assert session.diarization_reason is None
+    assert session._diarization_done is False
+    assert session._diarization_revisions == {}
+    await proxy.stop()
 
 
 def test_build_server_vad_config_defaults_to_calibrated_threshold() -> None:

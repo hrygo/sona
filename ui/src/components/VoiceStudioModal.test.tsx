@@ -460,6 +460,28 @@ it("ignores a second start click while recording setup is in flight", async () =
   expect(getUserMedia).toHaveBeenCalledTimes(1);
 });
 
+it("disables browser noise suppression for clone reference capture", async () => {
+  const events: string[] = [];
+  const { getUserMedia } = stubRecordingEnvironment(events);
+
+  renderStudio("default", { supports_clone: true });
+  const startButton = container.querySelector<HTMLButtonElement>(".btn-record-primary")!;
+  await act(async () => {
+    startButton.click();
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+
+  expect(getUserMedia).toHaveBeenCalledWith({
+    audio: {
+      echoCancellation: false,
+      noiseSuppression: false,
+      autoGainControl: false,
+      sampleRate: 24_000,
+    },
+  });
+});
+
 it("keeps design creation available while disabling preview when the model forbids preview", () => {
   renderStudio("default", {
     supports_preview: false,

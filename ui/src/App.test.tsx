@@ -219,13 +219,53 @@ describe("App authoritative workspace state", () => {
     },
   );
 
-  it("navigates to meeting history without changing runtime mode", () => {
+  it("stops the active runtime before entering the meeting workspace", async () => {
+    const acknowledgement = deferred<RuntimeStateSnapshot>();
+    commandSocket.sendCommand.mockReturnValue(acknowledgement.promise);
     setAuthoritativeState("assistant", 3);
 
     clickTab("会议助手");
 
+    expect(container.querySelector("[data-testid='assistant-panel']")).not.toBeNull();
+    expect(container.querySelector("[data-testid='meeting-panel']")).toBeNull();
+    expect(container.querySelector("[data-testid='workspace-tabs']")?.getAttribute("data-pending-tab"))
+      .toBe("meeting");
+    expect(commandSocket.sendCommand).toHaveBeenCalledWith({ cmd: "stop_active_mode" });
+
+    await act(async () => {
+      acknowledgement.resolve(runtimeState("idle", 4));
+      await acknowledgement.promise;
+    });
+
     expect(container.querySelector("[data-testid='meeting-panel']")).not.toBeNull();
     expect(window.localStorage.getItem("sona:workspace-tab")).toBe("meeting");
+  });
+
+  it("stops subtitles before entering the meeting workspace", async () => {
+    const acknowledgement = deferred<RuntimeStateSnapshot>();
+    commandSocket.sendCommand.mockReturnValue(acknowledgement.promise);
+    setAuthoritativeState("subtitles", 5);
+
+    clickTab("会议助手");
+
+    expect(container.querySelector("[data-testid='subtitles-panel']")).not.toBeNull();
+    expect(container.querySelector("[data-testid='meeting-panel']")).toBeNull();
+    expect(commandSocket.sendCommand).toHaveBeenCalledWith({ cmd: "stop_active_mode" });
+
+    await act(async () => {
+      acknowledgement.resolve(runtimeState("idle", 6));
+      await acknowledgement.promise;
+    });
+
+    expect(container.querySelector("[data-testid='meeting-panel']")).not.toBeNull();
+  });
+
+  it("enters the meeting workspace directly when runtime is already idle", () => {
+    setAuthoritativeState("idle", 7);
+
+    clickTab("会议助手");
+
+    expect(container.querySelector("[data-testid='meeting-panel']")).not.toBeNull();
     expect(commandSocket.sendCommand).not.toHaveBeenCalled();
   });
 

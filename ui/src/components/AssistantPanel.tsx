@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useEventSocket } from "../hooks/useEventSocket";
 import { runtimeConfig } from "../config/runtimeConfig";
 import type { CommandSocketApi } from "../hooks/useCommandSocket";
+import type { RuntimeStateSnapshot } from "../protocol";
 import type { PCMOwner } from "../contracts/meetingContract";
 import {
   parseAssistantEvent,
@@ -91,6 +92,97 @@ export {
 export interface AssistantInputPresentation {
   readonly label: string;
   readonly detail: string;
+}
+
+export type AssistantSessionControlCommand = "stop_session" | "start_assistant";
+
+export interface AssistantSessionControlPresentation {
+  readonly command: AssistantSessionControlCommand | null;
+  readonly label: string;
+  readonly title: string;
+  readonly status: "running" | "stopped" | "starting" | "stopping" | "blocked" | "unknown";
+}
+
+/**
+ * 会话控制只根据服务端权威快照决定下一步动作，避免停止后继续发送无效 restart。
+ * 会议/字幕拥有麦克风时，助手面板不能暴露会停止当前工作负载的按钮。
+ */
+export function getAssistantSessionControlPresentation(
+  snapshot: RuntimeStateSnapshot | null | undefined,
+  isMeetingRecording = false,
+): AssistantSessionControlPresentation {
+  if (isMeetingRecording || snapshot?.mode === "meeting" || snapshot?.pcm_owner === "meeting") {
+    return {
+      command: null,
+      label: "会议录制中",
+      title: "会议录制中，请在会议工作台结束会议录制",
+      status: "blocked",
+    };
+  }
+
+  if (snapshot?.mode === "subtitles" || snapshot?.pcm_owner === "subtitles") {
+    return {
+      command: null,
+      label: "实时字幕占用中",
+      title: "实时字幕正在占用音频，助手会话控制暂不可用",
+      status: "blocked",
+    };
+  }
+
+  if (!snapshot) {
+    return {
+      command: null,
+      label: "等待状态同步",
+      title: "等待服务端状态同步后才能操作会话",
+      status: "unknown",
+    };
+  }
+
+  if (snapshot.pipeline === "starting") {
+    return {
+      command: null,
+      label: "正在恢复",
+      title: "正在恢复语音交互会话",
+      status: "starting",
+    };
+  }
+
+  if (snapshot.pipeline === "stopping") {
+    return {
+      command: null,
+      label: "正在停止",
+      title: "正在停止语音交互会话",
+      status: "stopping",
+    };
+  }
+
+  const assistantOwnsAudio = snapshot.mode === "assistant" && snapshot.pcm_owner === "assistant";
+  if (assistantOwnsAudio && snapshot.pipeline !== "stopped" && snapshot.pipeline !== "error") {
+    return {
+      command: "stop_session",
+      label: "停止会话",
+      title: "停止语音会话",
+      status: "running",
+    };
+  }
+
+  return {
+    command: "start_assistant",
+    label: "恢复会话",
+    title: "恢复语音交互会话",
+    status: "stopped",
+  };
+}
+
+export function canRestartAssistantPipeline(
+  snapshot: RuntimeStateSnapshot | null | undefined,
+  isMeetingRecording = false,
+): boolean {
+  return !isMeetingRecording
+    && snapshot?.mode === "assistant"
+    && snapshot.pcm_owner === "assistant"
+    && snapshot.pipeline !== "starting"
+    && snapshot.pipeline !== "stopping";
 }
 
 export function getAssistantInputPresentation(
@@ -188,6 +280,7 @@ export default function AssistantPanel({
   const [lastSubmittedText, setLastSubmittedText] = useState("");
   const [pendingDuplexMode, setPendingDuplexMode] = useState<DuplexMode | null>(null);
   const [duplexSwitchError, setDuplexSwitchError] = useState<string | null>(null);
+  const [pendingSessionCommand, setPendingSessionCommand] = useState<AssistantSessionControlCommand | null>(null);
 
   /* ---- 声音输出与插话模式 ---- */
   const duplexMode = useUISettingsStore((s) => s.duplexMode);
@@ -344,6 +437,26 @@ export default function AssistantPanel({
     },
     [sendCommandWith],
   );
+
+  const handleSessionAction = useCallback(async () => {
+    if (pendingSessionCommand) return;
+    const command = getAssistantSessionControlPresentation(
+      commandSocket.snapshot,
+      isMeetingRecording,
+    ).command;
+    if (!command) return;
+
+    setPendingSessionCommand(command);
+    try {
+      if (command === "stop_session") {
+        await sendCommandWith({ cmd: command }, "已停止语音交互会话");
+      } else {
+        await sendCommandWith({ cmd: command }, "语音交互会话已恢复");
+      }
+    } finally {
+      setPendingSessionCommand(null);
+    }
+  }, [commandSocket.snapshot, isMeetingRecording, pendingSessionCommand, sendCommandWith]);
 
   /** 打开人格编辑器 */
   const openPersona = useCallback(() => {
@@ -729,6 +842,24 @@ export default function AssistantPanel({
     micMuted,
     commandSocket.snapshot?.pcm_owner,
   );
+  const sessionControl = getAssistantSessionControlPresentation(
+    commandSocket.snapshot,
+    isMeetingRecording,
+  );
+  const restartPipelineAvailable = canRestartAssistantPipeline(
+    commandSocket.snapshot,
+    isMeetingRecording,
+  );
+  const sessionControlLabel = pendingSessionCommand === "stop_session"
+    ? "正在停止"
+    : pendingSessionCommand === "start_assistant"
+      ? "正在恢复"
+      : sessionControl.label;
+  const sessionControlTitle = pendingSessionCommand === "stop_session"
+    ? "正在停止语音交互会话，请等待服务端确认"
+    : pendingSessionCommand === "start_assistant"
+      ? "正在恢复语音交互会话，请等待服务端确认"
+      : sessionControl.title;
   const currentPhaseConfig = getAssistantPhaseBadgePresentation(
     visiblePhase,
     micMuted,
@@ -1113,21 +1244,25 @@ export default function AssistantPanel({
               type="button"
               className="btn-action-ghost"
               onClick={() => sendCommand("restart")}
-              disabled={!commandSocket.ready}
-              title="重启后端交互管道"
+              disabled={!commandSocket.ready || !restartPipelineAvailable || pendingSessionCommand !== null}
+              title={restartPipelineAvailable ? "重启后端交互管道" : "请先恢复语音交互会话，再重启管道"}
             >
               <RefreshCwIcon size={13} className="btn-action-icon" />
               <span>重启管道</span>
             </button>
             <button
               type="button"
-              className="btn-action-ghost danger"
-              onClick={() => sendCommand("stop_session")}
-              disabled={!commandSocket.ready}
-              title="停止语音会话"
+              data-testid="assistant-session-toggle"
+              className={`btn-action-ghost ${sessionControl.command === "stop_session" ? "danger" : "session-action-recovery"}`}
+              onClick={() => void handleSessionAction()}
+              disabled={!commandSocket.ready || sessionControl.command === null || pendingSessionCommand !== null}
+              aria-busy={pendingSessionCommand !== null || sessionControl.status === "starting" || sessionControl.status === "stopping"}
+              title={sessionControlTitle}
             >
-              <StopCircleIcon size={13} className="btn-action-icon" />
-              <span>停止会话</span>
+              {sessionControl.command === "stop_session"
+                ? <StopCircleIcon size={13} className="btn-action-icon" />
+                : <RefreshCwIcon size={13} className="btn-action-icon" />}
+              <span>{sessionControlLabel}</span>
             </button>
           </div>
 
