@@ -43,26 +43,13 @@ W3C 对动态状态消息的建议是：状态变化应以不抢焦点的方式�
 - 字幕设置默认关闭 diarization；因此“分人未启用”不能显示为“未识别”。
 - 最新会议日志显示 EOF barrier、diarization done 与仓储水位对齐正常，没有证据表明“一个字一段”是断线或 EOF 故障。历史日志中的队列溢出、旧 worker 错误属于需补充可观测性验证的风险，不能直接归因到当前会议。
 
-### 2.4 模型调研与最终选型
+### 2.4 模型边界
 
-当前代码存在明确的模型职责缺口：`MeetingSummaryClient` 默认读取 `summary_model`，Inner OS 在 `app_context.py` 中也传入同一个 `settings.meeting.summary_model`。仓库默认值仍为 `local/kat-coder-2.5`，因此当前“会议纪要使用什么、Inner OS 使用什么”实际上是同一个可配置模型，而不是经过任务分工的选型。
+模型选型不属于本次转录展示与 UX 改造范围。会议纪要和 Inner OS 均继续使用项目既定的 `local/kat-coder-2.5`，不新增模型路由、不更换模型、不修改模型加载配置，也不在 UI 暴露模型选择器。
 
-行业产品的稳定模式是会后生成结构化 recap，至少包含概览、主题/讨论、决策、行动项、负责人/截止时间和可定位的时间线；Fireflies 的公开 summary schema 也将 `overview`、`topics_discussed`、`action_items`、`outline` 等拆开，而不是只生成一段散文。[Fireflies summary schema](https://docs.fireflies.ai/schema/summary)、[Fireflies meeting recap](https://fireflies.ai/blog/how-to-write-a-meeting-recap)
+行业调研只用于确认输出形态：会议纪要应结构化呈现概览、主题、决策、行动项、负责人、截止时间和待解决问题；Inner OS 应保留证据引用、明确不确定性并支持拒答。[Fireflies summary schema](https://docs.fireflies.ai/schema/summary)、[Fireflies meeting recap](https://fireflies.ai/blog/how-to-write-a-meeting-recap)
 
-模型侧不应只看通用 benchmark：会议纪要首先是中文理解、证据约束、结构化输出和长上下文任务；Inner OS 还要满足交互延迟、拒答和意图路由。Qwen3.8 官方模型卡声明其支持 262,144 原生上下文、可调 reasoning，以及 instruct/non-thinking 采样路线；KAT-Coder-V2.5 的官方技术报告定位则是 coding-focused agentic model。因此 KAT-Coder 适合代码/工具任务，不应未经中文会议评测就作为会议纪要默认模型。[Qwen3.8-27B model card](https://huggingface.co/Qwen/Qwen3.8-27B)、[KAT-Coder-V2.5 technical report](https://arxiv.org/abs/2607.05471)
-
-2026-09-09 本机只做了小型固定样例探针，不将其冒充完整质量基准：`qwen/qwen3.8-27b` 在 `reasoning=off` 下生成合法结构化中文结果；`gemma-4-12b-it-qat` 速度较快，但在同一探针中把证据别名扩展成带时间的字符串，未满足严格的 `Sxxxx` 引用契约；`local/kat-coder-2.5` 当时处于 unloaded，`qwen/qwen3.6-35b-a3b` 的加载请求被取消。因此最终选型仍以角色匹配、本机已索引状态和后续固定评测集共同决定，不能只以一次 tok/s 比较。
-
-最终选型：
-
-| 业务 | 默认模型 | reasoning | 选择理由 |
-|---|---|---|---|
-| 会后 AI 会议纪要 map/reduce/title | `qwen/qwen3.8-27b` | `off` | 质量优先、中文与长上下文优先；抽取/归并/格式化不需要隐藏思考链 |
-| Inner OS `fact` / `draft` | `qwen/qwen3.6-35b-a3b` | `off` | 交互优先；事实回溯和发言草稿是受证据约束的快速任务 |
-| Inner OS `analysis` / `mixed` | `qwen/qwen3.8-27b` | `medium` | 需要权衡、冲突分析和回应策略时使用质量模型与有限 reasoning |
-| 备用候选 | `gemma-4-12b-it-qat` | 按固定评测决定 | 保留作低延迟/多模态候选；在严格中文证据与结构化评测通过前不进入默认路由 |
-
-该路由不在 UI 暴露模型选择器。模型 ID 应拆成 `summary_model`、`inner_os_fast_model`、`inner_os_reasoning_model` 三个配置字段；模型不可用时返回稳定错误，不静默切到未经验收的模型。LM Studio 统一继续使用原生 `/api/v1/chat`，因为官方文档明确推荐 v1 REST API，并提供 `reasoning`、`max_output_tokens` 与 token/TTFT 统计。[LM Studio REST API](https://lmstudio.ai/docs/developer/rest)、[LM Studio chat](https://lmstudio.ai/docs/developer/rest/chat)
+LM Studio 仍统一使用原生 `/api/v1/chat`，保留现有 `reasoning`、`max_output_tokens`、`store: false` 和 token/TTFT 统计约束；这些是接入方式，不构成模型更换。[LM Studio REST API](https://lmstudio.ai/docs/developer/rest)、[LM Studio chat](https://lmstudio.ai/docs/developer/rest/chat)
 
 ## 3. 产品目标与非目标
 
@@ -271,17 +258,7 @@ SpeechRail 本次只补：
 
 ### 8.4 模型配置边界
 
-P0 不立即修改本机模型加载配置；先把应用配置和装配边界改成按业务分离：
-
-```text
-SONA_MEETING_SUMMARY_MODEL=qwen/qwen3.8-27b
-SONA_MEETING_INNER_OS_FAST_MODEL=qwen/qwen3.6-35b-a3b
-SONA_MEETING_INNER_OS_REASONING_MODEL=qwen/qwen3.8-27b
-```
-
-`summary_model` 负责会后 `map/reduce/title`；`inner_os_fast_model` 负责 `fact/draft`；`inner_os_reasoning_model` 负责 `analysis/mixed`。Inner OS 的 reasoning 级别也必须独立配置，默认 `off`（fact/draft）或 `medium`（analysis/mixed）。`MeetingSummaryClient` 与 `InnerOSModelClient` 仍共享 `LocalInferenceScheduler`，但不共享模型 ID。
-
-模型选择器不进入 UI；生成结果的元数据保留实际 `model`、prompt version、reasoning 和 token stats，便于质量回归。任何 fallback 都必须是配置中显式登记、通过固定评测的候选，不允许因为某模型 unloaded 就静默改用另一个模型。
+会议纪要和 Inner OS 继续共用 `local/kat-coder-2.5`。本次不拆分模型字段，不新增 fallback，不修改模型加载或运行配置；仅保留现有的 reasoning、输出上限、`store: false`、prompt version 和 token stats 约束。
 
 ## 9. 可观测性与验收指标
 
@@ -331,7 +308,7 @@ SONA_MEETING_INNER_OS_REASONING_MODEL=qwen/qwen3.8-27b
 - 实现 projector 与单元/集成测试。
 - 接入字幕实时展示和所有可读导出。
 - 修复服务端 speaker label/status 语义，移除前端 opaque-key 猜测。
-- 拆分 `summary_model`、`inner_os_fast_model`、`inner_os_reasoning_model`，并补充固定中文会议评测集；在评测完成前不宣称模型已达到生产质量。
+- 保持会议纪要与 Inner OS 使用 `local/kat-coder-2.5`，仅补充展示投影、UX 和文本守恒评测。
 - 增加 display/raw 计数与文本守恒日志。
 
 ### P1：会议 API 与前端主体验
@@ -364,7 +341,7 @@ SONA_MEETING_INNER_OS_REASONING_MODEL=qwen/qwen3.8-27b
 - `DisplayBlock` 作为派生展示对象的边界；
 - unknown speaker 只在安全 source item 内聚合的保守规则；
 - 会议 API 是否在 P1 增加可选 `display_blocks`；
-- “UI 只提供阅读视图，原子事实不作为页面入口”的产品边界。
+- “UI 只提供阅读视图，原子事实不作为页面入口”的产品边界；模型固定为 `local/kat-coder-2.5`，不纳入本次改造讨论。
 
 确认后再按 P0 → P1 → P2 编写实施计划与测试矩阵。
 
@@ -377,9 +354,7 @@ SONA_MEETING_INNER_OS_REASONING_MODEL=qwen/qwen3.8-27b
 3. NIST. [Rich Transcription Evaluation](https://www.nist.gov/itl/iad/mltg/rich-transcription-evaluation)。用于将 STT、句边界、diarization 和 speaker-attributed STT 分开评估的依据。
 4. W3C. [Understanding Success Criterion 4.1.3: Status Messages](https://www.w3.org/WAI/WCAG22/Understanding/status-messages.html)；[ARIA22](https://www.w3.org/WAI/WCAG21/Techniques/aria/ARIA22)。用于 live region、状态播报和不抢焦点的无障碍依据。
 5. Fireflies. [Summary schema](https://docs.fireflies.ai/schema/summary)；[How to Write a Meeting Recap](https://fireflies.ai/blog/how-to-write-a-meeting-recap)。用于会议纪要结构、行动项和证据定位的行业产品参考。
-6. Qwen. [Qwen3.8-27B model card](https://huggingface.co/Qwen/Qwen3.8-27B)。用于模型上下文、reasoning 控制和 instruct/non-thinking 路线的模型依据。
-7. KAT-Coder. [KAT-Coder-V2.5 Technical Report](https://arxiv.org/abs/2607.05471)。用于 KAT-Coder coding-focused 定位的模型依据。
-8. LM Studio. [REST API](https://lmstudio.ai/docs/developer/rest)；[Chat API](https://lmstudio.ai/docs/developer/rest/chat)。用于本地原生 `/api/v1/chat`、reasoning、输出上限和性能统计的接口依据。
+6. LM Studio. [REST API](https://lmstudio.ai/docs/developer/rest)；[Chat API](https://lmstudio.ai/docs/developer/rest/chat)。用于本地原生 `/api/v1/chat`、reasoning、输出上限和性能统计的接口依据。
 
 ### 项目内资料
 
