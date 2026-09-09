@@ -4,22 +4,22 @@ description: "会议采集、时钟、归属修订、人工映射、持久化、
 status: implemented
 type: technical_spec
 category: meeting
-version: "1.2.0"
+version: "1.3.0"
 date: 2026-09-05
-last_updated: 2026-09-08
+last_updated: 2026-09-09
 owners: [sona-core]
 tags: [speechrail, diarization, meeting]
 ---
 
 # Sona × SpeechRail 会议讲话人分离端到端设计
 
-> 设计编号 `SPK-E2E-1`，状态为已实施。针对已发布 SpeechRail v2.0.0 的验收证据见
-> [2026-09-08 联合验收报告](../operations/speechrail-openai-diarization-integration-acceptance.md)。
+> 设计编号 `SPK-E2E-1`，状态为已实施。公共协议为 SpeechRail v2.0.0，当前运行时为从源码构建的 SpeechRail v2.0.3；最近验收证据见
+> [2026-09-09 联合验收报告](../operations/speechrail-openai-diarization-integration-acceptance.md)。
 
 配套：[Sona 实施计划](../superpowers/plans/2026-09-08-speechrail-openai-diarization-integration.md)。公共协议以
 [SpeechRail v2.0.0 发布版本](https://github.com/hrygo/SpeechRail/releases/tag/v2.0.0)及其
 [`contracts/realtime-openai.md`](../../../SpeechRail/contracts/realtime-openai.md)为准；同级检出时可打开
-[SpeechRail 设计](../../../SpeechRail/docs/architecture/speaker-diarization-e2e-design.md)。Sona 只消费已发布的
+[SpeechRail 当前边界](../../../SpeechRail/docs/architecture/current-boundaries.md)。Sona 只消费已发布的
 OpenAI Realtime 基线和 `speechrail.diarization.*` 扩展，不补造服务端事件。
 
 ## 1. 目标与职责
@@ -40,7 +40,7 @@ PCM 仅在有界内存/IPC 中，数据库和 journal 不存音频/embedding；�
 
 协议基线为 SpeechRail v2.0.0（tag commit `33d4c316307b0d30faec726a0f72a7eb68c4196a`，
 2026-09-08 发布），其 Realtime 服务使用标准 OpenAI 会话握手，并通过显式命名空间 opt-in 开启分人。
-本次本地联合验收时服务报告为兼容的 v2.0.2；此前 v2.0.1 的运行时 preflight 限制及修复后的复验结果记录在验收报告中。
+当前本地联合验收服务为从 SpeechRail 源码构建的 v2.0.3 quality release；此前 v2.0.1/v2.0.2 的 preflight 记录只作为历史部署证据保留。
 
 | 当前事实 | 依据 | 新链路处理 |
 |---|---|---|
@@ -58,7 +58,7 @@ PCM 仅在有界内存/IPC 中，数据库和 journal 不存音频/embedding；�
 
 新协议样本是 16 kHz mono s16le。应用累计样本再转换成毫秒，不逐包取整累加。每 source epoch 记录：
 
-扩展会议按 Rail 回显 `max_item_duration_ms=8000` 验证上限，默认请求 server VAD（threshold=0.65、prefix_padding_ms=300、silence_duration_ms=900）；每包 20–100 ms，最大 500 ms。服务自动硬切连续讲话，Sona 不再叠加独立定时 commit 造成重复空 item。UI 将“字幕出现”“等待断句”“讲话人确认”分开呈现，不承诺每个词都在 4 秒内最终归属；完整延迟门见 Rail 规格。若服务端 VAD preflight 缺少 `onnxruntime`，连接会显式失败并按外部部署问题处理，不在 Sona 侧静默切换引擎。
+扩展会议按 Rail 回显 `max_item_duration_ms=8000` 验证上限，默认请求 server VAD（threshold=0.65、prefix_padding_ms=300、silence_duration_ms=900）；标准字幕使用相同阈值与前置缓冲，但静音窗口为 400ms；每包 20–100ms，最大 500ms。SpeechRail 的 32ms 帧会把停止边界量化到约 928ms/416ms。服务自动硬切连续讲话，Sona 不再叠加独立定时 commit 造成重复空 item。UI 将“字幕出现”“等待断句”“讲话人确认”分开呈现，不承诺每个词都在 4 秒内最终归属；完整延迟门见 Rail 规格。若服务端 VAD preflight 缺少 `onnxruntime`，连接会显式失败并按外部部署问题处理，不在 Sona 侧静默切换引擎。
 
 ```text
 source_epoch: int
@@ -119,7 +119,7 @@ class SpeakerPatch:
     candidates: tuple[tuple[str, float], ...]
 ```
 
-这是计划新增类型，不导入 SpeechRail 代码。`source_session_id` 属于外层
+这是 Sona 侧已实施的领域类型，不导入 SpeechRail 代码。`source_session_id` 属于外层
 `SpeakerPatchEvent`，而不是单个 patch。source 字段是声学来源；应用侧 `speaker_key` 为会议内不透明 UUID
 字符串，由持久化层生成；UI 不解析 key。历史行中的旧 `speaker:0` 值按 unknown 呈现，但不强制重写历史库。
 
@@ -133,6 +133,8 @@ class SpeakerPatch:
 
 - update 只能引用本连接已落库 completed 的单位；同 revision 同内容重复忽略，同 revision 不同内容报冲突，revision 倒退忽略。
 - 同连接每 segment revision 必须连续；跳号/更新未知 UID 视为协议错误，停止分人、保留正文。WebSocket 正常保证顺序，因此不实现服务端事件无限补拉。
+- SpeechRail 必须先发送每个单位的 revision 1 baseline，再发送后续 revision；有界队列无法保留完整修订序列时 fail closed 为 degraded，不发送会造成客户端 `revision_gap` 的跳号更新。
+- `speaker=null` 只能与 `status="unknown"` 组合；不能把 `tentative/stable + null` 发送为协议事件。ForcedAligner 的量化零时长 token 会被丢弃，避免把本来可对齐的正文错误降级为整段 unavailable。
 - 客户端 DB 写入暂时失败时，接收队列有界，按原顺序 journal；未持久化的 completed 在修订之前回放。
 - stable watermark 单调；超过 watermark 的单元不再接受自动归属改写。人工更正不受声学 watermark 限制。
 - status degraded 后所有新 unit 为 unknown，页面提示一次；不无限重连试图掩盖持续模型错误。
@@ -259,16 +261,16 @@ transcriber、旧协议字段和旧运行时开关均不在当前路径；历史
 | 扩展会议 | 不存在第二分人生产者；正文与 speaker patch 分离 |
 | 摘要过程中人工纠错 | 旧 revision 的纪要标 stale，负责人不被错误归属 |
 
-实施顺序：协议适配→加法数据迁移/幂等事务→UI/EOF/纪要→联合验收。依赖已发布 SpeechRail v2.0.0
-机器契约，不能靠 mock 猜未实现接口。
+实施顺序：协议适配→加法数据迁移/幂等事务→UI/EOF/纪要→联合验收。公共机器契约仍是 SpeechRail
+v2.0.0；当前受管运行时为从 SpeechRail 源码仓库构建的 v2.0.3，不能靠 mock 猜未实现接口。
 
-发布：SpeechRail v2.0.0 已发布；Sona 默认仍关闭分人，按会议/字幕设置显式开启。回退时结束录音、关闭
+发布：SpeechRail 公共协议 v2.0.0 已发布，当前 v2.0.3 运行时由源码 wheel 部署；Sona 默认仍关闭分人，按会议/字幕设置显式开启。回退时结束录音、关闭
 当前设置并保留新数据列及 journal；不删除数据、不把未知改成某个人，也不恢复已删除的 batch 路径。
 
 ## 9. 本次文档交付边界
 
 本轮已完成 SpeechRail v2.0.0 对接实施、协议/事务/UI 测试和手工 turn meeting loopback smoke；完整门禁、
-真实服务版本、字幕停止链路结果与限制条件见联合验收报告。SpeechRail 当前 v2.0.2 已报告 VAD runtime ready，
-默认 server-side VAD meeting smoke 已通过；字幕 clean tail 仍有上游事件交付对账问题。这属于已反馈给 SpeechRail
-维护者的外部问题，Sona 不修改其仓库，也不以 bounded degraded stop 结果掩盖该限制。若后续运行时再次缺少
+真实服务版本、字幕停止链路结果与限制条件见联合验收报告。当前 SpeechRail v2.0.3 已报告 `realtime_vad`
+ready，默认 server-side VAD meeting smoke、字幕重入隔离、会议正文/分人水位屏障和源码 wheel 部署链路均已复验；
+此前的 clean-tail、revision 丢失、EOF 对齐和未知 speaker 回退问题已在当前联合验收中关闭。若后续运行时再次缺少
 `onnxruntime`，请求 server-side VAD 仍应显式 preflight 失败，不在 Sona 侧静默切换引擎。

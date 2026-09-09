@@ -14,7 +14,8 @@ tags: [speechrail, openai, realtime, diarization, subtitles, migration]
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-> **当前状态（2026-09-09）：** Sona 侧实现、fake/隔离验收、完整质量门和真实联合 smoke 均已通过。SpeechRail v2.0.2 的
+> **当前状态（2026-09-09）：** Sona 侧实现、fake/隔离验收、完整质量门和真实联合 smoke 均已通过。当前受管 SpeechRail v2.0.3
+>（由 SpeechRail 源码仓库构建）
 > `/health`、`/readyz`、`realtime_vad` 与默认 `server_vad` meeting smoke 均正常；完整短语音的真实字幕 stop 已完成
 > `completed → updated → done`、单次 `finish`、最终 SRT 归档且无协议/连接错误。`status="unknown", speaker=null` 是当前协议允许的未知归属，
 > 不应与非法的 `tentative/stable + speaker=null` 混淆。详细证据见[联合验收报告](../../operations/speechrail-openai-diarization-integration-acceptance.md)。
@@ -28,7 +29,7 @@ tags: [speechrail, openai, realtime, diarization, subtitles, migration]
 **Authoritative upstream contract:** SpeechRail 已发布的 [v2.0.0 release](https://github.com/hrygo/SpeechRail/releases/tag/v2.0.0)、
 `contracts/realtime-openai.md` 的 “Diarization 扩展”、`docs/users/api-contract.md` 与
 `src/speechrail/compatibility/openai_realtime.py` 的实际 payload。Sona 的 fixture 与 typed decoder 已按该发布版本核对；
-本地联合 smoke 使用兼容的 v2.0.2 服务；此前 v2.0.1 的 `server_vad` preflight 限制及维护者修复后的复验结果记录在验收报告中。
+本地联合 smoke 使用当前 v2.0.3 服务；此前 v2.0.1/v2.0.2 的 `server_vad`、revision、EOF 对齐和 clean-tail 问题及修复后的复验结果记录在验收报告中。
 
 ## Global Constraints
 
@@ -298,7 +299,7 @@ Development and fake acceptance can proceed immediately. The only external prere
 
 The joint smoke does not close SpeechRail's quality gates for tail speech, DER/cpCER, long files, two-hour resource behavior, or RTTM/UEM corpus scoring. Those remain owned by SpeechRail's current diarization acceptance matrix and its quality-evaluation handoff.
 
-当前已验证的外部前置条件不是假设：SpeechRail v2.0.2 `/health` 与 `/readyz` 报告 ready，`realtime_vad`
+当前已验证的外部前置条件不是假设：源码构建的 SpeechRail v2.0.3 `/health` 与 `/readyz` 报告 ready，`realtime_vad`
 ready，默认 `server_vad` meeting handshake/smoke 已通过；完整短语音的字幕 stop 已验证尾部 `updated → done`、单次
 `finish`、最终 SRT 和 stopped 清理。Sona 未修改 SpeechRail 工作树，也未放宽 `tentative/stable` 的 speaker 约束。
 SpeechRail 的 DER/cpCER、长文件、两小时资源行为和 RTTM/UEM 仍属于其独立质量验收范围，不在本任务 AC 中宣称通过。

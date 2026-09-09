@@ -12,7 +12,7 @@ tags: [speechrail, diarization, e2e, acceptance, spk-e2e-1]
 # Sona × SpeechRail 会议讲话人分离端到端验收报告 (SPK-E2E-1)
 
 > **历史报告：** 本记录针对发布前的旧协议与旧实现，当前验收不再引用其中的版本、事件名或覆盖率数字。
-> 当前证据见 [2026-09-08 SpeechRail v2 联合验收报告](speechrail-openai-diarization-integration-acceptance.md)。
+> 当前证据见 [2026-09-09 SpeechRail v2 联合验收报告](speechrail-openai-diarization-integration-acceptance.md)。
 
 > 验收日期：2026-09-06<br>
 > 责任人：Sona Core Team, SpeechRail Core Team<br>

@@ -27,9 +27,10 @@ tags:
 
 > 当前交付与验收方案：[Sona × SpeechRail 会议讲话人分离端到端设计](architecture/speaker-diarization-e2e-design.md)（🟣 `implemented`）与
 > [SpeechRail v2 对接实施计划](superpowers/plans/2026-09-08-speechrail-openai-diarization-integration.md)（🟡 `completed`），
-> 详见 [2026-09-08 联合验收报告](operations/speechrail-openai-diarization-integration-acceptance.md)。协议基线为已发布
-> [SpeechRail v2.0.0](https://github.com/hrygo/SpeechRail/releases/tag/v2.0.0)；当前 v2.0.2 运行时已恢复 VAD readiness，
-> 真实会议/字幕联合 smoke 与字幕 clean tail 已通过；SpeechRail 独立 DER/长时质量仍以其自身验收为准。
+> 详见 [2026-09-09 联合验收报告](operations/speechrail-openai-diarization-integration-acceptance.md)。协议基线为已发布
+> [SpeechRail v2.0.0](https://github.com/hrygo/SpeechRail/releases/tag/v2.0.0) 公共协议；当前受管质量档为
+> SpeechRail `2.0.3`，已从源码仓库构建 wheel 部署，`realtime_vad` 解析为 Silero 且 speech admission ready。
+> 真实会议/字幕联合 smoke 与克隆音色的确定性、响度和输入信号校验已通过；克隆主观音质及非 `1.0` 速度能力仍按专项验收边界记录，SpeechRail 独立 DER/长时质量仍以其自身验收为准。
 
 以下规则优先于历史方案、评测记录和早期实现说明：
 
@@ -37,6 +38,9 @@ tags:
 - `sona` 只通过 SpeechRail **OpenAI Realtime (`/v1/realtime`) / REST** 客户端消费能力：字幕与会议使用 ASR OpenAI Realtime，语音助手使用 SpeechRail STT/TTS 与 LM Studio；仓库内不再运行本地 ASR/TTS worker、WhisperLiveKit 或旧 TTS bridge。
 - `scripts/run-all.sh` 只启动 `sona-ui`；SpeechRail 必须单独启动并准备所需 snapshot/profile。Realtime 当前为不可透明恢复的会话，断线后由应用创建新会话并执行 source epoch/窗口对账。
 - 会议分人使用 SpeechRail diarization 的持续分人扩展（Sortformer），应用侧负责不可变正文入库、原子原位 patch 修订与人工更正保护；本仓库不运行第二个分人生产者，也不运行本地 CAM++/AHC 声纹运行时。
+- VAD 按模式单一归属：语音助手由 Sona/Pipecat 本地 Silero VAD 负责回合并向 SpeechRail 发 `manual` commit；标准字幕向 SpeechRail 发送 `server_vad`（静音 `400ms`），会议发送 `server_vad`（静音 `900ms`）。字幕与会议路径不再叠加 Sona 本地 VAD。
+- SpeechRail 的 VAD 参数是端点策略，不是分人窗口；分人 activity 独立消费连续 PCM，只通过 `speechrail.diarization.updated/status/done` 修订 speaker 元数据。
+- SpeechRail 的所有代码修改必须落在独立源码库并由源码 wheel 重新安装到 managed release；禁止直接编辑 `runtime/current`。
 - “当前已实现”与“外部 SpeechRail 部署/模型的真实端到端验收”分开记录；未完成外部服务验收的内容不得写成已验证基线。
 
 ---
@@ -65,10 +69,10 @@ docs/
 ├── README.md                              # 🧭 本文档：文档中心总览与索引导航矩阵
 │
 ├── architecture/                          # 🏗️ 系统总体架构与核心子系统设计
-│   ├── 系统总体架构与详细设计方案.md       # 系统总体逻辑/物理架构、时序流与模块规范 (v2.2)
+│   ├── 系统总体架构与详细设计方案.md       # 系统总体逻辑/物理架构、时序流与模块规范 (v2.5)
 │   ├── Sona-核心架构重构方案与实施路径.md   # 核心架构治理、纪要解耦、包治理与实施路线图 (v1.0)
-│   ├── 全链路语音交互与会议助手-技术方案与实施方案.md # 全链路端到端总体方案、前沿调研与实施路线图
-│   ├── 实时语音交互与字幕-方案与最佳实践.md # 实时语音交互/字幕架构与单 PCM owner 仲裁契约
+│   ├── 全链路语音交互与会议助手-技术方案与实施方案.md # 全链路端到端总体方案、当前基线、前沿调研与实施路线图 (v1.1.0)
+│   ├── 实时语音交互与字幕-方案与最佳实践.md # 实时语音交互/字幕架构与单 PCM owner 仲裁契约 (v2.3.0)
 │   └── 声学防回声与全双工交互设计方案.md   # 已落地后端 L1/L2 防回声与外放免提全双工边界
 │
 ├── solutions/                             # 💡 专项技术方案与深度设计
@@ -143,11 +147,11 @@ graph TD
 
 | 文档名称 | 状态 | 类型 | 版本 | 核心内容与设计要点 |
 |---|---|---|---|---|
-| [系统总体架构与详细设计方案](architecture/系统总体架构与详细设计方案.md) | 🟢 `active` | `architecture` | `v2.2` | **权威总体架构**：SpeechRail ASR/TTS 拓扑、分层架构、交互/字幕/会议/控制端到端时序与详细设计规范 |
-| [Sona × SpeechRail 会议讲话人分离端到端设计](architecture/speaker-diarization-e2e-design.md) | 🟣 `implemented` | `technical_spec` | `v1.1.0` | **SPK-E2E-1 端到端设计**：双通道解耦、不可变正文入库、原子分人修订、人工更正最高优先级保护与 EOF 水位屏障 |
+| [系统总体架构与详细设计方案](architecture/系统总体架构与详细设计方案.md) | 🟢 `active` | `architecture` | `v2.5` | **权威总体架构**：SpeechRail ASR/TTS 拓扑、模式 VAD 所有权、分层架构、交互/字幕/会议/控制端到端时序 |
+| [Sona × SpeechRail 会议讲话人分离端到端设计](architecture/speaker-diarization-e2e-design.md) | 🟣 `implemented` | `technical_spec` | `v1.3.0` | **SPK-E2E-1 端到端设计**：双通道解耦、不可变正文入库、原子分人修订、人工更正最高优先级保护与 EOF 水位屏障 |
 | [Sona 核心架构重构方案与实施路径](architecture/Sona-核心架构重构方案与实施路径.md) | 🟢 `active` | `architecture` | `v1.0.0` | **架构重构规范**：核心架构治理、纪要解耦、包治理与三阶段渐进式重构实施路线图 |
-| [全链路语音交互与会议助手-技术方案与实施方案](architecture/全链路语音交互与会议助手-技术方案与实施方案.md) | 🟢 `active` | `architecture` | `v1.0.0` | **完整技术方案与实施路径**：SpeechRail 边界、断句/分人/对账、前沿调研、ROI 与阶段落地 |
-| [实时语音交互与字幕-方案与最佳实践](architecture/实时语音交互与字幕-方案与最佳实践.md) | 🟢 `active` | `architecture` | `v2.1` | SpeechRail OpenAI Realtime `/v1/realtime` 语音交互与字幕技术方案、单 PCM owner 仲裁契约及验收边界 |
+| [全链路语音交互与会议助手-技术方案与实施方案](architecture/全链路语音交互与会议助手-技术方案与实施方案.md) | 🟢 `active` | `architecture` | `v1.1.0` | **完整技术方案与实施路径**：当前 v2.0.3 边界、400/900ms VAD、断句/分人/对账、前沿调研与历史路线 |
+| [实时语音交互与字幕-方案与最佳实践](architecture/实时语音交互与字幕-方案与最佳实践.md) | 🟢 `active` | `architecture` | `v2.3.0` | SpeechRail OpenAI Realtime `/v1/realtime` 语音交互与字幕技术方案、单 PCM owner 仲裁契约及验收边界 |
 | [声学防回声与全双工交互设计方案](architecture/声学防回声与全双工交互设计方案.md) | 🟣 `implemented` | `architecture` | `v1.1` | 后端 L1/L2 防回声与 SubtitleProxy 音频门控；UI 融合仍标注为后续设计项 |
 
 ### 2. 专项技术方案与深度设计 (`docs/solutions/`)
@@ -177,7 +181,8 @@ graph TD
 | [前后端接线验证记录 (2026-08-26)](operations/前后端接线验证记录-2026-08-26.md) | 🟡 `completed` | `test_record` | `v1.0` | 会议助手前后端分离接线联调验证记录、测试结果矩阵与验收结论 |
 | [会议助手前后端分离联调记录模板](operations/联调记录模板.md) | ⚪ `template` | `template` | `v1.0` | 每次契约/后端/前端版本发布前执行联调验收的标准记录模板 |
 | [SPK-E2E-1 端到端联合验收报告 (2026-09-06)](operations/speaker-diarization-e2e-acceptance-2026-09-06.md) | 📦 `archived` | `test_record` | `v1.1.0` | 历史报告：记录发布前旧协议；不作为当前 SpeechRail v2 验收依据 |
-| [SpeechRail v2.0.0 对接联合验收报告 (2026-09-08)](operations/speechrail-openai-diarization-integration-acceptance.md) | 🟡 `completed` | `test_record` | `v1.2.0` | **当前验收证据**：v2.0.0 协议契约、Sona 质量门、v2.0.2 默认 VAD meeting/subtitle smoke、字幕 clean tail 与最终 SRT 归档 |
+| [SpeechRail v2.0.3 对接联合验收报告 (2026-09-09)](operations/speechrail-openai-diarization-integration-acceptance.md) | 🟡 `completed` | `test_record` | `v1.3.0` | **当前验收证据**：v2.0.0 协议契约、v2.0.3 源码构建运行时、400/900ms 模式 VAD、连续分人修订、字幕重入与会议 EOF 水位屏障 |
+| [克隆音色稳定性验收 (2026-09-09)](operations/clone-tts-stability-acceptance-2026-09-09.md) | 🟡 `completed` | `test_record` | `v1.0.0` | SpeechRail v2.0.3 clone 采样确定性、响度冻结、参考音频校验与速度能力边界 |
 | [SpeechRail-OpenAI标准协议功能需求交割单](operations/SpeechRail-OpenAI标准协议功能需求交割单.md) | 📦 `archived` | `technical_spec` | `v1.0` | **历史交割单**：记录 2026-09-02 的需求与差距快照；不替代已发布 v2 contract |
 | [语音交互打断后推理挂起故障排查与修复方案](operations/语音交互打断后推理挂起故障排查与修复方案.md) | 🟣 `implemented` | `postmortem` | `v1.1` | SpeechRail 迁移前发生的 Barge-in 故障记录；EchoState、取消与状态机修复仍适用于当前链路 |
 | [语音助手 TTS 爆音排查与验收手册](operations/语音助手-TTS-爆音排查与验收.md) | 🟢 `active` | `manual` | `v1.0` | 语音助手 CoreAudio overload 与长播报爆音排查、设备原生采样率/40ms 显式缓冲验收规范与回退机制 |
@@ -198,6 +203,7 @@ graph TD
 | [ADR-010](decisions/0010-physical-output-audio-capture.md) | 本地物理输出音频采用设备绑定的 Core Audio Tap 原生采集 | 🔵 `accepted` | 2026-08-31 | 原生 Helper、设备级作用域、双源混音与单 PCM 推理所有者 |
 | [ADR-011](decisions/0011-speechrail-only-asr.md) | ASR 运行时统一由 SpeechRail 提供 | 🔵 `accepted` | 2026-08-31 | 移除本地 ASR worker/WhisperLiveKit；字幕、会议与交互统一使用 SpeechRail OpenAI Realtime `/v1/realtime` |
 | [ADR-012](decisions/0012-speechrail-realtime-tts.md) | TTS 运行时统一由 SpeechRail 提供 | 🔵 `accepted` | 2026-09-01 | 移除旧 TTS bridge 与本地 TTS 运行时，应用负责播放、取消和回声状态协调 |
+| [ADR-013](decisions/0013-vad-ownership-and-mode-boundaries.md) | 按运行模式划分 VAD 所有权 | 🔵 `accepted` | 2026-09-09 | assistant 使用 Sona 本地 VAD；字幕/会议使用 SpeechRail server VAD，避免双重 endpointing |
 
 ### 6. 历史计划与设计规格归档 (`docs/superpowers/`)
 
