@@ -4,6 +4,7 @@ export type VoiceQualityStatus = "unevaluated" | "pass" | "warn" | "reject";
 
 export interface VoiceSignalMetrics {
   readonly duration_seconds?: number;
+  readonly rms_dbfs?: number;
   readonly speech_active_ratio?: number;
   readonly noise_floor_dbfs?: number;
   readonly estimated_snr_db?: number;
@@ -91,6 +92,7 @@ export function calculateVoiceSignalMetrics(
   }
   const clippingSamples = samples.reduce((count, sample) => count + (Math.abs(sample) >= 0.999 ? 1 : 0), 0);
   return {
+    rms_dbfs: dbfs(summarizeAnalyserFrame(samples).rms),
     duration_seconds: samples.length / sampleRate,
     speech_active_ratio: activeFrames.length / frameRms.length,
     noise_floor_dbfs: dbfs(noiseRms),
@@ -189,4 +191,19 @@ export function evaluateVoiceSignal(metrics: VoiceSignalMetrics): LocalVoiceQual
       ? "可以继续，但建议降低环境噪声后重新录音"
       : "录音环境良好，可以进行服务端质量检查";
   return { status, failure_codes: failureCodes, primary_action: primaryAction };
+}
+
+/** Capture safety only: energy heuristics are not a speech/noise classifier. */
+export function evaluateCaptureSafety(metrics: VoiceSignalMetrics): LocalVoiceQualityResult {
+  const codes: string[] = [];
+  if (metrics.rms_dbfs !== undefined && metrics.rms_dbfs < -60) codes.push("capture_silent");
+  if (metrics.duration_seconds !== undefined && metrics.duration_seconds < 2) codes.push("audio_too_short");
+  if (metrics.duration_seconds !== undefined && metrics.duration_seconds > 45) codes.push("audio_too_long");
+  if (metrics.clipping_ratio !== undefined && metrics.clipping_ratio > 0.001) codes.push("clipping");
+  return {
+    status: codes.length ? "reject" : "unevaluated", failure_codes: codes,
+    primary_action: codes.includes("capture_silent") ? "录音几乎无声，请检查输入设备后重新录制"
+      : codes.length ? "参考音频过短、过长或发生削波，请检查后重新录制"
+        : "已检查时长与电平；人声、内容与噪声仍需服务端核验，未自动增强音频",
+  };
 }

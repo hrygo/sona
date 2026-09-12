@@ -23,6 +23,8 @@ export const VOICE_MODE_META: Record<VoiceMode, { label: string; badge: string; 
 };
 
 export function resolveVoiceMode(voice: VoiceCatalogItem): VoiceMode {
+  // Display origin, not backend binding: generated references still use Base clone mode.
+  if (voice.creation?.origin === "generated") return "instruction";
   if (voice.mode) return voice.mode;
   if (voice.is_system) return "system";
   if (voice.ref_text) return "clone";

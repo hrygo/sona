@@ -144,12 +144,12 @@ function stubRecordingEnvironment(events: string[]) {
 it("renders voice atelier with voice deck and clone forge tabs", () => {
   renderStudio();
   expect(container.textContent).toContain("VOICE ATELIER · 声音工坊");
-  expect(container.textContent).toContain("全本地专属声音创设与档案库");
+  expect(container.textContent).toContain("创建声音 · 检查效果 · 确认使用");
   expect(container.textContent).toContain("音色档案库");
   expect(container.textContent).toContain("默认原声");
   expect(container.textContent).toContain("我的声音分身");
-  expect(container.textContent).toContain("声音克隆 (ICL 录音克隆)");
-  expect(container.textContent).toContain("自然语言设计 (Prompt 定制)");
+  expect(container.textContent).toContain("克隆声音 · 参考录音");
+  expect(container.textContent).toContain("描述声音 · 自然语言设计");
   expect(container.textContent).toContain("提词器引导朗读");
 });
 
@@ -194,7 +194,7 @@ it("switches to design forge tab and applies inspiration prompt", () => {
     designTabBtn.click();
   });
 
-  expect(container.textContent).toContain("音色提示词 Prompt");
+  expect(container.textContent).toContain("声音描述（可直接修改示例）");
   const inspirationChips = Array.from(container.querySelectorAll<HTMLButtonElement>(".design-inspiration-chip"));
   const warmChip = inspirationChips.find((c) => c.textContent?.includes("温柔知性"))!;
 
@@ -205,7 +205,7 @@ it("switches to design forge tab and applies inspiration prompt", () => {
   const nameInput = container.querySelector<HTMLInputElement>("#design-name-input")!;
   const descInput = container.querySelector<HTMLTextAreaElement>("#design-instruction-input")!;
   expect(nameInput.value).toBe("知性女声");
-  expect(descInput.value).toContain("温柔轻快");
+  expect(descInput.value).toContain("温暖清澈");
 });
 
 it("sends design forge preview to the dedicated preview extension", async () => {
@@ -240,7 +240,7 @@ it("sends design forge preview to the dedicated preview extension", async () => 
   const previewCall = fetchMock.mock.calls.find(([url]) => String(url).includes("/v1/voices/previews"));
   expect(previewCall).toBeDefined();
   const payload = JSON.parse((previewCall?.[1] as RequestInit).body as string) as Record<string, unknown>;
-  expect(payload.instruction).toContain("温柔轻快");
+  expect(payload.instruction).toContain("温暖清澈");
   expect(payload.voice).toBeUndefined();
 });
 
@@ -434,6 +434,7 @@ it("ignores a second start click while recording setup is in flight", async () =
     onStopRecordingVoice: vi.fn(),
   });
 
+  await act(async () => { await Promise.resolve(); });
   const startButton = container.querySelector<HTMLButtonElement>(".btn-record-primary")!;
   act(() => {
     startButton.click();
@@ -482,21 +483,22 @@ it("disables browser noise suppression for clone reference capture", async () =>
   });
 });
 
-it("keeps design creation available while disabling preview when the model forbids preview", () => {
+it("allows editing examples but forbids generated registration without Base capability", () => {
   renderStudio("default", {
     supports_preview: false,
     supports_clone: false,
     supports_instruction: true,
   });
 
-  expect(container.textContent).toContain("自然语言设计 (Prompt 定制)");
-  expect(container.textContent).not.toContain("声音克隆 (ICL 录音克隆)");
+  expect(container.textContent).toContain("描述声音 · 自然语言设计");
+  expect(container.textContent).not.toContain("克隆声音 · 参考录音");
   const previewButton = container.querySelector<HTMLButtonElement>(".btn-design-preview");
   expect(previewButton?.disabled).toBe(true);
-  expect(container.textContent).toContain("当前模型不支持自然语言试听");
+  expect(container.querySelector<HTMLButtonElement>(".btn-submit-design")?.disabled).toBe(true);
+  expect(container.textContent).toContain("Quality 档的设计与克隆能力");
 });
 
-/* ====================== 克隆提交流程（响度标准化） ====================== */
+/* ====================== 克隆提交流程（保留原始录音） ====================== */
 
 function setInputNativeValue(input: HTMLInputElement, value: string) {
   const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
@@ -509,7 +511,7 @@ interface CloneFetchResult {
   fetchMock: ReturnType<typeof vi.fn>;
 }
 
-function stubCloneFetch(cloneQuality?: Record<string, unknown>): CloneFetchResult {
+function stubCloneFetch(outputProbeCount = 3): CloneFetchResult {
   const cloneBodies: FormData[] = [];
   const fetchMock = vi.fn(async (url: unknown, init?: RequestInit) => {
     const path = String(url);
@@ -545,7 +547,12 @@ function stubCloneFetch(cloneQuality?: Record<string, unknown>): CloneFetchResul
           status: "pass",
           run_id: "vqr-test",
           tested_at: "2026-09-09T10:00:00Z",
-          synthesis: { probe_count: 3, successful_probe_count: 3, deterministic: true },
+          synthesis: {
+            probe_count: outputProbeCount,
+            successful_probe_count: outputProbeCount,
+            deterministic: true,
+            transcript_match: 1,
+          },
           failure_codes: [],
         }),
       };
@@ -554,13 +561,7 @@ function stubCloneFetch(cloneQuality?: Record<string, unknown>): CloneFetchResul
       cloneBodies.push(init.body as FormData);
       return {
         ok: true,
-        json: async () => ({
-          id: "cloned_voice",
-          name: "测试音色",
-          is_system: false,
-          mode: "clone",
-          ...(cloneQuality ? { quality: cloneQuality } : {}),
-        }),
+        json: async () => ({ id: (init?.body as FormData).get("id"), name: "测试音色", is_system: false, mode: "clone" }),
       };
     }
     return { ok: true, json: async () => ({ object: "list", data: [] }) };
@@ -627,11 +628,11 @@ async function waitForLocalQualityFailure(message: string) {
   });
 }
 
-it("submits loudness-normalized WAV audio when cloning a recorded voice", async () => {
+it("uploads the original recording unchanged and does not auto-run output checks or activate", async () => {
   const events: string[] = [];
   const { recorders } = stubRecordingEnvironment(events);
-  // 交替 ±0.5 的归一化源信号（RMS 0.5，应衰减至 0.1 的目标响度）。
-  const decoded = new Float32Array(2000);
+  // 三秒有效信号；计时器不能代替解码后的真实时长。
+  const decoded = new Float32Array(48000 * 3);
   for (let i = 0; i < decoded.length; i++) {
     decoded[i] = i % 2 === 0 ? 0.5 : -0.5;
   }
@@ -671,69 +672,56 @@ it("submits loudness-normalized WAV audio when cloning a recorded voice", async 
   }
 
   const audio = cloneBodies[0]!.get("audio") as File;
-  expect(audio.name).toBe("recording.wav");
-  expect(audio.type).toBe("audio/wav");
+  expect(audio.name).toBe("recording.webm");
+  expect(audio.type).toBe("audio/webm");
+  const captured = await new Promise<string>((resolve) => {
+    const reader = new FileReader(); reader.onload = () => resolve(String(reader.result)); reader.readAsText(audio);
+  });
+  expect(captured).toBe("fake-webm");
+  expect(fetchMock.mock.calls.some(([url]) => String(url).includes("quality-runs"))).toBe(false);
   expect(cloneBodies[0]!.get("name")).toBe("我的测试音色");
   expect(cloneBodies[0]!.get("ref_text")).toContain("白日依山尽");
   expect(onVoiceCreated).toHaveBeenCalledWith(
-    expect.objectContaining({ id: "cloned_voice", name: "测试音色" }),
+    expect.objectContaining({ id: cloneBodies[0]!.get("id"), name: "测试音色" }),
   );
-  expect(onVoiceCreated).toHaveBeenCalledWith(
-    expect.objectContaining({
-      quality: expect.objectContaining({ status: "pass" }),
-    }),
-  );
+  expect(container.textContent).toContain("合成输出检查");
+  expect(container.textContent).toContain("尚未评估");
   expect(onSelectVoice).not.toHaveBeenCalled();
   expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/v1/voices/clone/validate"))).toBe(true);
 });
 
-it("runs synthesis probes when clone quality only contains reference evidence", async () => {
+it("retains clone output evidence when switching creation tabs after the check", async () => {
   const events: string[] = [];
   const { recorders } = stubRecordingEnvironment(events);
-  const decoded = new Float32Array(2000);
-  for (let i = 0; i < decoded.length; i++) decoded[i] = i % 2 === 0 ? 0.5 : -0.5;
-  vi.stubGlobal("AudioContext", class {
-    state: AudioContextState = "running";
-    createMediaStreamSource() { return { connect: vi.fn() }; }
-    createAnalyser() {
-      return { fftSize: 256, frequencyBinCount: 2, getByteFrequencyData: (data: Uint8Array) => data.fill(0) };
-    }
-    decodeAudioData() {
-      return Promise.resolve({
-        sampleRate: 48000,
-        numberOfChannels: 1,
-        length: decoded.length,
-        getChannelData: () => decoded,
-      } as unknown as AudioBuffer);
-    }
-    close() { this.state = "closed"; return Promise.resolve(); }
-  } as unknown as typeof AudioContext);
-  const { cloneBodies, fetchMock } = stubCloneFetch({
-    policy_version: "voice_quality_v1",
-    status: "pass",
-    run_id: "vqr-reference-only",
-    tested_at: "2026-09-09T10:00:00Z",
-    synthesis: { probe_count: 0, successful_probe_count: 0 },
-    reference: { duration_seconds: 8, estimated_snr_db: 28 },
-    failure_codes: [],
-  });
+  const { cloneBodies } = stubCloneFetch(18);
 
   try {
     await recordSampleAudio(events, recorders);
-    await submitCloneWith("参考证据测试");
+    await submitCloneWith("我的测试音色");
     await waitForCloneRequest(cloneBodies);
+    await vi.waitFor(() => expect(container.textContent).toContain("输出待检查"));
+
+    await act(async () => {
+      Array.from(container.querySelectorAll<HTMLButtonElement>("button"))
+        .find((button) => button.textContent?.includes("检查输出（18 段）"))!.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => expect(container.textContent).toContain("输出检查通过"));
+
+    const tabs = Array.from(container.querySelectorAll<HTMLButtonElement>(".forge-tab-btn"));
+    act(() => tabs.find((button) => button.textContent?.includes("自然语言设计"))!.click());
+    act(() => tabs.find((button) => button.textContent?.includes("参考录音"))!.click());
+
+    expect(container.textContent).toContain("输出检查通过");
   } finally {
     vi.useRealTimers();
   }
-
-  expect(fetchMock.mock.calls.filter(([url]) => String(url).includes("/quality-runs"))).toHaveLength(1);
-  expect(container.textContent).toContain("3 / 3");
-  expect(container.textContent).not.toContain("0 / 0");
 });
 
-it("falls back to uploading the raw recording when loudness normalization fails", async () => {
+it("leaves browser-uninspectable audio for the server preflight without altering its bytes", async () => {
   const events: string[] = [];
-  // stubRecordingEnvironment 提供的 AudioContext 没有 decodeAudioData，标准化必然失败。
+  // 本地无法解码仍必须通过服务端预检，不进行伪增强。
   const { recorders } = stubRecordingEnvironment(events);
   const { cloneBodies } = stubCloneFetch();
 
@@ -748,7 +736,7 @@ it("falls back to uploading the raw recording when loudness normalization fails"
   const audio = cloneBodies[0]!.get("audio") as File;
   expect(audio.name).toBe("recording.webm");
   expect(onVoiceCreated).toHaveBeenCalledWith(
-    expect.objectContaining({ id: "cloned_voice" }),
+    expect.objectContaining({ id: cloneBodies[0]!.get("id") }),
   );
 });
 
@@ -792,4 +780,105 @@ it("blocks the clone submission and asks for a re-record when the recording is s
 
   expect(container.textContent).toContain("录音几乎无声");
   expect(onVoiceCreated).not.toHaveBeenCalled();
+});
+
+it("preserves an edited design draft when switching between the two creation tabs", async () => {
+  renderStudio("default", { supports_clone: true, supports_instruction: true, supports_preview: true });
+  const tabs = Array.from(container.querySelectorAll<HTMLButtonElement>(".forge-tab-btn"));
+  act(() => tabs.find((b) => b.textContent?.includes("自然语言设计"))!.click());
+  const example = Array.from(container.querySelectorAll<HTMLButtonElement>(".voice-example-card"))[1]!;
+  act(() => example.click());
+  const description = container.querySelector<HTMLTextAreaElement>("#design-instruction-input")!;
+  act(() => {
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(description, "我的已修改描述");
+    description.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  act(() => tabs.find((b) => b.textContent?.includes("参考录音"))!.click());
+  act(() => tabs.find((b) => b.textContent?.includes("自然语言设计"))!.click());
+  expect(container.querySelector<HTMLTextAreaElement>("#design-instruction-input")!.value).toBe("我的已修改描述");
+});
+
+it("forwards the corrected actual reference text instead of the original teleprompter", async () => {
+  const events: string[] = [];
+  const { recorders } = stubRecordingEnvironment(events);
+  const { cloneBodies } = stubCloneFetch();
+  await recordSampleAudio(events, recorders);
+  const editor = container.querySelector<HTMLTextAreaElement>("#clone-reference-text")!;
+  const spoken = "这是我实际说出的内容，不是提词器上原先提供的内容。";
+  act(() => {
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(editor, spoken);
+    editor.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  expect(container.querySelector<HTMLButtonElement>(".btn-switch-prompt")!.disabled).toBe(true);
+  await submitCloneWith("修正参考"); await waitForCloneRequest(cloneBodies);
+  expect(cloneBodies[0]!.get("ref_text")).toBe(spoken);
+});
+
+it("does not open the microphone before assistant mute is acknowledged", async () => {
+  const events: string[] = [];
+  const { getUserMedia } = stubRecordingEnvironment(events);
+  let finish!: () => void;
+  const start = vi.fn(() => new Promise<void>((resolve) => { finish = resolve; }));
+  renderStudio("default", undefined, { onStartRecordingVoice: start });
+  await act(async () => { container.querySelector<HTMLButtonElement>(".btn-record-primary")!.click(); });
+  expect(getUserMedia).not.toHaveBeenCalled();
+  await act(async () => { finish(); });
+  await act(async () => { container.querySelector<HTMLButtonElement>(".btn-record-primary")!.click(); });
+  expect(getUserMedia).toHaveBeenCalledOnce();
+});
+
+it("keeps deletion confirmation open until the actual deletion completes", async () => {
+  let finish!: () => void;
+  onVoiceDeleted.mockImplementation(() => new Promise<void>((resolve) => { finish = resolve; }));
+  renderStudio();
+  act(() => { container.querySelector<HTMLButtonElement>(".btn-deck-delete")!.click(); });
+  await act(async () => { container.querySelector<HTMLButtonElement>(".btn-danger")!.click(); });
+  expect(container.querySelector(".voice-delete-modal-dialog")).not.toBeNull();
+  expect(container.textContent).toContain("删除中");
+  await act(async () => { finish(); });
+  expect(container.querySelector(".voice-delete-modal-dialog")).toBeNull();
+});
+
+it("Escape dismisses only the deletion confirmation, not the entire workshop", async () => {
+  renderStudio();
+  act(() => { container.querySelector<HTMLButtonElement>(".btn-deck-delete")!.click(); });
+  act(() => { window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); });
+  expect(onClose).not.toHaveBeenCalled();
+  expect(container.querySelector(".voice-delete-modal-dialog")).toBeNull();
+});
+
+it("pins the shown script while a late prompt-catalog response arrives", async () => {
+  const events: string[] = []; stubRecordingEnvironment(events);
+  let resolve!: (value: unknown) => void;
+  vi.stubGlobal("fetch", vi.fn(() => new Promise((done) => { resolve = done; })));
+  renderStudio();
+  await act(async () => { container.querySelector<HTMLButtonElement>(".btn-record-primary")!.click(); });
+  await act(async () => resolve({ ok: true, json: async () => ({ data: [{ id: "late", title: "Late prompt", script: "不可替换正在朗读的文本", tips: "test", category: "test" }] }) }));
+  expect(container.querySelector(".teleprompter-script")!.textContent).toContain("白日依山尽");
+  expect(container.querySelector(".teleprompter-script")!.textContent).not.toContain("不可替换");
+});
+it("returns an empty or interrupted recorder to a retryable ready state", async () => {
+  const events: string[] = []; const { recorders } = stubRecordingEnvironment(events);
+  renderStudio();
+  await act(async () => { container.querySelector<HTMLButtonElement>(".btn-record-primary")!.click(); });
+  await act(async () => recorders[0]!.stop());
+  expect(container.textContent).toContain("没有收到录音数据");
+  expect(container.querySelector<HTMLButtonElement>(".btn-record-primary")!.disabled).toBe(false);
+  await act(async () => { container.querySelector<HTMLButtonElement>(".btn-record-primary")!.click(); });
+  const recorder = recorders[1] as unknown as { onerror: () => void };
+  await act(async () => recorder.onerror());
+  expect(container.textContent).toContain("录音设备中断或录制失败");
+  expect(container.querySelector(".btn-submit-clone")).toBeNull();
+});
+it("automatically stops at the actual thirty-second boundary instead of thirty-one seconds", async () => {
+  vi.useFakeTimers();
+  try {
+    const events: string[] = []; const { recorders } = stubRecordingEnvironment(events);
+    renderStudio();
+    await act(async () => { container.querySelector<HTMLButtonElement>(".btn-record-primary")!.click(); });
+    await act(async () => recorders[0]!.ondataavailable?.({ data: new Blob(["valid-fixture"]) } as unknown as BlobEvent));
+    await act(async () => { await vi.advanceTimersByTimeAsync(30000); });
+    expect(recorders[0]!.state).toBe("inactive");
+    expect(container.querySelector(".recorded-audio-player")).not.toBeNull();
+  } finally { vi.useRealTimers(); }
 });

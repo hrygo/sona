@@ -49,3 +49,33 @@ describe("VoiceRecordingMicLease", () => {
     expect(lease.needsRestore).toBe(false);
   });
 });
+
+it("waits for pending mute before restoring on close and coalesces acquisition", async () => {
+  const lease = new VoiceRecordingMicLease();
+  let complete!: () => void;
+  const events: boolean[] = [];
+  const send = vi.fn((command: { muted: boolean }) => {
+    events.push(command.muted);
+    return command.muted ? new Promise<void>((resolve) => { complete = resolve; }) : Promise.resolve();
+  });
+  const first = lease.acquire(true, false, send);
+  expect(lease.acquire(true, false, send)).toBe(first);
+  const restored = lease.restore(true, send);
+  await Promise.resolve(); expect(events).toEqual([true]);
+  complete(); await restored;
+  expect(events).toEqual([true, false]); expect(lease.needsRestore).toBe(false);
+});
+it("retries failed acquisition without losing the original mute state", async () => {
+  const lease = new VoiceRecordingMicLease();
+  const send = vi.fn().mockRejectedValueOnce(new Error("disconnected")).mockResolvedValue(undefined);
+  await expect(lease.acquire(false, false, send)).rejects.toThrow("控制连接未就绪");
+  expect(send).not.toHaveBeenCalled();
+  await expect(lease.acquire(true, false, send)).rejects.toThrow("disconnected");
+  await lease.acquire(true, true, send); await lease.restore(true, send);
+  expect(send.mock.calls.map(([command]) => command.muted)).toEqual([true, true, false]);
+});
+it("preserves an initially muted user through acquire and restore", async () => {
+  const lease = new VoiceRecordingMicLease(); const send = vi.fn();
+  await lease.acquire(true, true, send); await lease.restore(true, send);
+  expect(send).not.toHaveBeenCalled();
+});

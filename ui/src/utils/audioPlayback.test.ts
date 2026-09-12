@@ -49,3 +49,19 @@ describe("playAudioBlob", () => {
     expect(revoke).toHaveBeenCalledWith("blob:blocked");
   });
 });
+
+it("cancels playback, pauses audio, removes handlers and revokes the object URL once", async () => {
+  let instance!: { pause: ReturnType<typeof vi.fn>; onended: (() => void) | null; onerror: (() => void) | null };
+  vi.stubGlobal("Audio", class {
+    onended: (() => void) | null = null; onerror: (() => void) | null = null;
+    pause = vi.fn(); play = () => Promise.resolve();
+    constructor() { instance = this; }
+  });
+  const revoke = vi.fn();
+  vi.stubGlobal("URL", { createObjectURL: vi.fn(() => "blob:abort"), revokeObjectURL: revoke });
+  const abort = new AbortController(); const playback = playAudioBlob(new Blob(["sample"]), abort.signal);
+  abort.abort();
+  await expect(playback).rejects.toMatchObject({ name: "AbortError" });
+  expect(instance.pause).toHaveBeenCalledOnce(); expect(instance.onended).toBeNull(); expect(instance.onerror).toBeNull();
+  expect(revoke).toHaveBeenCalledOnce(); vi.unstubAllGlobals();
+});
