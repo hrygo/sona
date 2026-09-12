@@ -304,3 +304,64 @@ describe("voiceService", () => {
     });
   });
 });
+
+const designRequest = {
+  id: "design_one", name: "讲解声音", instruction: "温暖的成年男性普通话声音，清晰自然。",
+  reference_text: "这是一段自然清晰的参考朗读内容，用于创建可复用的声音而非固定的输出。", seed: 42, language: "zh" as const,
+};
+const designVoice = {
+  id: designRequest.id, name: designRequest.name, mode: "clone", is_system: false,
+  ref_text: designRequest.reference_text,
+  audio_path: "/private/should-not-leak.wav",
+  creation: {
+    origin: "generated", method: "voice_design_reference_v1", model_artifact: "qwen3-tts-voicedesign",
+    model_revision: "a".repeat(40), seed: 42, instruction_sha256: "b".repeat(64),
+    reference_text_sha256: "c".repeat(64), reference_audio_sha256: "d".repeat(64), preprocessing_version: "energy_v1",
+    private_path: "/private/also-not-public",
+  },
+};
+
+it("parses generated registration envelope and forwards only its explicit contract", async () => {
+  const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 201,
+    json: async () => ({ voice: designVoice, synthesis_validation: "unevaluated" }),
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  const controller = new AbortController();
+  const result = await voiceService.design(designRequest, controller.signal);
+  const [url, init] = fetchMock.mock.calls[0]! as [string, RequestInit];
+  expect(url).toMatch(/\/v1\/voices\/designs$/);
+  expect(JSON.parse(init.body as string)).toEqual(designRequest);
+  expect(init.signal).toBe(controller.signal);
+  expect(result.voice.creation?.origin).toBe("generated"); expect(result.voice.mode).toBe("clone");
+  expect(result.synthesis_validation).toBe("unevaluated");
+  expect(JSON.stringify(result)).not.toContain("/private/");
+});
+
+it.each([
+  { voice: designVoice, synthesis_validation: "pass" },
+  { voice: { ...designVoice, id: "wrong" }, synthesis_validation: "unevaluated" },
+  { voice: { ...designVoice, mode: "instruction" }, synthesis_validation: "unevaluated" },
+  { voice: { ...designVoice, creation: undefined }, synthesis_validation: "unevaluated" },
+  { voice: { ...designVoice, creation: { ...designVoice.creation, reference_audio_sha256: "bad" } }, synthesis_validation: "unevaluated" },
+  designVoice,
+])("fails closed on a malformed or legacy generated registration response", async (payload) => {
+  const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 201, json: async () => payload });
+  vi.stubGlobal("fetch", fetchMock);
+  await expect(voiceService.design(designRequest)).rejects.toMatchObject({ code: "invalid_response" });
+  expect(fetchMock).toHaveBeenCalledOnce();
+});
+
+it.each([404, 409, 429, 503])("preserves generated registration error %s without fallback", async (status) => {
+  const fetchMock = vi.fn().mockResolvedValue({ ok: false, status, json: async () => ({
+    error: { code: "upstream", message: "not ready", request_id: "design-req", retryable: status >= 429 },
+  }) });
+  vi.stubGlobal("fetch", fetchMock);
+  await expect(voiceService.design(designRequest)).rejects.toMatchObject({ status, code: "upstream", requestId: "design-req" });
+  expect(fetchMock).toHaveBeenCalledOnce();
+});
+
+it("preserves intentional cancellation rather than reporting network unavailability", async () => {
+  const controller = new AbortController(); controller.abort();
+  vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new DOMException("cancelled", "AbortError")));
+  await expect(voiceService.design(designRequest, controller.signal)).rejects.toMatchObject({ name: "AbortError" });
+});

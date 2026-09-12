@@ -1,5 +1,28 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- 声音工坊新增六类可编辑示例卡片、描述与朗读文本分栏、模板覆盖确认和折叠 seed 设置。
+- 代理并接入 SpeechRail `/v1/voices/designs`，生成参考注册到 Base；旧服务明确报错而不回退旧流程。
+- 统一录音与生成音色的结果页：参考验收、18 段输出复核、实际音色试听与手动确认使用。
+- 保存响应不确定时保留同一 ID 和正文，提供档案库核对与原 ID 重试；保留路径安全的生成来源信息。
+- 增加声音工坊 UI/Python CI，后端数据库测试使用独立 PostgreSQL 服务与临时 schema。
+
+### Changed
+
+- 录音提交保留原始容器、字节和电平，移除该链路的浏览器整段 RMS 归一，由 SpeechRail 统一处理参考。
+- 提词文本在录音开始时固定，完成后可按实际朗读修正；本地安全检查使用实际解码时长。
+- 质量报告按 reference/synthesis 分开解释，旧版不完整 pass 不显示为输出通过，注册后不自动启用。
+- 模态框增加窄窗口适配、焦点保护、忙碌操作互斥；试听和生成请求在卸载时取消，播放 URL 及时释放。
+
+### Compatibility and acceptance
+
+- 新注册链路需要 SpeechRail #46（`0c403ab` 或后续兼容版本）及 Quality 档；首次仅支持中文。
+- 不自动迁移旧 instruction/clone 音色；不宣称已接入 AudioWorklet 无损采集、神经 VAD 或降噪模型。
+- 软件回归与夹具页面检查不替代真实麦克风、Safari/WebKit 和 Apple Silicon 声纹/噪声/听感验收。
+
 ## [1.6.0] - 2026-09-09
 
 ### Added

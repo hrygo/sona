@@ -23,6 +23,7 @@ export interface VoiceSynthesisQuality {
   readonly chunk_jump_p95_db?: number;
   readonly clipping_ratio?: number;
   readonly deterministic?: boolean;
+  readonly transcript_match?: number;
 }
 
 export interface VoiceQualityReport {
@@ -70,6 +71,7 @@ export interface VoiceCatalogItem {
   readonly available?: boolean;
   readonly capabilities?: VoiceCapabilities;
   readonly quality?: VoiceQualityReport;
+  readonly creation?: VoiceCreation;
 }
 
 export interface VoiceModelCatalogItem {
@@ -117,4 +119,45 @@ export interface SpeechRequest {
 export interface VoiceCreateRequest {
   readonly name: string;
   readonly instruction: string;
+}
+
+/** Provenance for prompt-generated references; mode remains clone for Base routing. */
+export interface VoiceCreation {
+  readonly origin: "generated";
+  readonly method: "voice_design_reference_v1";
+  readonly model_artifact: string;
+  readonly model_revision: string;
+  readonly seed: number;
+  readonly instruction_sha256: string;
+  readonly reference_text_sha256: string;
+  readonly reference_audio_sha256: string;
+  readonly preprocessing_version: "energy_v1";
+}
+
+export interface VoiceDesignRequest {
+  readonly id: string;
+  readonly name: string;
+  readonly instruction: string;
+  readonly reference_text: string;
+  readonly seed: number;
+  readonly language: "zh";
+}
+
+export interface VoiceDesignResponse {
+  readonly voice: VoiceCatalogItem;
+  readonly synthesis_validation: "unevaluated";
+}
+
+/** Reference-only pass must never be presented as accepted synthesized output. */
+export function synthesisQuality(report?: VoiceQualityReport): VoiceQualityReport | undefined {
+  return report?.synthesis && (report.synthesis.probe_count ?? 0) > 0 ? report : undefined;
+}
+
+export function hasAcceptedSynthesis(voice: VoiceCatalogItem): boolean {
+  const report = synthesisQuality(voice.quality);
+  return report?.status === "pass" && report.failure_codes.length === 0
+    && (report.synthesis?.probe_count ?? 0) >= 18
+    && report.synthesis?.deterministic === true
+    && report.synthesis.transcript_match !== undefined
+    && report.synthesis.successful_probe_count === report.synthesis.probe_count;
 }

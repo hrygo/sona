@@ -1,6 +1,9 @@
 import { apiUrl } from "../config/runtimeConfig";
 import type {
   SpeechRequest,
+  VoiceCreation,
+  VoiceDesignRequest,
+  VoiceDesignResponse,
   VoiceCatalogItem,
   VoiceClonePrompt,
   VoiceCreateRequest,
@@ -82,6 +85,7 @@ function parseSynthesisQuality(value: unknown): VoiceSynthesisQuality | undefine
   const chunkJumpP95Db = asNumber(value.chunk_jump_p95_db);
   const clippingRatio = asNumber(value.clipping_ratio);
   const deterministic = asBoolean(value.deterministic);
+  const transcriptMatch = asNumber(value.transcript_match);
   const result: VoiceSynthesisQuality = {
     ...(probeCount !== undefined ? { probe_count: probeCount } : {}),
     ...(successfulProbeCount !== undefined ? { successful_probe_count: successfulProbeCount } : {}),
@@ -90,6 +94,7 @@ function parseSynthesisQuality(value: unknown): VoiceSynthesisQuality | undefine
     ...(chunkJumpP95Db !== undefined ? { chunk_jump_p95_db: chunkJumpP95Db } : {}),
     ...(clippingRatio !== undefined ? { clipping_ratio: clippingRatio } : {}),
     ...(deterministic !== undefined ? { deterministic } : {}),
+    ...(transcriptMatch !== undefined ? { transcript_match: transcriptMatch } : {}),
   };
   return Object.keys(result).length > 0 ? result : undefined;
 }
@@ -119,6 +124,26 @@ function parseQualityReport(value: unknown): VoiceQualityReport | undefined {
   };
 }
 
+function parseCreation(value: unknown): VoiceCreation | undefined {
+  if (!isRecord(value) || value.origin !== "generated"
+    || value.method !== "voice_design_reference_v1" || value.preprocessing_version !== "energy_v1"
+    || typeof value.seed !== "number" || !Number.isInteger(value.seed)
+    || value.seed < 0 || value.seed > 2 ** 32 - 1
+    || typeof value.model_artifact !== "string" || !/^[a-z0-9._-]{1,128}$/.test(value.model_artifact)
+    || typeof value.model_revision !== "string" || !/^[0-9a-f]{40}$/.test(value.model_revision)) return undefined;
+  for (const key of ["instruction_sha256", "reference_text_sha256", "reference_audio_sha256"]) {
+    if (typeof value[key] !== "string" || !/^[0-9a-f]{64}$/.test(value[key])) return undefined;
+  }
+  // Copy known fields only: a vendor payload must not spread private paths into UI state.
+  return {
+    origin: "generated", method: "voice_design_reference_v1", preprocessing_version: "energy_v1",
+    model_artifact: value.model_artifact, model_revision: value.model_revision, seed: value.seed,
+    instruction_sha256: value.instruction_sha256 as string,
+    reference_text_sha256: value.reference_text_sha256 as string,
+    reference_audio_sha256: value.reference_audio_sha256 as string,
+  };
+}
+
 function parseVoice(value: unknown): VoiceCatalogItem | null {
   if (!isRecord(value)) return null;
   const id = asString(value.id);
@@ -134,6 +159,7 @@ function parseVoice(value: unknown): VoiceCatalogItem | null {
   const createdAt = asNumber(value.created_at);
   const available = asBoolean(value.available);
   const quality = parseQualityReport(value.quality);
+  const creation = parseCreation(value.creation);
   const capabilities = isRecord(value.capabilities)
     ? {
       ...(typeof value.capabilities.supports_clone === "boolean"
@@ -162,6 +188,7 @@ function parseVoice(value: unknown): VoiceCatalogItem | null {
     ...(available !== undefined ? { available } : {}),
     ...(capabilities ? { capabilities } : {}),
     ...(quality ? { quality } : {}),
+    ...(creation ? { creation } : {}),
   };
 }
 
@@ -283,7 +310,8 @@ async function readError(response: Response): Promise<VoiceServiceError> {
 async function fetchResponse(path: string, init: RequestInit): Promise<Response> {
   try {
     return await fetch(apiUrl(path), init);
-  } catch {
+  } catch (error) {
+    if (init.signal?.aborted) throw error;
     throw new VoiceServiceError(
       "SpeechRail 服务不可用，请检查服务状态",
       0,
@@ -339,8 +367,8 @@ export const voiceService = {
     return parseModelList(payload);
   },
 
-  async list(): Promise<VoiceCatalogItem[]> {
-    const payload = await requestJson<unknown>("/v1/voices", { method: "GET" });
+  async list(signal?: AbortSignal): Promise<VoiceCatalogItem[]> {
+    const payload = await requestJson<unknown>("/v1/voices", { method: "GET", signal });
     return parseVoiceList(payload);
   },
 
@@ -349,18 +377,18 @@ export const voiceService = {
     return parseClonePrompts(payload);
   },
 
-  async preview(request: VoicePreviewRequest): Promise<Blob> {
+  async preview(request: VoicePreviewRequest, signal?: AbortSignal): Promise<Blob> {
     return requestBlob("/v1/voices/previews", {
-      method: "POST",
+      signal, method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(request),
     });
   },
 
-  async speech(request: SpeechRequest): Promise<Blob> {
+  async speech(request: SpeechRequest, signal?: AbortSignal): Promise<Blob> {
     assertVoiceRequest(request.voice);
     return requestBlob("/v1/audio/speech", {
-      method: "POST",
+      signal, method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(request),
     });
@@ -401,12 +429,14 @@ export const voiceService = {
   async qualityRun(
     voiceId: string,
     input: { probe_set?: string; runs?: number } = {},
+    signal?: AbortSignal,
   ): Promise<VoiceQualityReport> {
     const payload = await requestJson<unknown>(
       `/v1/voices/${encodeURIComponent(voiceId)}/quality-runs`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        signal,
         body: JSON.stringify({
           probe_set: input.probe_set ?? "voice_quality_v1_zh",
           runs: Math.min(Math.max(input.runs ?? 3, 1), 3),
@@ -423,6 +453,20 @@ export const voiceService = {
       );
     }
     return report;
+  },
+
+  async design(request: VoiceDesignRequest, signal?: AbortSignal): Promise<VoiceDesignResponse> {
+    const payload = await requestJson<unknown>("/v1/voices/designs", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request), signal,
+    });
+    const voice = isRecord(payload) ? parseVoice(payload.voice) : null;
+    if (!isRecord(payload) || payload.synthesis_validation !== "unevaluated"
+      || !voice || voice.id !== request.id || voice.mode !== "clone" || voice.is_system
+      || !voice.creation || !voice.ref_text) {
+      throw new VoiceServiceError("注册响应无效，请先刷新档案库确认保存结果", 502, "invalid_response");
+    }
+    return { voice, synthesis_validation: "unevaluated" };
   },
 
   async create(request: VoiceCreateRequest): Promise<VoiceCatalogItem> {

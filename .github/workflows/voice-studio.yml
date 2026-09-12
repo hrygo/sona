@@ -1,0 +1,74 @@
+name: Voice Studio checks
+on:
+  pull_request:
+  push:
+    branches: [main, feat/voice-studio-guided-creation]
+permissions:
+  contents: read
+concurrency:
+  group: voice-studio-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  ui:
+    name: UI tests and production build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+        working-directory: ui
+      - run: npm test -- --run
+        working-directory: ui
+      - run: npm run build
+        working-directory: ui
+  python:
+    name: Python tests, types and coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: sona_test
+          POSTGRES_PASSWORD: sona_test
+          POSTGRES_DB: sona_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U sona_test -d sona_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      SONA_TEST_DATABASE_URL: postgresql://sona_test:sona_test@127.0.0.1:5432/sona_test
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Install test system libraries (no ASR or TTS models)
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends portaudio19-dev lsof ffmpeg
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
+        with:
+          enable-cache: true
+      - name: Install locked unit-test dependencies
+        run: |
+          set -euo pipefail
+          uv python install 3.12
+          uv sync --frozen --extra dev
+          python3 - <<'PY'
+          import tomllib
+          from collections import defaultdict
+          from pathlib import Path
+          versions = defaultdict(set)
+          for package in tomllib.loads(Path('uv.lock').read_text())['package']:
+              if 'registry' in package.get('source', {}):
+                  versions[package['name']].add(package['version'])
+          Path('/tmp/sona-test-constraints.txt').write_text('\n'.join(
+              f'{name}=={next(iter(values))}' for name, values in sorted(versions.items()) if len(values) == 1
+          ))
+          PY
+          # Existing Pipecat types are imported by unit tests; unused Torch/CUDA is not required.
+          uv pip install --python .venv/bin/python -c /tmp/sona-test-constraints.txt 'pipecat-ai[local,soundfile]==1.7.0'
+      - run: .venv/bin/python -m ruff check src tests
+      - run: .venv/bin/python -m mypy src
+      - run: .venv/bin/python -m pytest --cov=sona -ra

@@ -1950,3 +1950,134 @@ class TestSubtitleEligibility:
         runtime.subtitle_proxy.add_client.assert_not_called()
         assert not runtime.subtitle_proxy.has_clients
         assert not runtime.runtime_events._clients
+
+
+class TestGeneratedVoiceProxy:
+    """New endpoint is a bounded authenticated proxy, not a legacy create fallback."""
+
+    def test_forwards_exact_body_and_configured_auth(self) -> None:
+        upstream = httpx.Response(
+            201,
+            json={
+                "voice": {"id": "design_one", "mode": "clone"},
+                "synthesis_validation": "unevaluated",
+            },
+            headers={"x-request-id": "upstream-design"},
+        )
+        body = b'{"id":"design_one","name":"example","seed":42}'
+        settings = _settings()
+        settings.interaction.speechrail_api_key = "server-side-key"
+        with (
+            patch(
+                "sona.ui.http_routes.httpx.AsyncClient.post",
+                new_callable=AsyncMock,
+                return_value=upstream,
+            ) as post,
+            patch(f"{__name__}._settings", return_value=settings),
+            _running_client(_FakeRuntime(mode=RuntimeMode.IDLE)) as client,
+        ):
+            response = client.post(
+                "/v1/voices/designs",
+                content=body,
+                headers={
+                    "Content-Type": "application/json; charset=utf-8",
+                    "Authorization": "Bearer browser-must-not-be-forwarded",
+                    "X-Request-ID": "client-design",
+                },
+            )
+        assert response.status_code == 201
+        assert response.json()["synthesis_validation"] == "unevaluated"
+        assert response.headers["x-request-id"] == "upstream-design"
+        post.assert_awaited_once()
+        assert post.call_args.args[0].endswith("/v1/voices/designs")
+        assert post.call_args.kwargs["content"] == body
+        assert post.call_args.kwargs["headers"]["Authorization"] == "Bearer server-side-key"
+
+    @pytest.mark.parametrize("status", [400, 404, 409, 429, 503])
+    def test_preserves_upstream_errors_without_legacy_fallback(self, status: int) -> None:
+        upstream = httpx.Response(
+            status,
+            json={
+                "error": {
+                    "code": "test_code",
+                    "request_id": "test-request",
+                    "retryable": status >= 429,
+                }
+            },
+            headers={"Retry-After": "2"},
+        )
+        with (
+            patch(
+                "sona.ui.http_routes.httpx.AsyncClient.post",
+                new_callable=AsyncMock,
+                return_value=upstream,
+            ) as post,
+            _running_client(_FakeRuntime(mode=RuntimeMode.IDLE)) as client,
+        ):
+            response = client.post("/v1/voices/designs", json={"id": "example"})
+        assert response.status_code == status
+        assert response.json() == upstream.json()
+        assert response.headers["Retry-After"] == "2"
+        post.assert_awaited_once()
+
+    @pytest.mark.parametrize("mode", [RuntimeMode.MEETING, RuntimeMode.SUBTITLES])
+    def test_rejects_conflicting_audio_modes_before_forwarding(self, mode: RuntimeMode) -> None:
+        with (
+            patch("sona.ui.http_routes.httpx.AsyncClient.post", new_callable=AsyncMock) as post,
+            _running_client(_FakeRuntime(mode=mode)) as client,
+        ):
+            response = client.post("/v1/voices/designs", json={"id": "example"})
+        assert response.status_code == 409
+        assert response.json()["error"]["code"] == "mode_conflict"
+        post.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        "media", ["text/plain", "multipart/form-data", "application/octet-stream"]
+    )
+    def test_requires_json(self, media: str) -> None:
+        with (
+            patch("sona.ui.http_routes.httpx.AsyncClient.post", new_callable=AsyncMock) as post,
+            _running_client(_FakeRuntime(mode=RuntimeMode.IDLE)) as client,
+        ):
+            response = client.post(
+                "/v1/voices/designs", content=b"{}", headers={"Content-Type": media}
+            )
+        assert response.status_code == 415
+        post.assert_not_awaited()
+
+    @pytest.mark.parametrize("declared", [True, False])
+    def test_counts_actual_and_declared_payload_limits(self, declared: bool) -> None:
+        size = http_routes_module._VOICE_PREVIEW_MAX_BODY_BYTES
+        headers = {"Content-Type": "application/json"}
+        if declared:
+            headers["Content-Length"] = str(size + 1)
+            body: Any = b"{}"
+        else:
+            # Generator forces chunked input: no Content-Length to trust.
+            body = iter([b"x" * (size // 2), b"x" * (size // 2 + 1)])
+        with (
+            patch("sona.ui.http_routes.httpx.AsyncClient.post", new_callable=AsyncMock) as post,
+            _running_client(_FakeRuntime(mode=RuntimeMode.IDLE)) as client,
+        ):
+            response = client.post("/v1/voices/designs", content=body, headers=headers)
+        assert response.status_code == 413
+        post.assert_not_awaited()
+
+    @pytest.mark.parametrize("exception", [httpx.ConnectError, httpx.ReadTimeout])
+    def test_transport_failure_excludes_private_error_content(
+        self, exception: type[httpx.HTTPError], caplog: pytest.LogCaptureFixture
+    ) -> None:
+        secret = "private-description /private/reference.wav token=do-not-log"
+        with (
+            patch(
+                "sona.ui.http_routes.httpx.AsyncClient.post",
+                new_callable=AsyncMock,
+                side_effect=exception(secret),
+            ),
+            _running_client(_FakeRuntime(mode=RuntimeMode.IDLE)) as client,
+            caplog.at_level(logging.WARNING),
+        ):
+            response = client.post("/v1/voices/designs", json={"id": "example"})
+        assert response.status_code == 503
+        assert secret not in response.text
+        assert secret not in caplog.text

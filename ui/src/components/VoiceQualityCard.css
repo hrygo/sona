@@ -123,3 +123,8 @@
 @media (max-width: 560px) {
   .voice-quality-card-header { align-items: flex-start; flex-direction: column; }
 }
+
+/* Scope status colors must remain legible on the dark atelier surface too. */
+:root:not([data-theme="light"]) .status-pass .voice-quality-status { color: #6ee7b7; }
+:root:not([data-theme="light"]) .status-warn .voice-quality-status { color: #fcd34d; }
+:root:not([data-theme="light"]) .status-reject .voice-quality-status { color: #fca5a5; }
