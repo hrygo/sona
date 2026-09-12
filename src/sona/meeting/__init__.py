@@ -4,6 +4,7 @@
 路由和 React 实现位于各自的边界模块中。
 """
 
+from .model_transcript import ModelTranscript, ModelTranscriptEvidence, build_model_transcript
 from .models import (
     ActionItem,
     Decision,
@@ -26,10 +27,20 @@ from .models import (
     TranscriptReconcileResult,
     TranscriptWindow,
 )
+from .transcript_models import (
+    AttributionRevision,
+    DisplayBlock,
+    ProjectorProfile,
+    TranscriptAttributionSpan,
+    TranscriptItem,
+)
+from .transcript_projector import TranscriptPresentationProjector
 
 __all__ = [
     "ActionItem",
+    "AttributionRevision",
     "Decision",
+    "DisplayBlock",
     "Highlight",
     "MeetingPage",
     "MeetingRecord",
@@ -38,14 +49,21 @@ __all__ = [
     "MinutesRecord",
     "MinutesResult",
     "MinutesStatus",
+    "ModelTranscript",
+    "ModelTranscriptEvidence",
     "NormalizedSegment",
     "OpenQuestion",
+    "ProjectorProfile",
     "Risk",
     "RuntimeMode",
     "SpeakerRecord",
     "StorageHealth",
     "Topic",
+    "TranscriptAttributionSpan",
     "TranscriptDocument",
+    "TranscriptItem",
+    "TranscriptPresentationProjector",
     "TranscriptReconcileResult",
     "TranscriptWindow",
+    "build_model_transcript",
 ]

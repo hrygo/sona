@@ -19,6 +19,7 @@ from .models import (
 )
 from .ports import RecoveryReplayRepository, TranscriptStore
 from .speaker_attribution import CompletedItem, SpeakerPatchEvent, SpeakerPatchResult
+from .transcript_models import DisplayBlock
 
 logger = logging.getLogger(__name__)
 
@@ -180,6 +181,16 @@ class TranscriptPersistence:
                 )
                 raise
             return None
+
+    async def get_display_blocks(self, meeting_id: UUID) -> tuple[DisplayBlock, ...]:
+        """读取 repository 的纯内存展示投影；旧 fake repository 返回空。"""
+        method = getattr(self._transcripts, "get_display_blocks", None)
+        if method is None:
+            return ()
+        result = method(meeting_id)
+        if hasattr(result, "__await__"):
+            result = await result
+        return tuple(result)
 
     async def replay_pending(self, meeting_id: UUID) -> int:
         journal = self._journal

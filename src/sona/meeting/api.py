@@ -245,17 +245,71 @@ def _segment_json(segment: Any, speakers: Any, *, detail: bool = False) -> dict[
     return payload
 
 
-def _transcript_json(document: Any, *, speaker_details: bool = False) -> dict[str, Any]:
+def _display_block_json(block: Any, *, order: int) -> dict[str, Any]:
+    """序列化可读 block；不返回 attribution span 明细。"""
+    return {
+        "block_id": str(_attr(block, "block_id", "")),
+        "item_ids": [_uuid(item_id) for item_id in (_attr(block, "item_ids", ()) or ())],
+        "source_ids": [
+            str(source_id) for source_id in (_attr(block, "source_ids", ()) or ())
+        ],
+        "order": order,
+        "speaker_key": _attr(block, "speaker_key"),
+        "speaker_name": _attr(block, "speaker_name"),
+        "speaker_status": str(_attr(block, "speaker_status", "pending")),
+        "speaker_color_token": str(
+            _attr(block, "speaker_color_token", "speaker-neutral")
+        ),
+        "start_ms": _attr(block, "start_ms"),
+        "end_ms": _attr(block, "end_ms"),
+        "text": str(_attr(block, "text", "")),
+        "timing_quality": str(_attr(block, "timing_quality", "unavailable")),
+        "is_partial": bool(_attr(block, "is_partial", False)),
+    }
+
+
+def _transcript_json(
+    document: Any,
+    *,
+    speaker_details: bool = False,
+    display_blocks: Any = (),
+) -> dict[str, Any]:
     segments = _attr(document, "segments", ()) or ()
     speakers = _attr(document, "speakers", ()) or ()
-    return {
+    blocks = tuple(display_blocks or ())
+    display_payload = [
+        _display_block_json(block, order=index)
+        for index, block in enumerate(blocks)
+        if not bool(_attr(block, "is_partial", False))
+    ]
+    compatibility_segments = (
+        [
+            {
+                "id": (block["item_ids"][0] if block["item_ids"] else block["block_id"]),
+                "order": block["order"],
+                "speaker_key": block["speaker_key"] or "unknown",
+                "speaker_name": block["speaker_name"] or "正在确认",
+                "start_ms": block["start_ms"],
+                "end_ms": block["end_ms"],
+                "text": block["text"],
+                "translation": None,
+                "detected_language": None,
+                "source_epoch": 0,
+            }
+            for block in display_payload
+        ]
+        if display_payload
+        else [_segment_json(item, speakers, detail=speaker_details) for item in segments]
+    )
+    payload: dict[str, Any] = {
         "meeting_id": _uuid(_attr(document, "meeting_id")),
         "transcript_revision": int(_attr(document, "transcript_revision", 0) or 0),
         "content_revision": int(_attr(document, "content_revision", 0) or 0),
-        "segments": [
-            _segment_json(item, speakers, detail=speaker_details) for item in segments
-        ],
+        "segments": compatibility_segments,
     }
+    if display_payload:
+        payload["display_blocks"] = display_payload
+    return payload
 
 
 def _request_id(request: Request) -> str:
@@ -407,7 +461,17 @@ def create_meeting_router(
         repo = _repository(request, repository)
         try:
             document = await repo.get_transcript(meeting_id)
-            payload = _transcript_json(document, speaker_details=speaker_details)
+            display_blocks: Any = ()
+            get_blocks = getattr(repo, "get_display_blocks", None)
+            if get_blocks is not None:
+                display_blocks = get_blocks(meeting_id)
+                if inspect.isawaitable(display_blocks):
+                    display_blocks = await display_blocks
+            payload = _transcript_json(
+                document,
+                speaker_details=speaker_details,
+                display_blocks=display_blocks,
+            )
             if speaker_details:
                 payload["speaker_details"] = True
             return payload
@@ -599,7 +663,13 @@ def create_meeting_router(
             if meeting is None:
                 raise MeetingAPIError("not_found", "会议或资源不存在", status_code=404)
             document = await repo.get_transcript(meeting_id)
-            transcript = _transcript_json(document)
+            display_blocks: Any = ()
+            get_blocks = getattr(repo, "get_display_blocks", None)
+            if get_blocks is not None:
+                display_blocks = get_blocks(meeting_id)
+                if inspect.isawaitable(display_blocks):
+                    display_blocks = await display_blocks
+            transcript = _transcript_json(document, display_blocks=display_blocks)
             if export_format == "json":
                 body = json.dumps(
                     {"meeting": await _meeting_detail(repo, meeting), "transcript": transcript},
@@ -661,11 +731,14 @@ def _render_text_export(meeting: Any, transcript: Mapping[str, Any], *, markdown
     title = str(_attr(meeting, "title", "会议"))
     lines = [f"# {title}" if markdown else title, ""]
     for segment in transcript.get("segments", []):
-        start = int(segment["start_ms"])
-        seconds, millis = divmod(start, 1000)
-        hours, remainder = divmod(seconds, 3600)
-        minutes, seconds = divmod(remainder, 60)
-        stamp = f"{hours:02d}:{minutes:02d}:{seconds:02d}.{millis:03d}"
+        start = segment.get("start_ms")
+        if start is None:
+            stamp = "time:unavailable"
+        else:
+            seconds, millis = divmod(int(start), 1000)
+            hours, remainder = divmod(seconds, 3600)
+            minutes, seconds = divmod(remainder, 60)
+            stamp = f"{hours:02d}:{minutes:02d}:{seconds:02d}.{millis:03d}"
         prefix = f"- [{stamp}]" if markdown else f"[{stamp}]"
         lines.append(f"{prefix} {segment['speaker_name']}: {segment['text']}")
     return "\n".join(lines).rstrip() + "\n"
@@ -680,6 +753,8 @@ def _render_srt(transcript: Mapping[str, Any]) -> str:
 
     blocks: list[str] = []
     for index, segment in enumerate(transcript.get("segments", []), start=1):
+        if segment.get("start_ms") is None or segment.get("end_ms") is None:
+            continue
         blocks.extend(
             [
                 str(index),

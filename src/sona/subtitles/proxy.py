@@ -554,6 +554,7 @@ class SubtitleProxy:
         empty_payload = {
             "type": "full_update",
             "lines": [],
+            "display_blocks": [],
             "buffer_transcription": "",
             "diarization": {
                 "status": self._subtitle_session.diarization_status,

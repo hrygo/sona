@@ -25,6 +25,7 @@ from sona.meeting.session import (
     MeetingStorageUnavailableError,
 )
 from sona.meeting.speaker_attribution import CompletedItem, SpeakerPatchResult
+from sona.meeting.transcript_models import DisplayBlock
 from sona.speechrail.transcription_events import (
     DiarizationCandidate,
     DiarizationUpdate,
@@ -44,6 +45,7 @@ class FakeRepository:
         self.minutes_error: Exception | None = None
         self.stale_count = 0
         self.last_patch_event: Any = None
+        self.display_blocks: tuple[DisplayBlock, ...] = ()
 
     async def check_writable(self) -> bool:
         return self.writable
@@ -59,6 +61,9 @@ class FakeRepository:
 
     async def get_meeting(self, meeting_id: UUID) -> MeetingRecord | None:
         return self.record if self.record.id == meeting_id else None
+
+    async def get_display_blocks(self, _meeting_id: UUID) -> tuple[DisplayBlock, ...]:
+        return self.display_blocks
 
     async def set_status(
         self, meeting_id: UUID, status: MeetingStatus, *, reason: str | None = None
@@ -419,6 +424,47 @@ async def test_session_publishes_partial_and_durable_transcript_events(
     reconciled = next(event[2] for event in events if event[0] == "transcript_reconciled")
     assert reconciled["replace_from_ms"] == 0
     assert reconciled["segments"][0]["text"] == "已确认"
+
+
+async def test_session_publishes_projected_display_blocks_without_span_details(
+    repository: FakeRepository, gateway: FakeGateway
+) -> None:
+    events: list[tuple[str, UUID, object]] = []
+
+    async def publish(event_type: str, meeting_id: UUID, payload: object) -> None:
+        events.append((event_type, meeting_id, payload))
+
+    repository.display_blocks = (
+        DisplayBlock(
+            block_id="block-1",
+            item_ids=(UUID("11111111-1111-4111-8111-111111111111"),),
+            source_ids=("item-1#unit-1",),
+            text="完整发言",
+            start_ms=0,
+            end_ms=1_000,
+            speaker_key=None,
+            speaker_name=None,
+            speaker_status="pending",
+            speaker_color_token="speaker-neutral",
+            timing_quality="aligned",
+        ),
+    )
+    session = MeetingSession(repository, gateway, event_publisher=publish)
+    await _start_session(session)
+    segment = NormalizedSegment(
+        order=0,
+        source_epoch=1,
+        speaker_key="unknown",
+        start_ms=0,
+        end_ms=1_000,
+        text="兼容正文",
+    )
+
+    await session._on_window(TranscriptWindow(source_epoch=1, segments=(segment,)))
+
+    reconciled = next(event[2] for event in events if event[0] == "transcript_reconciled")
+    assert reconciled["display_blocks"][0]["text"] == "完整发言"  # type: ignore[index]
+    assert "spans" not in reconciled["display_blocks"][0]  # type: ignore[index]
 
 
 async def test_reconciled_event_uses_renamed_speaker_display_name(

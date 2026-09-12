@@ -14,6 +14,7 @@ from uuid import UUID, uuid4
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from sona.meeting.speaker_attribution import CompletedItem, SpeakerPatchResult
+from sona.meeting.transcript_models import DisplayBlock
 
 
 def _utc_now() -> datetime:
@@ -161,6 +162,7 @@ class TranscriptReconcileResult(_FrozenModel):
     content_revision: int = Field(ge=0)
     replace_from_ms: int = Field(ge=0)
     segments: tuple[NormalizedSegment, ...] = ()
+    display_blocks: tuple[DisplayBlock, ...] = ()
 
 
 class SpeakerRecord(_FrozenModel):

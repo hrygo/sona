@@ -26,6 +26,12 @@ from .models import (
     TranscriptWindow,
 )
 from .speaker_attribution import CompletedItem, SpeakerPatchEvent, SpeakerPatchResult
+from .transcript_models import (
+    AttributionRevision,
+    DisplayBlock,
+    TranscriptAttributionSpan,
+    TranscriptItem,
+)
 
 WindowListener = Callable[[TranscriptWindow], Awaitable[None]]
 GapListener = Callable[["CaptureGap"], Awaitable[None]]
@@ -142,6 +148,18 @@ class TranscriptStore(Protocol):
     ) -> MeetingRecord: ...
 
     async def get_transcript(self, meeting_id: UUID) -> TranscriptDocument: ...
+
+    async def get_transcript_items(self, meeting_id: UUID) -> tuple[TranscriptItem, ...]: ...
+
+    async def get_transcript_attribution_spans(
+        self, meeting_id: UUID
+    ) -> tuple[TranscriptAttributionSpan, ...]: ...
+
+    async def get_attribution_revisions(
+        self, meeting_id: UUID
+    ) -> tuple[AttributionRevision, ...]: ...
+
+    async def get_display_blocks(self, meeting_id: UUID) -> tuple[DisplayBlock, ...]: ...
 
 
 class SpeakerStore(Protocol):
