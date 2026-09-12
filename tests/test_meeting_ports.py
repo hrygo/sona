@@ -39,6 +39,12 @@ from sona.meeting.ports import (
     SpeakerStore,
     TranscriptStore,
 )
+from sona.meeting.transcript_models import (
+    AttributionRevision,
+    DisplayBlock,
+    TranscriptAttributionSpan,
+    TranscriptItem,
+)
 from sona.subtitles.proxy import SubtitleProxy
 
 
@@ -142,6 +148,22 @@ class FakeTranscriptStore:
             segments=(),
             speakers=(),
         )
+
+    async def get_transcript_items(self, meeting_id: UUID) -> tuple[TranscriptItem, ...]:
+        return ()
+
+    async def get_transcript_attribution_spans(
+        self, meeting_id: UUID
+    ) -> tuple[TranscriptAttributionSpan, ...]:
+        return ()
+
+    async def get_attribution_revisions(
+        self, meeting_id: UUID
+    ) -> tuple[AttributionRevision, ...]:
+        return ()
+
+    async def get_display_blocks(self, meeting_id: UUID) -> tuple[DisplayBlock, ...]:
+        return ()
 
 
 class FakeSpeakerStore:

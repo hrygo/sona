@@ -3,18 +3,15 @@
 from __future__ import annotations
 
 from hashlib import sha256
-from typing import Any
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import NAMESPACE_URL, uuid5
 
 from sona.asr.models import ASRSegment, ASRWindow
-from sona.meeting.transcript_models import (
-    DisplayBlock,
-    SpeakerStatus,
-    TimingQuality,
-    TranscriptAttributionSpan,
-    TranscriptItem,
-)
-from sona.meeting.transcript_projector import TranscriptPresentationProjector
+
+if TYPE_CHECKING:
+    from sona.meeting.transcript_models import DisplayBlock
+
+SpeakerStatus = Literal["identified", "anonymous", "pending", "off", "degraded"]
 
 UNKNOWN_SUBTITLE_SPEAKER = "未识别说话人"
 
@@ -76,6 +73,13 @@ def legacy_subtitle_payload(window: ASRWindow) -> dict[str, Any]:
 
 def _subtitle_display_blocks(window: ASRWindow) -> tuple[DisplayBlock, ...]:
     """把字幕内存窗口适配为统一 transcript facts 后调用共享 projector。"""
+    from sona.meeting.transcript_models import (
+        TimingQuality,
+        TranscriptAttributionSpan,
+        TranscriptItem,
+    )
+    from sona.meeting.transcript_projector import TranscriptPresentationProjector
+
     source_session_id = window.source_session_id or f"subtitle-epoch-{window.source_epoch}"
     namespace = uuid5(NAMESPACE_URL, f"sona:subtitle:{source_session_id}")
     source_item_id = f"subtitle:{source_session_id}:{window.source_epoch}"
