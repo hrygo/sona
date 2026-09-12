@@ -10,8 +10,6 @@ import { playAudioBlob } from "../utils/audioPlayback";
 import { showToast } from "./Toast";
 import { SoundWaveAnimatedIcon } from "./Icons";
 import {
-  hasPassingSynthesisProbe,
-  hasSynthesisProbeEvidence,
   supportsVoiceCapability,
   synthesisQuality,
   hasAcceptedSynthesis,

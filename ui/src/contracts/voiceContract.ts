@@ -42,16 +42,6 @@ export function hasSynthesisProbeEvidence(report: VoiceQualityReport | undefined
   return typeof probeCount === "number" && Number.isInteger(probeCount) && probeCount > 0;
 }
 
-export function hasPassingSynthesisProbe(report: VoiceQualityReport | undefined): boolean {
-  const probeCount = report?.synthesis?.probe_count;
-  const successfulProbeCount = report?.synthesis?.successful_probe_count;
-  return report?.status === "pass"
-    && hasSynthesisProbeEvidence(report)
-    && typeof successfulProbeCount === "number"
-    && Number.isInteger(successfulProbeCount)
-    && successfulProbeCount === probeCount;
-}
-
 export interface VoiceCapabilities {
   readonly supports_speaker?: boolean;
   readonly supports_clone?: boolean;

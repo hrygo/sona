@@ -1,4 +1,9 @@
-import { hasAcceptedSynthesis, type VoiceQualityReport, type VoiceQualityStatus } from "../contracts/voiceContract";
+import {
+  hasAcceptedSynthesis,
+  hasSynthesisProbeEvidence,
+  type VoiceQualityReport,
+  type VoiceQualityStatus,
+} from "../contracts/voiceContract";
 import type { LocalVoiceQualityResult } from "../utils/voiceQuality";
 import "./VoiceQualityCard.css";
 
@@ -6,7 +11,6 @@ export interface VoiceQualityCardProps {
   readonly title: string;
   readonly report?: VoiceQualityReport;
   readonly localResult?: LocalVoiceQualityResult;
-  readonly evidence?: "local" | "reference" | "synthesis";
   readonly pending?: boolean;
   readonly onRetry?: () => void;
   readonly onRerecord?: () => void;
@@ -45,23 +49,10 @@ function failureLabel(code: string): string {
   return FAILURE_LABELS[code] ?? code;
 }
 
-function statusMeta(status: VoiceQualityStatus, evidence: VoiceQualityCardProps["evidence"] = "synthesis") {
-  const base = STATUS_META[status];
-  if (status !== "pass") return base;
-  if (evidence === "local") {
-    return { ...base, label: "环境良好", detail: "录音环境良好，可以进行服务端质量检查" };
-  }
-  if (evidence === "reference") {
-    return { ...base, label: "参考音频合格", detail: "参考音频门禁已通过，可继续执行生成后质量探针" };
-  }
-  return base;
-}
-
 export function VoiceQualityCard({
   title,
   report,
   localResult,
-  evidence = "synthesis",
   pending = false,
   onRetry,
   onRerecord,
@@ -88,6 +79,8 @@ export function VoiceQualityCard({
   } : scopedMeta;
   const failureCodes = scopedReport?.failure_codes ?? localResult?.failure_codes ?? [];
   const synthesis = scopedReport?.synthesis;
+  const reference = scopedReport?.reference;
+  const hasProbeEvidence = hasSynthesisProbeEvidence(scopedReport);
 
   return (
     <section className={`voice-quality-card status-${status}`} aria-label={title}>
@@ -120,6 +113,21 @@ export function VoiceQualityCard({
           </span>
           {synthesis.deterministic === true && <span><strong>✓</strong> 本轮重复样本一致</span>}
           {synthesis.peak_dbfs !== undefined && <span><strong>{synthesis.peak_dbfs.toFixed(1)} dBFS</strong> 峰值</span>}
+        </div>
+      )}
+
+      {reference && scope === "reference" && !hasProbeEvidence && (
+        <div className="voice-quality-evidence-grid">
+          <span><strong>参考音频</strong> 门禁指标</span>
+          {reference.duration_seconds !== undefined && (
+            <span><strong>{reference.duration_seconds.toFixed(1)} s</strong> 时长</span>
+          )}
+          {reference.estimated_snr_db !== undefined && (
+            <span><strong>{reference.estimated_snr_db.toFixed(1)} dB</strong> SNR</span>
+          )}
+          {reference.speech_active_ratio !== undefined && (
+            <span><strong>{(reference.speech_active_ratio * 100).toFixed(0)}%</strong> 有效语音</span>
+          )}
         </div>
       )}
 
