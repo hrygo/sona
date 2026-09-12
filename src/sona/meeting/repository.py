@@ -951,7 +951,7 @@ class PostgresMeetingRepository:
                             speaker_revision = %s,
                             candidates = %s,
                             updated_at = %s
-                        WHERE source_session_id = %s AND source_segment_uid = %s
+                        WHERE id = %s
                         """,
                         (
                             model_speaker_key,
@@ -968,8 +968,7 @@ class PostgresMeetingRepository:
                                 ]
                             ),
                             _utc_now(),
-                            event.source_session_id,
-                            patch.segment_uid,
+                            segment_id,
                         ),
                     )
                     await connection.execute(
@@ -982,7 +981,7 @@ class PostgresMeetingRepository:
                                CASE WHEN manually_corrected THEN speaker_status ELSE %s END,
                                manually_corrected
                         FROM {self._schema}.transcript_attribution_spans
-                        WHERE source_session_id = %s AND source_segment_uid = %s
+                        WHERE id = %s
                         ON CONFLICT (span_id, revision) DO NOTHING
                         """,
                         (
@@ -990,8 +989,7 @@ class PostgresMeetingRepository:
                             patch.revision,
                             effective_span_key,
                             effective_span_status,
-                            event.source_session_id,
-                            patch.segment_uid,
+                            segment_id,
                         ),
                     )
 

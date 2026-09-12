@@ -253,6 +253,49 @@ async def test_speaker_patch_changes_span_only_and_records_revision(repository) 
 
 
 @pytest.mark.asyncio
+async def test_speaker_patch_does_not_cross_meeting_boundary(repository) -> None:
+    repo, meeting_id, _ = repository
+    second_meeting = await repo.create_meeting(
+        "第二个会议", language="Chinese", audio_source="microphone"
+    )
+    await repo.append_completed_item(meeting_id, _item())
+    await repo.append_completed_item(second_meeting.id, _item(event_id="event-2"))
+    event = SpeakerPatchEvent(
+        source_session_id="session-1",
+        event_id="patch-cross-meeting",
+        sequence=1,
+        stable_through_sample=320,
+        patches=(
+            SpeakerPatch(
+                segment_uid="unit-1",
+                revision=1,
+                status="stable",
+                source_speaker="speaker-1",
+                coverage_ratio=1,
+                overlap_ratio=0,
+            ),
+        ),
+    )
+
+    await repo.apply_speaker_patches(meeting_id, event)
+
+    first_span = next(
+        span
+        for span in await repo.get_transcript_attribution_spans(meeting_id)
+        if span.source_segment_uid == "unit-1"
+    )
+    second_span = next(
+        span
+        for span in await repo.get_transcript_attribution_spans(second_meeting.id)
+        if span.source_segment_uid == "unit-1"
+    )
+    assert first_span.speaker_key is not None
+    assert second_span.speaker_key is None
+    assert second_span.model_speaker_key is None
+    assert second_span.speaker_revision == 0
+
+
+@pytest.mark.asyncio
 async def test_manual_override_is_mirrored_to_span_and_survives_auto_patch(repository) -> None:
     repo, meeting_id, _ = repository
     await repo.append_completed_item(meeting_id, _item())
