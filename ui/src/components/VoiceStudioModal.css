@@ -1227,3 +1227,39 @@
     transform: translateY(0);
   }
 }
+
+
+/* Guided flow: fit small windows without hiding either creation or archive. */
+.voice-studio-dialog { max-width: calc(100vw - 3rem); max-height: calc(100dvh - 3rem); }
+.voice-studio-dialog button:focus-visible, .voice-studio-dialog input:focus-visible,
+.voice-studio-dialog textarea:focus-visible { outline: 2px solid var(--text-primary); outline-offset: 3px; }
+.btn-submit-design { padding: 0.7rem 1rem; background: var(--color-accent); color: var(--text-on-accent); border: 1px solid transparent; border-radius: var(--radius-sm); font: inherit; font-size: 0.85rem; font-weight: 600; cursor: pointer; }
+.btn-submit-design:hover:not(:disabled) { background: var(--color-accent-hover); }
+.btn-submit-design:disabled { opacity: 0.55; cursor: not-allowed; }
+.voice-studio-close-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+@media (max-width: 760px) {
+  .voice-studio-overlay { padding: 0.5rem; }
+  .voice-studio-dialog { width: 100%; max-width: 100%; height: calc(100dvh - 1rem); max-height: calc(100dvh - 1rem); min-height: 0; }
+  .voice-studio-header { padding: 0.8rem; gap: 0.5rem; }
+  .voice-studio-title { font-size: 0.95rem; }
+  .voice-studio-close-btn { flex: 0 0 2rem; }
+  .voice-studio-body { display: block; overflow-y: auto; }
+  .voice-deck-sidebar { width: 100%; height: auto; border-right: 0; border-bottom: 1px solid var(--border); }
+  .voice-deck-list { max-height: 12rem; }
+  .voice-forge-panel { overflow: visible; }
+  .voice-forge-tabs { flex-wrap: wrap; }
+  .forge-tab-btn { min-width: 0; flex: 1 1 100%; }
+  .clone-forge-container, .design-forge-container { padding: 1rem; }
+  .voice-design-footer { position: static; }
+  .voice-result-actions > button { white-space: normal; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .voice-studio-overlay, .voice-studio-dialog *, .fade-in { animation: none !important; transition: none !important; }
+}
+
+.btn-deck-review { flex: 1; border: 1px solid var(--mod-assistant-badge-border); border-radius: var(--radius-sm); color: var(--text-primary); background: var(--color-accent-subtle); font-size: 0.75rem; padding: 0.4rem 0.6rem; cursor: pointer; }
+.btn-deck-apply:disabled, .btn-deck-review:disabled, .btn-deck-audition:disabled { opacity: 0.5; cursor: not-allowed; }
+@media (max-width: 760px) {
+  .voice-forge-tabs { grid-template-columns: 1fr; }
+  .voice-forge-panel { padding: 1rem; }
+}

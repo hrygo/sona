@@ -1,4 +1,9 @@
-import type { VoiceQualityReport, VoiceQualityStatus } from "../contracts/voiceContract";
+import {
+  hasAcceptedSynthesis,
+  hasSynthesisProbeEvidence,
+  type VoiceQualityReport,
+  type VoiceQualityStatus,
+} from "../contracts/voiceContract";
 import type { LocalVoiceQualityResult } from "../utils/voiceQuality";
 import "./VoiceQualityCard.css";
 
@@ -9,6 +14,7 @@ export interface VoiceQualityCardProps {
   readonly pending?: boolean;
   readonly onRetry?: () => void;
   readonly onRerecord?: () => void;
+  readonly scope?: "reference" | "synthesis";
 }
 
 const STATUS_META: Record<VoiceQualityStatus, { label: string; icon: string; detail: string }> = {
@@ -29,7 +35,12 @@ const FAILURE_LABELS: Record<string, string> = {
   leading_silence: "开头静音过长",
   trailing_silence: "结尾静音过长",
   duration_boundary: "录音时长接近边界",
-  transcript_mismatch: "朗读文本与提示词不匹配",
+  transcript_mismatch: "实际朗读与目标文本不匹配",
+  transcription_unavailable: "本地 ASR 复核不可用，内容尚未评估",
+  output_nondeterministic: "本轮重复输出不同",
+  output_silence: "合成输出无有效声音",
+  output_clipping: "合成输出发生削波",
+  capture_silent: "录音几乎无声",
   probe_failed: "固定试听测试未完成",
   output_invalid: "生成音频格式异常",
 };
@@ -45,11 +56,31 @@ export function VoiceQualityCard({
   pending = false,
   onRetry,
   onRerecord,
+  scope,
 }: VoiceQualityCardProps) {
-  const status = report?.status ?? localResult?.status ?? "unevaluated";
-  const meta = STATUS_META[status];
-  const failureCodes = report?.failure_codes ?? localResult?.failure_codes ?? [];
-  const synthesis = report?.synthesis;
+  const scopedReport = scope === "synthesis" && !report?.synthesis ? undefined
+    : scope === "reference" && !report?.reference ? undefined : report;
+  const incompleteOutput = scope === "synthesis" && scopedReport?.status === "pass"
+    && !hasAcceptedSynthesis({ id: "", name: "", is_system: false, quality: scopedReport });
+  const status = pending || incompleteOutput ? "unevaluated" : scopedReport?.status ?? localResult?.status ?? "unevaluated";
+  const baseMeta = STATUS_META[status];
+  const scopedMeta = scope && status === "reject" ? {
+    ...baseMeta, detail: scope === "synthesis"
+      ? "本轮合成未通过。候选仍已保存，可重新检查；效果不满意时返回修改描述或重新录音。"
+      : "参考未通过，请查看原因；修改描述生成新参考，或修正文字、重新录音。",
+  } : scope === "synthesis" && status === "warn" ? {
+    ...baseMeta, detail: "本轮输出存在风险，尚不能确认使用。请查看原因后重新检查。",
+  } : baseMeta;
+  const meta = status === "pass" && scope ? {
+    ...baseMeta,
+    label: scope === "reference" ? "参考已核验" : "输出检查通过",
+    detail: scope === "reference" ? "仅代表参考音频检查，不代表合成输出通过。"
+      : "本轮内容与信号检查通过，仍需试听；不等同于声纹或降噪验收。",
+  } : scopedMeta;
+  const failureCodes = scopedReport?.failure_codes ?? localResult?.failure_codes ?? [];
+  const synthesis = scopedReport?.synthesis;
+  const reference = scopedReport?.reference;
+  const hasProbeEvidence = hasSynthesisProbeEvidence(scopedReport);
 
   return (
     <section className={`voice-quality-card status-${status}`} aria-label={title}>
@@ -58,14 +89,14 @@ export function VoiceQualityCard({
           <p className="voice-quality-card-eyebrow">质量证据</p>
           <h3>{title}</h3>
         </div>
-        <span className="voice-quality-status" aria-label={`质量状态：${meta.label}`}>
+        <span className="voice-quality-status" aria-label={`质量状态：${pending ? "检查中" : meta.label}`}>
           <span className="voice-quality-status-icon" aria-hidden="true">{meta.icon}</span>
           {pending ? "检查中" : meta.label}
         </span>
       </div>
 
       <div className="voice-quality-live" aria-live="polite">
-        {pending ? "正在运行质量检查，请稍候。" : report ? meta.detail : "服务端尚未返回质量报告，当前结果不能视为通过。"}
+        {pending ? "正在运行质量检查。" : incompleteOutput ? "输出验证证据不完整，不能仅凭通过标签确认使用。" : scopedReport ? meta.detail : localResult ? localResult.primary_action : "服务端尚未返回质量报告，当前结果不能视为通过。"}
       </div>
 
       {failureCodes.length > 0 && (
@@ -74,23 +105,38 @@ export function VoiceQualityCard({
         </ul>
       )}
 
-      {synthesis && (
+      {synthesis && hasProbeEvidence && (
         <div className="voice-quality-evidence-grid">
           <span>
             <strong>{synthesis.successful_probe_count ?? 0} / {synthesis.probe_count ?? 0}</strong>
-            个测试通过
+            段已生成
           </span>
-          {synthesis.deterministic === true && <span><strong>✓</strong> 确定性输出</span>}
+          {synthesis.deterministic === true && <span><strong>✓</strong> 本轮重复样本一致</span>}
           {synthesis.peak_dbfs !== undefined && <span><strong>{synthesis.peak_dbfs.toFixed(1)} dBFS</strong> 峰值</span>}
         </div>
       )}
 
-      <p className="voice-quality-action">{localResult?.primary_action ?? meta.detail}</p>
+      {reference && scope === "reference" && !hasProbeEvidence && (
+        <div className="voice-quality-evidence-grid">
+          <span><strong>参考音频</strong> 门禁指标</span>
+          {reference.duration_seconds !== undefined && (
+            <span><strong>{reference.duration_seconds.toFixed(1)} s</strong> 时长</span>
+          )}
+          {reference.estimated_snr_db !== undefined && (
+            <span><strong>{reference.estimated_snr_db.toFixed(1)} dB</strong> SNR</span>
+          )}
+          {reference.speech_active_ratio !== undefined && (
+            <span><strong>{(reference.speech_active_ratio * 100).toFixed(0)}%</strong> 有效语音</span>
+          )}
+        </div>
+      )}
+
+      {localResult && scopedReport && <p className="voice-quality-action">{localResult.primary_action}</p>}
 
       {(onRetry || onRerecord) && (
         <div className="voice-quality-actions">
-          {onRetry && <button type="button" onClick={onRetry}>重新检查</button>}
-          {onRerecord && <button type="button" onClick={onRerecord}>重新录音</button>}
+          {onRetry && <button type="button" disabled={pending} onClick={onRetry}>重新检查</button>}
+          {onRerecord && <button type="button" disabled={pending} onClick={onRerecord}>重新录音</button>}
         </div>
       )}
     </section>

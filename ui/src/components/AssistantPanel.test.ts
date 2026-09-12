@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AssistantErrorNotice } from "./AssistantErrorNotice";
 import type { CommandSocketApi } from "../hooks/useCommandSocket";
-import type { RuntimeStateSnapshot } from "../protocol";
+import type { ControlCommand, RuntimeStateSnapshot } from "../protocol";
 import AssistantPanel, {
   DUPLEX_MODE_PRESENTATION,
   canRequestDuplexModeChange,
@@ -331,7 +331,7 @@ describe("voice clone acceptance diagnostic", () => {
 
 describe("voice switching presentation", () => {
   it("shows the readable voice name instead of its id after switching", async () => {
-    const sendCommand = vi.fn().mockResolvedValue({});
+    const sendCommand = vi.fn().mockResolvedValue(runtimeSnapshot({ voice: "warm" }));
     const commandSocket: CommandSocketApi = {
       state: "open",
       ready: true,
@@ -470,7 +470,7 @@ describe("voice audition microphone lease", () => {
 
 describe("voice workshop microphone lease", () => {
   it("retries assistant unmute after the control connection recovers", async () => {
-    const sendCommand = vi.fn().mockResolvedValue({});
+    const sendCommand = vi.fn(async (command: ControlCommand) => runtimeSnapshot({ mic_muted: command.cmd === "set_mic_muted" && command.muted }));
     const connectedSocket: CommandSocketApi = {
       state: "open",
       ready: true,
@@ -483,7 +483,7 @@ describe("voice workshop microphone lease", () => {
     act(() => {
       root.render(createElement(AssistantPanel, { commandSocket: connectedSocket }));
     });
-    act(() => container.querySelector<HTMLButtonElement>(".btn-voice-studio-btn")?.click());
+    await act(async () => { container.querySelector<HTMLButtonElement>(".btn-voice-studio-btn")?.click(); });
 
     expect(sendCommand).toHaveBeenCalledWith({ cmd: "set_mic_muted", muted: true });
 

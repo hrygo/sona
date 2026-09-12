@@ -349,6 +349,7 @@ export default function App() {
   // Global Keyboard Shortcuts (Cmd/Ctrl + 1/2/3 for tabs, ? for help)
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
+      if (e.defaultPrevented || document.querySelector('[role="dialog"][aria-modal="true"]')) return;
       const target = e.target as HTMLElement;
       const isInput = target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable;
 

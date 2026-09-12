@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useEventSocket } from "../hooks/useEventSocket";
 import { runtimeConfig } from "../config/runtimeConfig";
 import type { CommandSocketApi } from "../hooks/useCommandSocket";
-import type { RuntimeStateSnapshot } from "../protocol";
+import type { ControlCommand, RuntimeStateSnapshot } from "../protocol";
 import type { PCMOwner } from "../contracts/meetingContract";
 import {
   parseAssistantEvent,
@@ -342,6 +342,7 @@ export default function AssistantPanel({
   const [isPreviewPlaying, setIsPreviewPlaying] = useState(false);
   const [showVoiceDesignModal, setShowVoiceDesignModal] = useState(false);
   const [showVoiceStudioModal, setShowVoiceStudioModal] = useState(false);
+  const [studioReviewVoice, setStudioReviewVoice] = useState<VoiceCatalogItem | undefined>();
   const [deleteConfirmTargetVoice, setDeleteConfirmTargetVoice] = useState<VoiceCatalogItem | null>(null);
   const voiceRecordingMicLeaseRef = useRef<VoiceRecordingMicLease | null>(null);
   if (voiceRecordingMicLeaseRef.current === null) {
@@ -357,10 +358,15 @@ export default function AssistantPanel({
   const commandSocketRef = useRef(commandSocket);
   commandSocketRef.current = commandSocket;
 
-  const restoreVoiceRecordingMic = useCallback(async () => {
-    const { ready, sendCommand } = commandSocketRef.current;
-    await voiceRecordingMicLeaseRef.current!.restore(ready, sendCommand);
+  const sendConfirmedMicCommand = useCallback(async (command: Extract<ControlCommand, { cmd: "set_mic_muted" }>) => {
+    const state = await commandSocketRef.current.sendCommand(command);
+    if (state.mic_muted !== command.muted) throw new Error("服务端麦克风状态与请求不一致，请重新确认。");
+    return state;
   }, []);
+
+  const restoreVoiceRecordingMic = useCallback(async () => {
+    await voiceRecordingMicLeaseRef.current!.restore(commandSocketRef.current.ready, sendConfirmedMicCommand);
+  }, [sendConfirmedMicCommand]);
 
   const restoreVoicePreviewMic = useCallback(async () => {
     const { ready, sendCommand } = commandSocketRef.current;
@@ -381,28 +387,23 @@ export default function AssistantPanel({
     });
   }, [commandReady, restoreVoicePreviewMic]);
 
-  // 声音工坊开启即静音麦克风，避免试听或录音前误触助手输入
+  const handleVoiceRecordingStart = useCallback(async () => {
+    await voiceRecordingMicLeaseRef.current!.acquire(
+      commandSocketRef.current.ready, useUISettingsStore.getState().micMuted, sendConfirmedMicCommand,
+    );
+  }, [sendConfirmedMicCommand]);
+
+  // Opening starts acquisition; the workshop awaits the same promise before audio.
   useEffect(() => {
     if (!showVoiceStudioModal) return;
-    const mutedBefore = useUISettingsStore.getState().micMuted;
-    const lease = voiceRecordingMicLeaseRef.current!;
-    lease.begin(mutedBefore);
-
-    if (!mutedBefore && commandSocketRef.current.ready) {
-      void commandSocketRef.current.sendCommand({ cmd: "set_mic_muted", muted: true });
-    }
-
-    return () => {
-      void restoreVoiceRecordingMic().catch(() => {});
-    };
-  }, [showVoiceStudioModal, restoreVoiceRecordingMic]);
-
-  const handleVoiceRecordingStart = useCallback(async () => {
-    // 声音工坊打开时已全局持有静音租约，录音时无需重复申请，仅作兼容占位
-  }, []);
+    void handleVoiceRecordingStart().catch(() => {
+      showToast("助手静音未获确认，请在声音工坊重试连接", "error");
+    });
+    return () => { void restoreVoiceRecordingMic().catch(() => undefined); };
+  }, [showVoiceStudioModal, handleVoiceRecordingStart, restoreVoiceRecordingMic]);
 
   const handleVoiceRecordingStop = useCallback(async () => {
-    // 录音结束不恢复麦克风，直到工坊关闭
+    // The parent owns the lease until the workshop closes, not each recording.
   }, []);
 
   // 打断插话动效监听
@@ -444,7 +445,10 @@ export default function AssistantPanel({
         return false;
       }
       try {
-        await commandSocket.sendCommand(payload);
+        const state = await commandSocket.sendCommand(payload);
+        if (payload.cmd === "set_voice" && state.voice !== payload.voice) {
+          throw new Error("服务端尚未确认目标音色，当前声音未被视为切换成功。请重试。");
+        }
         if (toastMsg) showToast(toastMsg, "success");
         return true;
       } catch (error) {
@@ -618,6 +622,7 @@ export default function AssistantPanel({
           "success",
         );
       }
+      return acknowledged;
     },
     [availableVoices, sendCommandWith],
   );
@@ -684,16 +689,13 @@ export default function AssistantPanel({
       const targetVoice = availableVoices.find((v) => v.id === targetVoiceId);
       if (!targetVoice || targetVoice.is_system) return;
 
-      try {
-        await voiceService.delete(targetVoiceId);
-        showToast(`已删除音色「${targetVoice.name}」`, "info");
-        setAvailableVoices((prev) => prev.filter((v) => v.id !== targetVoiceId));
-        if (voice === targetVoiceId) {
-          void handleVoiceChange("default");
-        }
-      } catch (err) {
-        showToast(err instanceof Error ? err.message : "删除音色失败", "error");
+      if (voice === targetVoiceId && !await handleVoiceChange("default")) {
+        throw new Error("默认音色切换未获确认，原音色尚未删除。请恢复控制连接后重试。");
       }
+      // A failed DELETE leaves the confirmation open; never report success early.
+      await voiceService.delete(targetVoiceId);
+      setAvailableVoices((prev) => prev.filter((v) => v.id !== targetVoiceId));
+      showToast(`已删除音色「${targetVoice.name}」`, "info");
     },
     [availableVoices, voice, handleVoiceChange],
   );
@@ -929,6 +931,7 @@ export default function AssistantPanel({
   /** 快捷键监听 */
   useEffect(() => {
     const handleGlobalShortcuts = (e: KeyboardEvent) => {
+      if (e.defaultPrevented || document.querySelector('[role="dialog"][aria-modal="true"]')) return;
       const activeEl = document.activeElement as HTMLElement | null;
       const isInput =
         activeEl?.tagName === "INPUT" ||
@@ -1168,7 +1171,12 @@ export default function AssistantPanel({
                   id="assistant-voice-select"
                   className="sidebar-select voice-select"
                   value={voice}
-                  onChange={(e) => void handleVoiceChange(e.target.value)}
+                  onChange={(e) => {
+                    const target = availableVoices.find((item) => item.id === e.target.value);
+                    if (target?.mode === "clone") {
+                      setStudioReviewVoice(target); setShowVoiceStudioModal(true);
+                    } else void handleVoiceChange(e.target.value);
+                  }}
                   disabled={!commandSocket.ready}
                 >
                   <optgroup label="🌟 官方预置音色">
@@ -1220,7 +1228,7 @@ export default function AssistantPanel({
               <button
                 type="button"
                 className="btn-voice-design-trigger btn-voice-studio-btn"
-                onClick={() => setShowVoiceStudioModal(true)}
+                onClick={() => { setStudioReviewVoice(undefined); setShowVoiceStudioModal(true); }}
                 title="打开声音工坊：管理、克隆与设计音色"
               >
                 <span>🎙️ 工坊</span>
@@ -1651,11 +1659,18 @@ export default function AssistantPanel({
       {showVoiceStudioModal && (
         <VoiceStudioModal
           currentVoiceId={voice}
+          initialReviewVoice={studioReviewVoice}
+          onRefresh={async () => {
+            const [items, models] = await Promise.all([voiceService.list(), voiceService.models()]);
+            setAvailableVoices(items);
+            const tts = models.find((model) => model.id === SPEECHRAIL_TTS_MODEL || model.resolves_to === SPEECHRAIL_TTS_MODEL);
+            setVoiceModelCapabilities(tts?.capabilities);
+          }}
           availableVoices={availableVoices}
           modelCapabilities={voiceModelCapabilities}
-          onSelectVoice={(vid) => void handleVoiceChange(vid)}
+          onSelectVoice={handleVoiceChange}
           onVoiceCreated={handleCloneVoiceCreated}
-          onVoiceDeleted={(vid) => void handleDeleteVoice(vid)}
+          onVoiceDeleted={executeDeleteVoice}
           onClose={() => setShowVoiceStudioModal(false)}
           onStartRecordingVoice={handleVoiceRecordingStart}
           onStopRecordingVoice={handleVoiceRecordingStop}

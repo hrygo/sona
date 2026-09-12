@@ -186,11 +186,17 @@ def _declared_body_size(request: Request, *, limit: int) -> Response | None:
             retryable=False,
         )
     if content_length > limit:
+        if limit % (1024 * 1024) == 0:
+            limit_text = f"{limit // (1024 * 1024)} MiB"
+        elif limit % 1024 == 0:
+            limit_text = f"{limit // 1024} KiB"
+        else:
+            limit_text = f"{limit} B"
         return _error_response(
             request,
             status_code=413,
             code="payload_too_large",
-            message=f"请求体过大（上限 {limit // (1024 * 1024)} MiB）",
+            message=f"请求体过大（上限 {limit_text}）",
             retryable=False,
         )
     return None
@@ -620,6 +626,65 @@ def create_http_router(context: UIAppContext) -> APIRouter:
                 retryable=False,
             )
 
+    @router.post("/v1/voices/designs")
+    async def register_voice_design(request: Request) -> Response:
+        """代理显式生成参考注册；不回退旧创建接口、不接触音频或模型。"""
+        guard = _voice_workshop_guard(context, request)
+        if guard is not None:
+            return guard
+        content_type = request.headers.get("content-type", "")
+        if content_type.split(";", 1)[0].strip().lower() != "application/json":
+            return _error_response(
+                request,
+                status_code=415,
+                code="unsupported_media_type",
+                message="音色设计注册必须使用 application/json",
+                retryable=False,
+            )
+        size_error = _declared_body_size(request, limit=_VOICE_PREVIEW_MAX_BODY_BYTES)
+        if size_error is not None:
+            return size_error
+        settings = context.settings
+        try:
+            # Count actual streamed bytes too; Content-Length is only an early hint.
+            body = bytearray()
+            async for chunk in _bounded_request_stream(
+                request, limit=_VOICE_PREVIEW_MAX_BODY_BYTES
+            ):
+                body.extend(chunk)
+            headers = _proxy_request_headers(
+                request,
+                content_type=content_type,
+                api_key=settings.interaction.speechrail_api_key,
+            )
+            async with local_async_client(
+                timeout=settings.interaction.speechrail_tts_request_timeout_secs
+            ) as client:
+                resp = await client.post(
+                    _speechrail_rest_path(
+                        settings.interaction.speechrail_tts_rest_url, "/voices/designs"
+                    ),
+                    content=bytes(body),
+                    headers=headers,
+                )
+                return _proxy_response(resp)
+        except _PayloadTooLargeError:
+            return _error_response(
+                request,
+                status_code=413,
+                code="payload_too_large",
+                message="音色设计注册请求体过大（上限 64 KiB）",
+                retryable=False,
+            )
+        except httpx.HTTPError as exc:
+            # Never log descriptions, vendor error bodies, credentials or paths.
+            logger.warning("Sona: 音色设计注册传输失败 (%s)", type(exc).__name__)
+            return _speechrail_transport_error(
+                request,
+                exc,
+                message="SpeechRail 音色设计注册服务不可用",
+            )
+
     @router.post("/v1/voices/clone")
     async def clone_voice(request: Request) -> Response:
         """透明代理 SpeechRail 录音克隆音色，不在 sona 解析或持久化音频。"""
@@ -642,6 +707,16 @@ def create_http_router(context: UIAppContext) -> APIRouter:
         if declared_size_error is not None:
             return declared_size_error
 
+        idempotency_key = request.headers.get("idempotency-key")
+        if idempotency_key is not None and (
+            not 1 <= len(idempotency_key) <= 128
+            or not all(character.isascii() and (character.isalnum() or character in "_-.")
+                       for character in idempotency_key)
+        ):
+            return _error_response(
+                request, status_code=400, code="invalid_idempotency_key",
+                message="注册重试标识无效", retryable=False,
+            )
         settings = context.settings
         url = _speechrail_rest_path(
             settings.interaction.speechrail_tts_rest_url, "/voices/clone"
@@ -653,6 +728,8 @@ def create_http_router(context: UIAppContext) -> APIRouter:
                 api_key=settings.interaction.speechrail_api_key,
                 preserve_content_length=True,
             )
+            if idempotency_key is not None:
+                headers = {**(headers or {}), "Idempotency-Key": idempotency_key}
             async with local_async_client(
                 timeout=settings.interaction.speechrail_tts_request_timeout_secs
             ) as client:
@@ -673,7 +750,9 @@ def create_http_router(context: UIAppContext) -> APIRouter:
                 retryable=False,
             )
         except httpx.HTTPError as exc:
-            logger.warning("Sona: SpeechRail POST /v1/voices/clone 请求失败: %s", exc)
+            logger.warning(
+                "Sona: SpeechRail POST /v1/voices/clone 请求失败 (%s)", type(exc).__name__
+            )
             return _speechrail_transport_error(
                 request,
                 exc,
@@ -742,7 +821,10 @@ def create_http_router(context: UIAppContext) -> APIRouter:
                 retryable=False,
             )
         except httpx.HTTPError as exc:
-            logger.warning("Sona: SpeechRail POST /v1/voices/clone/validate 请求失败: %s", exc)
+            logger.warning(
+                "Sona: SpeechRail POST /v1/voices/clone/validate 请求失败 (%s)",
+                type(exc).__name__,
+            )
             return _speechrail_transport_error(
                 request,
                 exc,
