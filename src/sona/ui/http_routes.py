@@ -701,6 +701,16 @@ def create_http_router(context: UIAppContext) -> APIRouter:
         if declared_size_error is not None:
             return declared_size_error
 
+        idempotency_key = request.headers.get("idempotency-key")
+        if idempotency_key is not None and (
+            not 1 <= len(idempotency_key) <= 128
+            or not all(character.isascii() and (character.isalnum() or character in "_-.")
+                       for character in idempotency_key)
+        ):
+            return _error_response(
+                request, status_code=400, code="invalid_idempotency_key",
+                message="注册重试标识无效", retryable=False,
+            )
         settings = context.settings
         url = _speechrail_rest_path(
             settings.interaction.speechrail_tts_rest_url, "/voices/clone"
@@ -712,6 +722,8 @@ def create_http_router(context: UIAppContext) -> APIRouter:
                 api_key=settings.interaction.speechrail_api_key,
                 preserve_content_length=True,
             )
+            if idempotency_key is not None:
+                headers = {**(headers or {}), "Idempotency-Key": idempotency_key}
             async with local_async_client(
                 timeout=settings.interaction.speechrail_tts_request_timeout_secs
             ) as client:
@@ -732,7 +744,9 @@ def create_http_router(context: UIAppContext) -> APIRouter:
                 retryable=False,
             )
         except httpx.HTTPError as exc:
-            logger.warning("Sona: SpeechRail POST /v1/voices/clone 请求失败: %s", exc)
+            logger.warning(
+                "Sona: SpeechRail POST /v1/voices/clone 请求失败 (%s)", type(exc).__name__
+            )
             return _speechrail_transport_error(
                 request,
                 exc,
@@ -801,7 +815,10 @@ def create_http_router(context: UIAppContext) -> APIRouter:
                 retryable=False,
             )
         except httpx.HTTPError as exc:
-            logger.warning("Sona: SpeechRail POST /v1/voices/clone/validate 请求失败: %s", exc)
+            logger.warning(
+                "Sona: SpeechRail POST /v1/voices/clone/validate 请求失败 (%s)",
+                type(exc).__name__,
+            )
             return _speechrail_transport_error(
                 request,
                 exc,

@@ -365,3 +365,29 @@ it("preserves intentional cancellation rather than reporting network unavailabil
   vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new DOMException("cancelled", "AbortError")));
   await expect(voiceService.design(designRequest, controller.signal)).rejects.toMatchObject({ name: "AbortError" });
 });
+
+it("passes the original multipart, signal and stable idempotency key without setting a boundary", async () => {
+  const form = new FormData(); form.append("id", "clone_test"); form.append("audio", new Blob(["unchanged"]), "original.webm");
+  const signal = new AbortController().signal;
+  const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 201, json: async () => ({ id: "clone_test", name: "参考", mode: "clone" }) });
+  vi.stubGlobal("fetch", fetchMock);
+  await voiceService.clone(form, signal, "clone_test");
+  expect(fetchMock.mock.calls[0]![1]).toMatchObject({ body: form, signal, headers: { "Idempotency-Key": "clone_test" } });
+  expect(fetchMock.mock.calls[0]![1].headers["Content-Type"]).toBeUndefined();
+});
+it.each([undefined, [12], [""]])("does not repair malformed failure evidence into an accepted report: %s", async (failureCodes) => {
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({
+    policy_version: "v1", run_id: "test", tested_at: "2026-09-12", status: "pass", failure_codes: failureCodes,
+    synthesis: { probe_count: 18, successful_probe_count: 18, deterministic: true, transcript_match: 1 },
+  }) }));
+  await expect(voiceService.qualityRun("clone_test")).rejects.toMatchObject({ code: "invalid_response" });
+});
+it("distinguishes a malformed catalog from an empty catalog for recovery", async () => {
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({ not_a_catalog: true }) }));
+  await expect(voiceService.list()).rejects.toMatchObject({ code: "invalid_response" });
+});
+it("retains an upstream request ID supplied only in the response header", async () => {
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 503,
+    headers: new Headers({ "x-request-id": "header-trace" }), json: async () => ({ error: { code: "offline" } }) }));
+  await expect(voiceService.list()).rejects.toMatchObject({ requestId: "header-trace" });
+});

@@ -2081,3 +2081,50 @@ class TestGeneratedVoiceProxy:
         assert response.status_code == 503
         assert secret not in response.text
         assert secret not in caplog.text
+
+
+class TestCloneAttemptForwarding:
+    def test_preserves_same_idempotency_key_and_multipart_on_retries(self) -> None:
+        forwarded: list[dict[str, Any]] = []
+
+        async def capture_upstream(_url: str, **kwargs: Any) -> Mock:
+            body = b"".join([chunk async for chunk in kwargs["content"]])
+            forwarded.append({"headers": kwargs["headers"], "body": body})
+            return Mock(status_code=201, content=b'{"id":"clone_attempt"}',
+                        headers={"content-type": "application/json"})
+
+        with (
+            patch("sona.ui.http_routes.httpx.AsyncClient.post", side_effect=capture_upstream),
+            _running_client(_FakeRuntime(mode=RuntimeMode.IDLE)) as client,
+        ):
+            for _ in range(2):
+                result = client.post(
+                    "/v1/voices/clone",
+                    headers={
+                        "Idempotency-Key": "clone_attempt",
+                        "Authorization": "Bearer browser-secret",
+                    },
+                    data={"id": "clone_attempt", "name": "参考", "ref_text": "准确文字"},
+                    files={"audio": ("original.webm", b"original-bytes", "audio/webm")},
+                )
+                assert result.status_code == 201
+        assert len(forwarded) == 2
+        for request in forwarded:
+            assert request["headers"]["Idempotency-Key"] == "clone_attempt"
+            assert "browser-secret" not in str(request["headers"])
+            assert b"clone_attempt" in request["body"]
+            assert b"original-bytes" in request["body"]
+            assert b'name="id"' in request["body"]
+
+    @pytest.mark.parametrize("key", ["x" * 129, "has spaces", "path/segment", "semicolon;", ""])
+    def test_invalid_idempotency_key_stops_before_upstream(self, key: str) -> None:
+        with (
+            patch("sona.ui.http_routes.httpx.AsyncClient.post", new_callable=AsyncMock) as upstream,
+            _running_client(_FakeRuntime(mode=RuntimeMode.IDLE)) as client,
+        ):
+            result = client.post(
+                "/v1/voices/clone", headers={"Idempotency-Key": key},
+                files={"audio": ("original.webm", b"audio", "audio/webm")},
+            )
+        assert result.status_code == 400
+        upstream.assert_not_awaited()

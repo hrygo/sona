@@ -63,6 +63,8 @@ Sona 是应用层，不是把模型全部打包进来的单体发行版。ASR、
 旧版服务会明确提示升级，不静默回退旧提示词创建链路。真实麦克风、Safari/WebKit、模型听感和
 声纹/噪声仍需独立验收。详见[声音工坊引导与双路径注册](docs/architecture/voice-studio-guided-creation.md)。
 
+异常路径也纳入闭环：可以停止等待并核对保存结果；再次试听失败会撤销旧试听确认；启用等待服务端确认，删除失败留在弹窗重试，未提交草稿关闭前确认。详见[声音工坊 UX 分支检查矩阵](docs/architecture/voice-studio-ux-branch-audit.md)，其中浏览器测试使用实际 Sona 代理/控制链路，但音源和外部模型为测试夹具。
+
 
 ## 核心设计
 

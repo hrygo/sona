@@ -434,6 +434,7 @@ it("ignores a second start click while recording setup is in flight", async () =
     onStopRecordingVoice: vi.fn(),
   });
 
+  await act(async () => { await Promise.resolve(); });
   const startButton = container.querySelector<HTMLButtonElement>(".btn-record-primary")!;
   act(() => {
     startButton.click();
@@ -555,7 +556,7 @@ function stubCloneFetch(): CloneFetchResult {
       cloneBodies.push(init.body as FormData);
       return {
         ok: true,
-        json: async () => ({ id: "cloned_voice", name: "测试音色", is_system: false, mode: "clone" }),
+        json: async () => ({ id: (init?.body as FormData).get("id"), name: "测试音色", is_system: false, mode: "clone" }),
       };
     }
     return { ok: true, json: async () => ({ object: "list", data: [] }) };
@@ -676,7 +677,7 @@ it("uploads the original recording unchanged and does not auto-run output checks
   expect(cloneBodies[0]!.get("name")).toBe("我的测试音色");
   expect(cloneBodies[0]!.get("ref_text")).toContain("白日依山尽");
   expect(onVoiceCreated).toHaveBeenCalledWith(
-    expect.objectContaining({ id: "cloned_voice", name: "测试音色" }),
+    expect.objectContaining({ id: cloneBodies[0]!.get("id"), name: "测试音色" }),
   );
   expect(container.textContent).toContain("合成输出检查");
   expect(container.textContent).toContain("尚未评估");
@@ -701,7 +702,7 @@ it("leaves browser-uninspectable audio for the server preflight without altering
   const audio = cloneBodies[0]!.get("audio") as File;
   expect(audio.name).toBe("recording.webm");
   expect(onVoiceCreated).toHaveBeenCalledWith(
-    expect.objectContaining({ id: "cloned_voice" }),
+    expect.objectContaining({ id: cloneBodies[0]!.get("id") }),
   );
 });
 
@@ -777,4 +778,73 @@ it("forwards the corrected actual reference text instead of the original telepro
   expect(container.querySelector<HTMLButtonElement>(".btn-switch-prompt")!.disabled).toBe(true);
   await submitCloneWith("修正参考"); await waitForCloneRequest(cloneBodies);
   expect(cloneBodies[0]!.get("ref_text")).toBe(spoken);
+});
+
+it("does not open the microphone before assistant mute is acknowledged", async () => {
+  const events: string[] = [];
+  const { getUserMedia } = stubRecordingEnvironment(events);
+  let finish!: () => void;
+  const start = vi.fn(() => new Promise<void>((resolve) => { finish = resolve; }));
+  renderStudio("default", undefined, { onStartRecordingVoice: start });
+  await act(async () => { container.querySelector<HTMLButtonElement>(".btn-record-primary")!.click(); });
+  expect(getUserMedia).not.toHaveBeenCalled();
+  await act(async () => { finish(); });
+  await act(async () => { container.querySelector<HTMLButtonElement>(".btn-record-primary")!.click(); });
+  expect(getUserMedia).toHaveBeenCalledOnce();
+});
+
+it("keeps deletion confirmation open until the actual deletion completes", async () => {
+  let finish!: () => void;
+  onVoiceDeleted.mockImplementation(() => new Promise<void>((resolve) => { finish = resolve; }));
+  renderStudio();
+  act(() => { container.querySelector<HTMLButtonElement>(".btn-deck-delete")!.click(); });
+  await act(async () => { container.querySelector<HTMLButtonElement>(".btn-danger")!.click(); });
+  expect(container.querySelector(".voice-delete-modal-dialog")).not.toBeNull();
+  expect(container.textContent).toContain("删除中");
+  await act(async () => { finish(); });
+  expect(container.querySelector(".voice-delete-modal-dialog")).toBeNull();
+});
+
+it("Escape dismisses only the deletion confirmation, not the entire workshop", async () => {
+  renderStudio();
+  act(() => { container.querySelector<HTMLButtonElement>(".btn-deck-delete")!.click(); });
+  act(() => { window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); });
+  expect(onClose).not.toHaveBeenCalled();
+  expect(container.querySelector(".voice-delete-modal-dialog")).toBeNull();
+});
+
+it("pins the shown script while a late prompt-catalog response arrives", async () => {
+  const events: string[] = []; stubRecordingEnvironment(events);
+  let resolve!: (value: unknown) => void;
+  vi.stubGlobal("fetch", vi.fn(() => new Promise((done) => { resolve = done; })));
+  renderStudio();
+  await act(async () => { container.querySelector<HTMLButtonElement>(".btn-record-primary")!.click(); });
+  await act(async () => resolve({ ok: true, json: async () => ({ data: [{ id: "late", title: "Late prompt", script: "不可替换正在朗读的文本", tips: "test", category: "test" }] }) }));
+  expect(container.querySelector(".teleprompter-script")!.textContent).toContain("白日依山尽");
+  expect(container.querySelector(".teleprompter-script")!.textContent).not.toContain("不可替换");
+});
+it("returns an empty or interrupted recorder to a retryable ready state", async () => {
+  const events: string[] = []; const { recorders } = stubRecordingEnvironment(events);
+  renderStudio();
+  await act(async () => { container.querySelector<HTMLButtonElement>(".btn-record-primary")!.click(); });
+  await act(async () => recorders[0]!.stop());
+  expect(container.textContent).toContain("没有收到录音数据");
+  expect(container.querySelector<HTMLButtonElement>(".btn-record-primary")!.disabled).toBe(false);
+  await act(async () => { container.querySelector<HTMLButtonElement>(".btn-record-primary")!.click(); });
+  const recorder = recorders[1] as unknown as { onerror: () => void };
+  await act(async () => recorder.onerror());
+  expect(container.textContent).toContain("录音设备中断或录制失败");
+  expect(container.querySelector(".btn-submit-clone")).toBeNull();
+});
+it("automatically stops at the actual thirty-second boundary instead of thirty-one seconds", async () => {
+  vi.useFakeTimers();
+  try {
+    const events: string[] = []; const { recorders } = stubRecordingEnvironment(events);
+    renderStudio();
+    await act(async () => { container.querySelector<HTMLButtonElement>(".btn-record-primary")!.click(); });
+    await act(async () => recorders[0]!.ondataavailable?.({ data: new Blob(["valid-fixture"]) } as unknown as BlobEvent));
+    await act(async () => { await vi.advanceTimersByTimeAsync(30000); });
+    expect(recorders[0]!.state).toBe("inactive");
+    expect(container.querySelector(".recorded-audio-player")).not.toBeNull();
+  } finally { vi.useRealTimers(); }
 });

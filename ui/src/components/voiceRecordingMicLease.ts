@@ -9,11 +9,26 @@ export type VoiceRecordingMicCommandSender = (command: SetMicMutedCommand) => Pr
  */
 export class VoiceRecordingMicLease {
   private mutedBefore: boolean | null = null;
+  private acquireInFlight: Promise<void> | null = null;
+  private acquired = false;
   private restorePending = false;
   private restoreInFlight: Promise<void> | null = null;
 
   get needsRestore(): boolean {
     return this.restorePending;
+  }
+
+  acquire(ready: boolean, mutedBefore: boolean, sendCommand: VoiceRecordingMicCommandSender): Promise<void> {
+    if (this.acquireInFlight) return this.acquireInFlight;
+    if (this.acquired) return Promise.resolve();
+    if (this.restorePending || this.restoreInFlight) return Promise.reject(new Error("麦克风仍在恢复，请稍后重试"));
+    if (!ready) return Promise.reject(new Error("控制连接未就绪，无法确认助手已静音"));
+    if (this.mutedBefore === null) this.begin(mutedBefore);
+    const operation = (this.mutedBefore ? Promise.resolve() : Promise.resolve().then(() => sendCommand({ cmd: "set_mic_muted", muted: true })))
+      .then(() => { this.acquired = true; })
+      .finally(() => { this.acquireInFlight = null; });
+    this.acquireInFlight = operation;
+    return operation;
   }
 
   begin(mutedBefore: boolean): void {
@@ -30,6 +45,11 @@ export class VoiceRecordingMicLease {
   }
 
   restore(ready: boolean, sendCommand: VoiceRecordingMicCommandSender): Promise<void> {
+    if (this.acquireInFlight) {
+      this.restorePending = true;
+      // Closing during a pending mute must not unmute first then accept a late mute.
+      return this.acquireInFlight.catch(() => undefined).then(() => this.restore(ready, sendCommand));
+    }
     if (this.mutedBefore === null) return Promise.resolve();
     if (this.mutedBefore !== false) {
       this.clear();
@@ -57,5 +77,6 @@ export class VoiceRecordingMicLease {
   private clear(): void {
     this.mutedBefore = null;
     this.restorePending = false;
+    this.acquired = false;
   }
 }

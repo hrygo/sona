@@ -2,7 +2,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   SPEECHRAIL_TTS_MODEL,
   voiceService,
+  VoiceServiceError,
 } from "../services/voiceService";
+import { registrationMayHaveCompleted } from "../services/voiceWorkflow";
+import { newDesignVoiceId } from "./voiceDesignExamples";
 import { playAudioBlob } from "../utils/audioPlayback";
 import { showToast } from "./Toast";
 import { SoundWaveAnimatedIcon } from "./Icons";
@@ -32,11 +35,13 @@ import "./VoiceStudioModal.css";
 
 export interface VoiceStudioModalProps {
   readonly currentVoiceId: string;
+  readonly initialReviewVoice?: VoiceCatalogItem;
+  readonly onRefresh?: () => Promise<void>;
   readonly availableVoices: readonly VoiceCatalogItem[];
   readonly modelCapabilities?: VoiceModelCapabilities;
-  readonly onSelectVoice: (voiceId: string) => void;
+  readonly onSelectVoice: (voiceId: string) => void | boolean | Promise<void | boolean>;
   readonly onVoiceCreated: (newVoice: VoiceCatalogItem) => void;
-  readonly onVoiceDeleted: (voiceId: string) => void;
+  readonly onVoiceDeleted: (voiceId: string) => void | Promise<void>;
   readonly onClose: () => void;
   /** 在打开浏览器麦克风前暂停语音助手，并等待服务端确认。 */
   readonly onStartRecordingVoice?: () => void | Promise<void>;
@@ -85,6 +90,8 @@ const FALLBACK_PROMPTS: readonly ClonePromptItem[] = [
 
 export function VoiceStudioModal({
   currentVoiceId,
+  initialReviewVoice,
+  onRefresh,
   availableVoices,
   modelCapabilities,
   onSelectVoice,
@@ -130,11 +137,30 @@ export function VoiceStudioModal({
   const [serverValidationPending, setServerValidationPending] = useState(false);
   const [reviewBusy, setReviewBusy] = useState(false);
   const [designBusy, setDesignBusy] = useState(false);
-  const [reviewingVoice, setReviewingVoice] = useState<VoiceCatalogItem | null>(null);
+  const [reviewingVoice, setReviewingVoice] = useState<VoiceCatalogItem | null>(initialReviewVoice ?? null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [designDirty, setDesignDirty] = useState(false);
+  const [closeRequested, setCloseRequested] = useState(false);
+  const [abandonClone, setAbandonClone] = useState(false);
+  const continueEditing = useRef<HTMLButtonElement | null>(null);
+  const [refreshError, setRefreshError] = useState("");
+  const refreshInFlight = useRef(false);
   const [recordedReferenceText, setRecordedReferenceText] = useState("");
   const [recordedFilename, setRecordedFilename] = useState("recording.webm");
   const [captureInfo, setCaptureInfo] = useState("");
   const recordingScriptRef = useRef("");
+  const [recordingPrompt, setRecordingPrompt] = useState<ClonePromptItem | null>(null);
+  const [cloneUncertain, setCloneUncertain] = useState(false);
+  const cloneAttemptRef = useRef<{ id: string; name: string; refText: string; form: FormData } | null>(null);
+  const cloneController = useRef<AbortController | null>(null);
+  const [deletedVoiceId, setDeletedVoiceId] = useState<string>();
+  const [selectingVoiceId, setSelectingVoiceId] = useState<string | null>(null);
+  const selectInFlight = useRef(false);
+  const [selectionError, setSelectionError] = useState("");
+  const rawAudioRef = useRef<HTMLAudioElement | null>(null);
+  const [rawPlaying, setRawPlaying] = useState(false);
+  const [muteState, setMuteState] = useState<"preparing" | "ready" | "error">(onStartRecordingVoice ? "preparing" : "ready");
+  const [muteRetry, setMuteRetry] = useState(0);
   const cloneInFlight = useRef(false);
   const auditionController = useRef<AbortController | null>(null);
   const auditionInFlight = useRef(false);
@@ -174,26 +200,29 @@ export function VoiceStudioModal({
   }, []);
 
   const operationBusy = designBusy || reviewBusy || cloneStage === "submitting"
-    || cloneStage === "recording" || isStartingRecording || auditioningVoiceId !== null;
+    || cloneStage === "recording" || isStartingRecording || auditioningVoiceId !== null
+    || selectingVoiceId !== null || deleteTargetVoice !== null || rawPlaying || refreshing;
+  const hasLocalDraft = designDirty || (recordedBlob !== null && cloneStage !== "success") || cloneUncertain;
   const requestClose = useCallback(() => {
-    if (!operationBusy) onClose();
-  }, [operationBusy, onClose]);
+    if (operationBusy) return;
+    if (hasLocalDraft) setCloseRequested(true);
+    else onClose();
+  }, [operationBusy, hasLocalDraft, onClose]);
+  useEffect(() => { if (closeRequested) continueEditing.current?.focus(); }, [closeRequested]);
 
-  // 打开声音工坊时立即静音麦克风，退出声音工坊时恢复
+  // Fail closed on mute failure, and allow retry/close while the command is pending.
   useEffect(() => {
     let cancelled = false;
     assistantMuteActiveRef.current = onStartRecordingVoice !== undefined;
-    if (onStartRecordingVoice) {
-      Promise.resolve(onStartRecordingVoice()).catch(() => {
-        if (!cancelled) {
-          showToast("语音助手麦克风静音失败，请检查控制连接", "error");
-        }
-      });
-    }
-    return () => {
-      cancelled = true;
-    };
-  }, [onStartRecordingVoice]);
+    if (!onStartRecordingVoice) { setMuteState("ready"); return; }
+    setMuteState("preparing");
+    Promise.resolve().then(onStartRecordingVoice).then(() => {
+      if (!cancelled) setMuteState("ready");
+    }).catch(() => {
+      if (!cancelled) setMuteState("error");
+    });
+    return () => { cancelled = true; };
+  }, [onStartRecordingVoice, muteRetry]);
 
   // 加载精选引导文案库
   useEffect(() => {
@@ -217,28 +246,29 @@ export function VoiceStudioModal({
   // 快捷键 Esc 关闭
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !operationBusy) {
-        onClose();
+      if (e.key === "Escape" && !e.defaultPrevented && !operationBusy) {
+        if (closeRequested) setCloseRequested(false);
+        else requestClose();
       }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [onClose, operationBusy]);
+  }, [requestClose, operationBusy, closeRequested]);
 
   // Keep keyboard navigation inside the modal, restoring the caller on exit.
   useEffect(() => {
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     dialogRef.current?.focus();
     const trap = (event: KeyboardEvent) => {
-      if (event.key !== "Tab" || !dialogRef.current) return;
+      if (event.key !== "Tab" || !dialogRef.current || dialogRef.current.querySelector(".voice-delete-modal-dialog")) return;
       const focusable = Array.from(dialogRef.current.querySelectorAll<HTMLElement>(
         'button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), summary, audio[controls], [tabindex="0"]',
-      )).filter((element) => element.getClientRects().length > 0 && !element.closest('[inert]'));
+      )).filter((element) => element.getClientRects().length > 0 && !element.matches(":disabled") && !element.closest('[inert]'));
       const first = focusable[0], last = focusable[focusable.length - 1];
       if (!first || !last) { event.preventDefault(); dialogRef.current.focus(); return; }
-      if (event.shiftKey && (document.activeElement === first || document.activeElement === dialogRef.current)) {
+      if (event.shiftKey && (document.activeElement === first || document.activeElement === dialogRef.current || !dialogRef.current.contains(document.activeElement))) {
         event.preventDefault(); last.focus();
-      } else if (!event.shiftKey && (document.activeElement === last || document.activeElement === dialogRef.current)) {
+      } else if (!event.shiftKey && (document.activeElement === last || document.activeElement === dialogRef.current || !dialogRef.current.contains(document.activeElement))) {
         event.preventDefault(); first.focus();
       }
     };
@@ -256,9 +286,11 @@ export function VoiceStudioModal({
       cancelAnimationFrame(animFrameRef.current);
       animFrameRef.current = null;
     }
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
+    const recorder = mediaRecorderRef.current;
+    mediaRecorderRef.current = null;
+    if (recorder && recorder.state !== "inactive") {
       try {
-        mediaRecorderRef.current.stop();
+        recorder.stop();
       } catch {
         // 静默
       }
@@ -287,6 +319,8 @@ export function VoiceStudioModal({
       recordingStartInFlightRef.current = false;
       cleanupRecording();
       auditionController.current?.abort();
+      cloneController.current?.abort();
+      rawAudioRef.current?.pause();
       void releaseAssistantMute();
     };
   }, [cleanupRecording, releaseAssistantMute]);
@@ -301,12 +335,14 @@ export function VoiceStudioModal({
 
   /* ====================== 录音与波形绘制核心逻辑 ====================== */
   const startRecording = useCallback(async () => {
-    if (recordingStartInFlightRef.current) return;
+    if (recordingStartInFlightRef.current || muteState !== "ready" || operationBusy) return;
     recordingStartInFlightRef.current = true;
     const attempt = recordingAttemptRef.current + 1;
     recordingAttemptRef.current = attempt;
     setIsStartingRecording(true);
     setCloneError("");
+    setRecordingPrompt(activePrompt);
+    recordingScriptRef.current = activePrompt.script;
     try {
       cleanupRecording();
 
@@ -329,7 +365,6 @@ export function VoiceStudioModal({
         return;
       }
       audioStreamRef.current = stream;
-      recordingScriptRef.current = activePrompt.script;
       const actual = stream.getAudioTracks?.()[0]?.getSettings?.();
       setCaptureInfo(actual ? `设备实际采样率：${actual.sampleRate ?? "未知"} Hz · 声道：${actual.channelCount ?? "未知"} · 自动增益：${actual.autoGainControl === undefined ? "未报告" : actual.autoGainControl ? "开" : "关"}` : "设备未提供实际采集参数");
 
@@ -356,10 +391,25 @@ export function VoiceStudioModal({
         }
       };
 
+      const failCapture = () => {
+        if (!isMountedRef.current || recordingAttemptRef.current !== attempt) return;
+        recordingAttemptRef.current += 1;
+        recordingStartInFlightRef.current = false;
+        cleanupRecording(); setIsStartingRecording(false);
+        setCloneStage("ready"); setRecordingPrompt(null);
+        setCloneError("录音设备中断或录制失败，本次未保存。请检查麦克风后重新录制。");
+      };
+      recorder.onerror = failCapture;
+      for (const track of stream.getTracks()) track.onended = failCapture;
       recorder.onstop = () => {
+        if (!isMountedRef.current || recordingAttemptRef.current !== attempt || mediaRecorderRef.current !== recorder) return;
         const fullBlob = new Blob(audioChunksRef.current, { type: actualMimeType });
         cleanupRecording();
-        if (!isMountedRef.current) return;
+        if (!fullBlob.size) {
+          setCloneStage("ready"); setRecordingPrompt(null);
+          setCloneError("没有收到录音数据，请检查麦克风后重新录制。");
+          return;
+        }
         setRecordedBlob(fullBlob);
         setRecordedReferenceText(recordingScriptRef.current);
         setRecordedFilename(actualMimeType.includes("mp4") ? "recording.m4a" : "recording.webm");
@@ -375,15 +425,12 @@ export function VoiceStudioModal({
       setCloneStage("recording");
       setRecordingSeconds(0);
 
+      const startedAt = performance.now();
       timerRef.current = window.setInterval(() => {
-        setRecordingSeconds((sec) => {
-          if (sec >= 30) {
-            stopRecording();
-            return 30;
-          }
-          return sec + 1;
-        });
-      }, 1000);
+        const elapsed = Math.floor((performance.now() - startedAt) / 1000);
+        setRecordingSeconds(Math.min(elapsed, 30));
+        if (elapsed >= 30) stopRecording();
+      }, 250);
 
       // 实时绘制 Canvas 波形与电平检测
       const canvas = canvasRef.current;
@@ -441,14 +488,14 @@ export function VoiceStudioModal({
       cleanupRecording();
       const msg = err instanceof Error ? err.message : "无法开启麦克风，请检查浏览器权限";
       setCloneError(`麦克风采集失败: ${msg}`);
-      setCloneStage("ready");
+      setCloneStage("ready"); setRecordingPrompt(null);
     } finally {
       if (recordingAttemptRef.current === attempt) {
         recordingStartInFlightRef.current = false;
         if (isMountedRef.current) setIsStartingRecording(false);
       }
     }
-  }, [cleanupRecording, cloneName, activePrompt.script, onStartRecordingVoice, releaseAssistantMute]);
+  }, [cleanupRecording, cloneName, activePrompt, muteState, operationBusy]);
 
   const stopRecording = useCallback(() => {
     if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
@@ -465,6 +512,11 @@ export function VoiceStudioModal({
   }, []);
 
   const handleResetRecording = useCallback(() => {
+    if (cloneInFlight.current) return;
+    recordingAttemptRef.current += 1;
+    recordingStartInFlightRef.current = false;
+    cloneAttemptRef.current = null; setCloneUncertain(false);
+    rawAudioRef.current?.pause(); setRawPlaying(false);
     cleanupRecording();
     if (recordedAudioUrl) {
       URL.revokeObjectURL(recordedAudioUrl);
@@ -479,97 +531,116 @@ export function VoiceStudioModal({
     setServerValidationPending(false);
     setLastClonedVoice(null);
     setRecordedReferenceText("");
-    setCaptureInfo("");
+    setCaptureInfo(""); setRecordingPrompt(null);
   }, [cleanupRecording, recordedAudioUrl]);
 
-  /* ====================== 提交克隆至 SpeechRail ====================== */
+  /* ====================== 参考预检 → 注册 → 恢复 ====================== */
   const handleSubmitClone = useCallback(async () => {
-    if (cloneInFlight.current) return;
-    if (!canClone) {
-      setCloneError("当前 TTS 模型不支持声音克隆，请切换至 Quality 配置（设计与 Base 克隆能力）");
-      return;
-    }
-    if (!recordedBlob) {
-      setCloneError("请先完成一段语音录制");
-      return;
-    }
-    if (!cloneName.trim()) {
-      setCloneError("请输入音色名称");
-      return;
-    }
-    if (!recordedReferenceText.trim()) {
-      setCloneError("请填写这段音频中实际说出的内容");
-      return;
-    }
-
+    if (cloneInFlight.current || operationBusy || muteState !== "ready") return;
+    if (!canClone) { setCloneError("当前 TTS 模型不支持克隆，请切换至 Quality 配置"); return; }
+    if (!recordedBlob) { setCloneError("请先完成一段语音录制"); return; }
+    if (!cloneName.trim()) { setCloneError("请输入音色名称"); return; }
+    if (!recordedReferenceText.trim()) { setCloneError("请填写这段音频中实际说出的内容"); return; }
     cloneInFlight.current = true;
-    setCloneError("");
-    setCloneStage("submitting");
-
+    const abort = new AbortController(); cloneController.current = abort;
+    const stillActive = () => isMountedRef.current && !abort.signal.aborted;
+    let sent = false;
+    setCloneError(""); setCloneStage("submitting");
     try {
-      try {
-        const signalMetrics = await inspectVoiceRecording(recordedBlob);
-        const result = evaluateCaptureSafety(signalMetrics);
-        setLocalQuality(result);
-        if (result.status === "reject") {
-          setCloneError(result.primary_action);
-          setCloneStage("recorded");
-          return;
+      let attempt = cloneUncertain ? cloneAttemptRef.current : null;
+      if (!attempt) {
+        try {
+          const result = evaluateCaptureSafety(await inspectVoiceRecording(recordedBlob));
+          if (!stillActive()) return;
+          setLocalQuality(result);
+          if (result.status === "reject") { setCloneError(result.primary_action); return; }
+        } catch {
+          if (!stillActive()) return;
+          setLocalQuality({ status: "unevaluated", failure_codes: [], primary_action: "浏览器无法完成本地检查，将由 SpeechRail 进行权威校验" });
         }
-      } catch {
-        setLocalQuality({
-          status: "unevaluated",
-          failure_codes: [],
-          primary_action: "浏览器无法完成本地检查，将由 SpeechRail 进行权威校验",
-        });
-      }
-
-      // Keep captured bytes and level unchanged. SpeechRail owns canonicalization;
-      // decoding Opus into WAV here would not restore lossless source audio.
-      const formData = new FormData();
-      formData.append("audio", recordedBlob, recordedFilename);
-      formData.append("ref_text", recordedReferenceText.trim());
-      formData.append("name", cloneName.trim());
-
-      setServerValidationPending(true);
-      try {
-        const validation = await voiceService.validateClone(formData);
-        setServerValidation(validation);
-        if (!validation.reference || (validation.status !== "pass" && validation.status !== "warn")) {
-          setCloneError(validation.failure_codes.length > 0
-            ? `SpeechRail 质量门禁未通过：${validation.failure_codes.join("、")}`
-            : "SpeechRail 质量门禁未通过，请重新录音");
-          setCloneStage("recorded");
-          showToast("SpeechRail 质量门禁未通过，请重新录音", "error");
+        const id = newDesignVoiceId().replace("design_", "clone_");
+        const form = new FormData();
+        form.append("audio", recordedBlob, recordedFilename);
+        form.append("ref_text", recordedReferenceText.trim()); form.append("name", cloneName.trim()); form.append("id", id);
+        attempt = { id, name: cloneName.trim(), refText: recordedReferenceText.trim(), form };
+        cloneAttemptRef.current = attempt;
+        setServerValidationPending(true);
+        try {
+          const validation = await voiceService.validateClone(form, abort.signal);
+          if (!stillActive()) return;
+          setServerValidation(validation);
+          if (!validation.reference || (validation.status !== "pass" && validation.status !== "warn")) {
+            setCloneError("参考预检未通过，尚未注册。请查看原因，修正参考文字或重新录音。"); return;
+          }
+        } catch {
+          if (stillActive()) setCloneError("参考预检不可用，尚未提交注册。请确认 SpeechRail 服务和版本后重试。");
           return;
-        }
-      } catch {
-        setServerValidation(undefined);
-        setCloneError("参考预检不可用，尚未提交注册。请确认 SpeechRail 服务和版本后重试。");
-        setCloneStage("recorded");
-        return;
-      } finally {
-        setServerValidationPending(false);
+        } finally { if (isMountedRef.current) setServerValidationPending(false); }
       }
-
-      const createdVoice = await voiceService.clone(formData);
-      if (!isMountedRef.current) return;
-      setLastClonedVoice(createdVoice);
-      // Creation returns reference evidence, not a synthesis-output acceptance.
-      onVoiceCreated(createdVoice);
-      setCloneStage("success");
+      if (!stillActive()) return;
+      sent = true;
+      const createdVoice = await voiceService.clone(attempt.form, abort.signal, attempt.id);
+      if (!stillActive()) return;
+      if (createdVoice.id !== attempt.id || createdVoice.mode !== "clone" || createdVoice.is_system) {
+        throw new VoiceServiceError("注册响应不匹配，请检查保存结果", 502, "invalid_response");
+      }
+      setLastClonedVoice(createdVoice); setCloneUncertain(false);
+      onVoiceCreated(createdVoice); setCloneStage("success");
       showToast(`音色「${createdVoice.name}」已保存，请继续检查输出与试听`, "success");
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "提交音色克隆失败，请检查服务连接";
-      setCloneError(msg);
-      setCloneStage("recorded");
-      showToast(msg, "error");
-    } finally { cloneInFlight.current = false; }
-  }, [canClone, recordedBlob, cloneName, recordedFilename, recordedReferenceText, onVoiceCreated]);
+    } catch (cause) {
+      if (!isMountedRef.current) return;
+      const uncertain = sent && (abort.signal.aborted || registrationMayHaveCompleted(cause));
+      setCloneUncertain(uncertain);
+      setCloneError(uncertain ? "注册结果尚未确认，请先检查保存结果。重试沿用同一 ID 和录音，不会有意创建另一音色。"
+        : cause instanceof Error ? cause.message : "注册未完成，请检查服务状态后重试。");
+    } finally {
+      cloneInFlight.current = false;
+      if (isMountedRef.current) {
+        setServerValidationPending(false);
+        setCloneStage((stage) => stage === "submitting" ? "recorded" : stage);
+        if (abort.signal.aborted && !sent) setCloneError("已停止等待，尚未发送注册请求；录音仍保留，可重试。");
+        if (abort.signal.aborted && sent) {
+          setCloneUncertain(true); setCloneError("已停止等待，服务端可能已保存。请先检查保存结果。");
+        }
+      }
+    }
+  }, [canClone, recordedBlob, cloneName, recordedFilename, recordedReferenceText, onVoiceCreated, cloneUncertain, muteState, operationBusy]);
+
+  async function reconcileClone() {
+    const attempt = cloneAttemptRef.current;
+    if (!attempt || cloneInFlight.current || operationBusy) return;
+    cloneInFlight.current = true; setCloneStage("submitting"); setCloneError("");
+    const abort = new AbortController(); cloneController.current = abort;
+    try {
+      const found = (await voiceService.list(abort.signal)).find((item) => item.id === attempt.id);
+      if (!isMountedRef.current || abort.signal.aborted) return;
+      if (found?.mode === "clone" && !found.is_system && !found.creation
+        && found.name === attempt.name && found.ref_text === attempt.refText) {
+        setLastClonedVoice(found); setCloneUncertain(false); onVoiceCreated(found); setCloneStage("success");
+      } else setCloneError("暂未找到匹配音色。任务可能尚未结束，请稍后检查或使用同一 ID 重试。");
+    } catch { if (isMountedRef.current) setCloneError("档案库暂不可用，注册结果仍待确认。"); }
+    finally {
+      cloneInFlight.current = false;
+      if (isMountedRef.current) setCloneStage((stage) => stage === "submitting" ? "recorded" : stage);
+    }
+  }
+
+  async function selectVoice(id: string) {
+    if (selectInFlight.current) return false;
+    selectInFlight.current = true; setSelectingVoiceId(id); setSelectionError("");
+    try {
+      const acknowledged = await onSelectVoice(id);
+      if (acknowledged === false) throw new Error("启用未获确认，请检查控制连接后重试。");
+      return true;
+    } catch {
+      if (isMountedRef.current) setSelectionError("启用未获确认，当前音色以服务端状态为准。请检查控制连接后重试。");
+      return false;
+    } finally { selectInFlight.current = false; if (isMountedRef.current) setSelectingVoiceId(null); }
+  }
 
   /* ====================== 试听生成与播放 ====================== */
   const handleAuditionVoice = useCallback(async (vItem: VoiceCatalogItem) => {
-    if (auditionInFlight.current || operationBusy) return;
+    if (auditionInFlight.current || operationBusy || muteState !== "ready") return;
     auditionInFlight.current = true;
     const abort = new AbortController(); auditionController.current = abort;
     setAuditioningVoiceId(vItem.id);
@@ -589,7 +660,7 @@ export function VoiceStudioModal({
       auditionInFlight.current = false;
       if (isMountedRef.current) setAuditioningVoiceId(null);
     }
-  }, [operationBusy]);
+  }, [operationBusy, muteState]);
 
   const filteredVoices = availableVoices.filter((v) => {
     if (filterMode === "all") return true;
@@ -606,6 +677,11 @@ export function VoiceStudioModal({
     >
       <div className="voice-studio-dialog" ref={dialogRef} tabIndex={-1} onClick={(e) => e.stopPropagation()}>
         {/* Header */}
+        {closeRequested && <div className="voice-exit-confirm" role="group" aria-label="关闭工坊确认">
+          <p>还有未提交的录音、已修改描述或待确认注册。关闭会丢弃本地草稿；服务端已经保存的音色不会删除，停止等待也不代表撤销注册。</p>
+          <button ref={continueEditing} type="button" className="btn-design-preview" onClick={() => setCloseRequested(false)}>继续编辑</button>
+          <button type="button" className="btn-design-preview" onClick={onClose}>关闭并丢弃本地草稿</button>
+        </div>}
         <div className="voice-studio-header">
           <div className="voice-studio-header-titles">
             <div className="voice-studio-badge">
@@ -630,8 +706,9 @@ export function VoiceStudioModal({
         {/* Main Body: 两栏布局 */}
         <div className="voice-studio-body">
           {/* 左栏：音色档案资产库 (Voice Deck) */}
-          <aside className="voice-deck-sidebar">
+          <aside className="voice-deck-sidebar" inert={closeRequested}>
             <div className="voice-deck-header">
+              {selectionError && <p role="alert" className="forge-error-banner">{selectionError}</p>}
               <div className="voice-deck-title-line">
                 <span className="deck-title">音色档案库</span>
                 <span className="deck-count">{filteredVoices.length} 个音色</span>
@@ -668,7 +745,19 @@ export function VoiceStudioModal({
               </div>
             </div>
 
+            {onRefresh && <div className="voice-deck-refresh">
+              <button type="button" className="btn-design-preview" disabled={operationBusy}
+                onClick={async () => {
+                  if (refreshInFlight.current) return;
+                  refreshInFlight.current = true; setRefreshing(true); setRefreshError("");
+                  try { await onRefresh(); }
+                  catch { if (isMountedRef.current) setRefreshError("刷新未完成，保留原列表。请检查 SpeechRail 后重试。"); }
+                  finally { refreshInFlight.current = false; if (isMountedRef.current) setRefreshing(false); }
+                }}>{refreshing ? "正在刷新…" : "刷新音色与能力"}</button>
+              {refreshError && <p className="forge-error-banner" role="alert">{refreshError}</p>}
+            </div>}
             <div className="voice-deck-list" role="list">
+              {filteredVoices.length === 0 && <p className="voice-flow-help" role="status">这个分类还没有音色。可以切换“全部”，或在右侧创建。</p>}
               {filteredVoices.map((item) => {
                 const isSelected = item.id === currentVoiceId;
                 const vMode = resolveVoiceMode(item);
@@ -714,7 +803,7 @@ export function VoiceStudioModal({
                         type="button"
                         className={`btn-deck-audition ${isAuditioning ? "playing" : ""}`}
                         onClick={() => void handleAuditionVoice(item)}
-                        disabled={operationBusy || auditioningVoiceId !== null}
+                        disabled={operationBusy || muteState !== "ready"}
                         title="播放即时试听"
                       >
                         <SoundWaveAnimatedIcon size={12} isPlaying={isAuditioning} />
@@ -727,12 +816,9 @@ export function VoiceStudioModal({
                           className="btn-deck-apply"
                           disabled={operationBusy}
                           title="使用此音色"
-                          onClick={() => {
-                            onSelectVoice(item.id);
-                            showToast(`已切换助理播报音色为「${item.name}」`, "info");
-                          }}
+                          onClick={() => void selectVoice(item.id)}
                         >
-                          使用此音色
+                          {selectingVoiceId === item.id ? "正在确认启用…" : "使用此音色"}
                         </button>
                       ) : isSelected ? (
                         <span className="deck-applied-indicator">✓ 已激活</span>
@@ -759,6 +845,7 @@ export function VoiceStudioModal({
               })}
             </div>
 
+            {auditioningVoiceId && <button type="button" className="btn-design-preview" onClick={() => auditionController.current?.abort()}>停止试听</button>}
             {/* 自定义音色删除确认弹窗 */}
             {deleteTargetVoice && (
               <VoiceDeleteModal
@@ -766,16 +853,25 @@ export function VoiceStudioModal({
                 voiceName={deleteTargetVoice.name}
                 isCurrentActive={deleteTargetVoice.id === currentVoiceId}
                 onClose={() => setDeleteTargetVoice(null)}
-                onConfirm={() => {
-                  onVoiceDeleted(deleteTargetVoice.id);
-                  setDeleteTargetVoice(null);
+                onConfirm={async () => {
+                  const id = deleteTargetVoice.id;
+                  await onVoiceDeleted(id);
+                  if (!isMountedRef.current) return;
+                  setDeletedVoiceId(id);
+                  setReviewingVoice((item) => item?.id === id ? null : item);
+                  if (lastClonedVoice?.id === id) handleResetRecording();
                 }}
               />
             )}
           </aside>
 
           {/* 右栏：声学创设舱 (Voice Forge) */}
-          <main className="voice-forge-panel">
+          <main className="voice-forge-panel" inert={deleteTargetVoice !== null || closeRequested}>
+            {muteState !== "ready" && <div className="forge-error-banner" role="status">
+              <p>{muteState === "preparing" ? "正在等待助手静音确认，确认前不会录音或播放声音。可以先编辑描述，或关闭工坊。" : "助手静音未获确认，已暂停录音与试听。请恢复控制连接后重试。"}</p>
+              {muteState === "error" && <button type="button" onClick={() => setMuteRetry((value) => value + 1)}>重试静音准备</button>}
+            </div>}
+
             {/* Forge Tabs */}
             <div className="voice-forge-tabs">
               {canClone && (
@@ -818,10 +914,11 @@ export function VoiceStudioModal({
             {reviewingVoice && <div className="design-forge-container">
               <button type="button" className="btn-design-preview" disabled={reviewBusy} onClick={() => setReviewingVoice(null)}>返回创建声音</button>
               <VoiceCandidateReview key={reviewingVoice.id} voice={reviewingVoice} onUpdated={onVoiceCreated}
-                onSelect={onSelectVoice} onBusyChange={setReviewBusy} />
+                disabled={!canClone || muteState !== "ready" || refreshing || auditioningVoiceId !== null}
+                onSelect={selectVoice} onBusyChange={setReviewBusy} />
             </div>}
             {!reviewingVoice && selectedTab === "clone" && canClone && (
-              <div className="clone-forge-container">
+              <div className="clone-forge-container" inert={auditioningVoiceId !== null || designBusy || selectingVoiceId !== null}>
                 {/* 步骤 1: 提词引导与声学校准 */}
                 <section className="clone-step-section">
                   <div className="clone-step-header">
@@ -837,7 +934,7 @@ export function VoiceStudioModal({
 
                   <div className="teleprompter-card">
                     <div className="teleprompter-meta">
-                      <span className="prompt-category-tag">{activePrompt.title}</span>
+                      <span className="prompt-category-tag">{(recordingPrompt ?? activePrompt).title}</span>
                       <button
                         type="button"
                         className="btn-switch-prompt"
@@ -848,7 +945,7 @@ export function VoiceStudioModal({
                       </button>
                     </div>
                     <blockquote className="teleprompter-script">
-                      “{activePrompt.script}”
+                      “{(recordingPrompt ?? activePrompt).script}”
                     </blockquote>
                     <p className="teleprompter-tips">自然朗读即可，不需要播音腔；读错、漏读时可在下一步修正参考文本。</p>
                   </div>
@@ -888,7 +985,7 @@ export function VoiceStudioModal({
                         type="button"
                         className="btn-record-primary"
                         onClick={() => void startRecording()}
-                        disabled={isStartingRecording}
+                        disabled={isStartingRecording || muteState !== "ready"}
                         aria-busy={isStartingRecording}
                       >
                         <span className="record-dot" />
@@ -896,6 +993,12 @@ export function VoiceStudioModal({
                       </button>
                     )}
 
+                    {cloneStage === "recording" && <button type="button" className="btn-design-preview" onClick={handleResetRecording}>取消这次录音</button>}
+                    {isStartingRecording && <button type="button" className="btn-design-preview" onClick={() => {
+                      recordingAttemptRef.current += 1; recordingStartInFlightRef.current = false;
+                      setIsStartingRecording(false); setRecordingPrompt(null); cleanupRecording();
+                      setCloneError("已取消麦克风等待，之后返回的权限结果不会启动录音。");
+                    }}>取消麦克风等待</button>}
                     {cloneStage === "recording" && (
                       <button
                         type="button"
@@ -912,6 +1015,13 @@ export function VoiceStudioModal({
                         {recordedAudioUrl && (
                           <audio
                             src={recordedAudioUrl}
+                            ref={rawAudioRef}
+                            onPlay={() => {
+                              if (cloneStage === "submitting" || reviewBusy || designBusy || auditioningVoiceId || muteState !== "ready") rawAudioRef.current?.pause();
+                              else setRawPlaying(true);
+                            }}
+                            onPause={() => setRawPlaying(false)} onEnded={() => setRawPlaying(false)}
+                            onError={() => { setRawPlaying(false); setCloneError("浏览器无法回放这段录音，可以重录或交由服务端预检；不要将回放失败视为音质通过。"); }}
                             controls
                             className="recorded-audio-player"
                             aria-label="回放刚才录制的音频"
@@ -921,7 +1031,7 @@ export function VoiceStudioModal({
                           type="button"
                           className="btn-rerecord"
                           onClick={handleResetRecording}
-                          disabled={cloneStage === "submitting" || reviewBusy}
+                          disabled={cloneStage === "submitting" || reviewBusy || cloneUncertain}
                         >
                           🔄 不满意，重新录制
                         </button>
@@ -942,7 +1052,7 @@ export function VoiceStudioModal({
                       <label htmlFor="clone-reference-text" className="forge-label">音频中实际说出的内容</label>
                       <textarea id="clone-reference-text" className="forge-textarea voice-reference-editor" rows={3}
                         maxLength={2000} value={recordedReferenceText}
-                        disabled={cloneStage === "submitting" || cloneStage === "success"}
+                        disabled={cloneStage === "submitting" || cloneStage === "success" || cloneUncertain}
                         onChange={(event) => { setRecordedReferenceText(event.target.value); setServerValidation(undefined); }} />
                       <p className="voice-flow-help">请删除未读出的句子，修正漏字和改读内容。参考文本必须与这次录音对应，不能拿另一段文案代替。</p>
                       <p className="voice-capture-details">{captureInfo}。上传保持原始电平；规范化由 SpeechRail 完成，不保证自动消除背景噪声。</p>
@@ -958,7 +1068,7 @@ export function VoiceStudioModal({
                           setCloneName(e.target.value);
                           if (cloneError) setCloneError("");
                         }}
-                        disabled={cloneStage === "submitting" || cloneStage === "success"}
+                        disabled={cloneStage === "submitting" || cloneStage === "success" || cloneUncertain}
                       />
 
                       {cloneStage !== "success" ? (
@@ -966,21 +1076,33 @@ export function VoiceStudioModal({
                           type="button"
                           className="btn-submit-clone"
                           onClick={() => void handleSubmitClone()}
-                          disabled={cloneStage === "submitting" || !cloneName.trim()}
+                          disabled={cloneStage === "submitting" || !cloneName.trim() || !recordedReferenceText.trim() || muteState !== "ready" || rawPlaying}
                         >
                           {cloneStage === "submitting" ? (
                             <span>正在核验参考并保存…</span>
                           ) : (
-                            <span>核验参考并保存音色</span>
+                            <span>{cloneUncertain ? "使用同一 ID 重试" : "核验参考并保存音色"}</span>
                           )}
                         </button>
                       ) : <span className="clone-candidate-hint">已保存，输出待检查</span>}
                     </div>
 
+                    {cloneStage === "submitting" && <button type="button" className="btn-design-preview" onClick={() => cloneController.current?.abort()}>停止等待</button>}
+                    {cloneUncertain && cloneAttemptRef.current && <div className="voice-registration-recovery">
+                      <p>待确认注册 ID：<code>{cloneAttemptRef.current.id}</code></p>
+                      <button type="button" className="btn-design-preview" disabled={operationBusy} onClick={() => void reconcileClone()}>检查保存结果</button>
+                      <button type="button" className="btn-design-preview" disabled={operationBusy} onClick={() => setAbandonClone(true)}>放弃等待并重新录音</button>
+                      {abandonClone && <div role="group" aria-label="确认重新录音">
+                        <p>上次注册可能已保存。重新录音会使用新 ID，不会删除旧音色；请先检查档案库，避免重复创建。</p>
+                        <button type="button" className="btn-design-preview" disabled={operationBusy} onClick={() => { setAbandonClone(false); handleResetRecording(); }}>确认重新录音</button>
+                        <button type="button" className="btn-design-preview" onClick={() => setAbandonClone(false)}>保留待确认录音</button>
+                      </div>}
+                    </div>}
                     {localQuality && (
                       <VoiceQualityCard
                         title="录音预检"
                         localResult={localQuality}
+                        pending={cloneStage === "submitting" || reviewBusy || cloneUncertain}
                         onRerecord={handleResetRecording}
                       />
                     )}
@@ -990,14 +1112,15 @@ export function VoiceStudioModal({
                         title="SpeechRail 参考音频验收"
                         scope="reference"
                         report={serverValidation}
-                        pending={serverValidationPending}
+                        pending={serverValidationPending || cloneStage === "submitting" || reviewBusy || cloneUncertain}
                         onRerecord={handleResetRecording}
                       />
                     )}
 
                     {cloneStage === "success" && lastClonedVoice && (
                       <VoiceCandidateReview key={lastClonedVoice.id} voice={lastClonedVoice}
-                        onUpdated={onVoiceCreated} onSelect={onSelectVoice} onBusyChange={setReviewBusy} />
+                        disabled={!canClone || muteState !== "ready" || refreshing || auditioningVoiceId !== null}
+                        onUpdated={onVoiceCreated} onSelect={selectVoice} onBusyChange={setReviewBusy} />
                     )}
                   </section>
                 )}
@@ -1010,9 +1133,10 @@ export function VoiceStudioModal({
               </div>
             )}
 
-            {canDesign && (
-              <div hidden={reviewingVoice !== null || selectedTab !== "design"} inert={auditioningVoiceId !== null}><VoiceDesignPanel canRegister={modelCapabilities?.supports_instruction === true && modelCapabilities?.supports_clone === true}
-                canPreview={canPreview} onCreated={onVoiceCreated} onSelect={onSelectVoice} onBusyChange={setDesignBusy} /></div>
+            {(
+              <div hidden={!canDesign || reviewingVoice !== null || selectedTab !== "design"} inert={auditioningVoiceId !== null || selectingVoiceId !== null}><VoiceDesignPanel canRegister={muteState === "ready" && modelCapabilities?.supports_instruction === true && modelCapabilities?.supports_clone === true}
+                canPreview={canPreview && muteState === "ready"} deletedVoiceId={deletedVoiceId}
+                externalBusy={operationBusy && !designBusy} onDirtyChange={setDesignDirty} onCreated={onVoiceCreated} onSelect={selectVoice} onBusyChange={setDesignBusy} /></div>
             )}
           </main>
         </div>

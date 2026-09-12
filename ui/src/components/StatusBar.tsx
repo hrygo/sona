@@ -615,6 +615,7 @@ export default function StatusBar({
   /** 键盘快捷键监听：M 键麦克风静音切换 */
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
+      if (e.defaultPrevented || document.querySelector('[role="dialog"][aria-modal="true"]')) return;
       const activeEl = document.activeElement;
       const isInput =
         activeEl?.tagName === "INPUT" ||

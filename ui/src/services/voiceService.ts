@@ -108,9 +108,10 @@ function parseQualityReport(value: unknown): VoiceQualityReport | undefined {
   const status = value.status === "pass" || value.status === "warn" || value.status === "reject"
     ? value.status
     : "unevaluated";
-  const failureCodes = Array.isArray(value.failure_codes)
-    ? value.failure_codes.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
-    : [];
+  // Missing/malformed failure evidence must not be silently repaired into a pass.
+  if (!Array.isArray(value.failure_codes)
+    || !value.failure_codes.every((item): item is string => typeof item === "string" && item.trim().length > 0)) return undefined;
+  const failureCodes = value.failure_codes;
   const reference = parseReferenceQuality(value.reference);
   const synthesis = parseSynthesisQuality(value.synthesis);
   return {
@@ -290,7 +291,8 @@ async function readError(response: Response): Promise<VoiceServiceError> {
   const requestId =
     asString(nested.request_id)
     ?? asString(detail.request_id)
-    ?? asString(root.request_id);
+    ?? asString(root.request_id)
+    ?? asString(response.headers?.get?.("x-request-id"));
   const retryable =
     typeof nested.retryable === "boolean"
       ? nested.retryable
@@ -369,6 +371,9 @@ export const voiceService = {
 
   async list(signal?: AbortSignal): Promise<VoiceCatalogItem[]> {
     const payload = await requestJson<unknown>("/v1/voices", { method: "GET", signal });
+    if (!isRecord(payload) || !Array.isArray(payload.data)) {
+      throw new VoiceServiceError("档案库响应不完整，无法确认保存结果", 502, "invalid_response");
+    }
     return parseVoiceList(payload);
   },
 
@@ -394,9 +399,10 @@ export const voiceService = {
     });
   },
 
-  async clone(formData: FormData): Promise<VoiceCatalogItem> {
+  async clone(formData: FormData, signal?: AbortSignal, idempotencyKey?: string): Promise<VoiceCatalogItem> {
     const payload = await requestJson<unknown>("/v1/voices/clone", {
-      method: "POST",
+      method: "POST", signal,
+      ...(idempotencyKey ? { headers: { "Idempotency-Key": idempotencyKey } } : {}),
       body: formData,
     });
     const voice = parseVoice(payload);
@@ -410,9 +416,9 @@ export const voiceService = {
     return voice;
   },
 
-  async validateClone(formData: FormData): Promise<VoiceQualityReport> {
+  async validateClone(formData: FormData, signal?: AbortSignal): Promise<VoiceQualityReport> {
     const payload = await requestJson<unknown>("/v1/voices/clone/validate", {
-      method: "POST",
+      method: "POST", signal,
       body: formData,
     });
     const report = parseQualityReport(payload);

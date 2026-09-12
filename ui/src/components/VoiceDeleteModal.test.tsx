@@ -59,7 +59,7 @@ describe("VoiceDeleteModal", () => {
     expect(dialog).not.toBeNull();
     expect(dialog?.textContent).toContain("删除自定义音色");
     expect(dialog?.textContent).toContain("“知性姐姐”");
-    expect(dialog?.textContent).toContain("删除后本地声学模型参数与提示词配置将无法恢复");
+    expect(dialog?.textContent).toContain("删除后参考音频与音色配置将无法恢复");
     expect(dialog?.textContent).not.toContain("正在使用中");
   });
 
@@ -77,7 +77,7 @@ describe("VoiceDeleteModal", () => {
     });
 
     const dialog = container.querySelector(".voice-delete-modal-dialog");
-    expect(dialog?.textContent).toContain("该音色当前正在使用中，删除后系统将自动切回官方默认原声音色");
+    expect(dialog?.textContent).toContain("先确认切回官方默认音色，再执行删除");
   });
 
   it("calls onClose when cancel button is clicked", () => {
@@ -146,5 +146,23 @@ describe("VoiceDeleteModal", () => {
     });
 
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("delete recovery", () => {
+  it("retains a failed confirmation, blocks duplicate writes, and permits retry", async () => {
+    const host = document.createElement("div"); document.body.append(host); const root = createRoot(host);
+    const close = vi.fn(); let reject!: (error: Error) => void;
+    const remove = vi.fn().mockImplementationOnce(() => new Promise<void>((_, fail) => { reject = fail; })).mockResolvedValue(undefined);
+    try {
+      await act(async () => root.render(<VoiceDeleteModal isOpen voiceName="候选" onClose={close} onConfirm={remove} />));
+      const confirm = () => Array.from(host.querySelectorAll("button")).find((b) => b.textContent?.includes("确认删除"))!;
+      await act(async () => { confirm().click(); confirm().click(); });
+      expect(remove).toHaveBeenCalledTimes(1); expect(close).not.toHaveBeenCalled();
+      await act(async () => reject(new Error("离线，未删除")));
+      expect(host.textContent).toContain("离线，未删除"); expect(close).not.toHaveBeenCalled();
+      await act(async () => confirm().click());
+      expect(remove).toHaveBeenCalledTimes(2); expect(close).toHaveBeenCalledTimes(1);
+    } finally { act(() => root.unmount()); host.remove(); }
   });
 });

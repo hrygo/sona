@@ -156,8 +156,11 @@ export function synthesisQuality(report?: VoiceQualityReport): VoiceQualityRepor
 export function hasAcceptedSynthesis(voice: VoiceCatalogItem): boolean {
   const report = synthesisQuality(voice.quality);
   return report?.status === "pass" && report.failure_codes.length === 0
+    && Number.isInteger(report.synthesis?.probe_count)
     && (report.synthesis?.probe_count ?? 0) >= 18
     && report.synthesis?.deterministic === true
-    && report.synthesis.transcript_match !== undefined
+    && typeof report.synthesis.transcript_match === "number"
+    && Number.isFinite(report.synthesis.transcript_match)
+    && report.synthesis.transcript_match >= 0 && report.synthesis.transcript_match <= 1
     && report.synthesis.successful_probe_count === report.synthesis.probe_count;
 }

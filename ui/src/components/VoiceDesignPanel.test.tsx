@@ -235,3 +235,69 @@ it("treats audio-mode conflicts as a preflight rejection rather than a saved-ID 
   expect((container.querySelector("fieldset") as HTMLFieldSetElement).disabled).toBe(false);
   expect(container.textContent).not.toContain("待确认注册 ID");
 });
+
+it("invalidates an earlier audition when the next attempt fails", async () => {
+  act(() => root.render(<VoiceCandidateReview voice={{ ...voice, quality: output }} onUpdated={created} onSelect={selected} />));
+  await click("试听实际音色");
+  expect(button("确认使用此音色").disabled).toBe(false);
+  vi.mocked(playAudioBlob).mockRejectedValueOnce(new Error("device lost"));
+  await click("试听实际音色");
+  expect(button("确认使用此音色").disabled).toBe(true);
+});
+
+it("waits for activation acknowledgement and keeps a failed candidate retryable", async () => {
+  let acknowledge!: (value: boolean) => void;
+  selected.mockImplementationOnce(() => new Promise<boolean>((resolve) => { acknowledge = resolve; }));
+  act(() => root.render(<VoiceCandidateReview voice={{ ...voice, quality: output }} onUpdated={created} onSelect={selected} />));
+  await click("试听实际音色");
+  await act(async () => { const apply = button("确认使用此音色"); apply.click(); apply.click(); });
+  expect(selected).toHaveBeenCalledOnce();
+  expect(button("正在确认启用").disabled).toBe(true);
+  await act(async () => { acknowledge(false); });
+  expect(container.textContent).toContain("启用未获确认");
+  expect(button("确认使用此音色").disabled).toBe(false);
+});
+
+it("lets a definite ASR rejection return to editing rather than trapping the draft", async () => {
+  vi.mocked(voiceService.design).mockRejectedValueOnce(new VoiceServiceError("asr missing", 503, "transcription_unavailable"));
+  render(); await click("温柔知性"); await click("生成并保存可复用音色");
+  expect((container.querySelector("fieldset") as HTMLFieldSetElement).disabled).toBe(false);
+  expect(container.textContent).not.toContain("待确认注册 ID");
+});
+
+it("returns from a saved candidate to its editable description using a new target ID", async () => {
+  render(); await click("温柔知性"); await click("生成并保存可复用音色");
+  const first = vi.mocked(voiceService.design).mock.calls[0]![0].id;
+  await click("基于此描述再设计");
+  expect((container.querySelector("#design-instruction-input") as HTMLTextAreaElement).value).toBe(VOICE_DESIGN_EXAMPLES[0]!.instruction);
+  await click("生成并保存可复用音色");
+  expect(vi.mocked(voiceService.design).mock.calls[1]![0].id).not.toBe(first);
+});
+
+it("cancels an output wait without retaining old acceptance or issuing activation", async () => {
+  vi.mocked(voiceService.qualityRun).mockImplementation((_id, _request, signal) => new Promise((_, reject) => {
+    signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+  }));
+  act(() => root.render(<VoiceCandidateReview voice={{ ...voice, quality: output }} onUpdated={created} onSelect={selected} />));
+  await click("试听实际音色"); expect(button("确认使用此音色").disabled).toBe(false);
+  await click("重新检查输出"); await click("停止等待检查");
+  expect(container.textContent).toContain("已停止等待输出检查");
+  expect(button("确认使用此音色").disabled).toBe(true); expect(selected).not.toHaveBeenCalled();
+});
+it("supports cancelling a generation wait and checking the same uncertain attempt", async () => {
+  vi.mocked(voiceService.design).mockImplementation((_request, signal) => new Promise((_, reject) => {
+    signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+  }));
+  render(); await click("温柔知性"); await click("生成并保存可复用音色"); await click("停止等待");
+  expect(container.textContent).toContain("检查保存结果"); expect(created).not.toHaveBeenCalled();
+  const before = vi.mocked(voiceService.design).mock.calls[0]![0];
+  vi.mocked(voiceService.design).mockResolvedValue({ voice: { ...voice, id: before.id }, synthesis_validation: "unevaluated" });
+  await click("使用同一 ID 重试"); expect(vi.mocked(voiceService.design).mock.calls[1]![0]).toEqual(before);
+});
+it("clears a deleted generated candidate and returns to its editable description", async () => {
+  render(); await click("温柔知性"); await click("生成并保存可复用音色");
+  const id = vi.mocked(voiceService.design).mock.calls[0]![0].id;
+  await act(async () => root.render(<VoiceDesignPanel canRegister canPreview onCreated={created} onSelect={selected} onBusyChange={busy} deletedVoiceId={id} />));
+  expect(container.querySelector("#design-instruction-input")).not.toBeNull();
+  expect(container.textContent).not.toContain("确认使用此音色");
+});

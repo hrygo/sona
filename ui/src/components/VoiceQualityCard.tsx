@@ -59,12 +59,19 @@ export function VoiceQualityCard({
     && !hasAcceptedSynthesis({ id: "", name: "", is_system: false, quality: scopedReport });
   const status = pending || incompleteOutput ? "unevaluated" : scopedReport?.status ?? localResult?.status ?? "unevaluated";
   const baseMeta = STATUS_META[status];
+  const scopedMeta = scope && status === "reject" ? {
+    ...baseMeta, detail: scope === "synthesis"
+      ? "本轮合成未通过。候选仍已保存，可重新检查；效果不满意时返回修改描述或重新录音。"
+      : "参考未通过，请查看原因；修改描述生成新参考，或修正文字、重新录音。",
+  } : scope === "synthesis" && status === "warn" ? {
+    ...baseMeta, detail: "本轮输出存在风险，尚不能确认使用。请查看原因后重新检查。",
+  } : baseMeta;
   const meta = status === "pass" && scope ? {
     ...baseMeta,
     label: scope === "reference" ? "参考已核验" : "输出检查通过",
     detail: scope === "reference" ? "仅代表参考音频检查，不代表合成输出通过。"
       : "本轮内容与信号检查通过，仍需试听；不等同于声纹或降噪验收。",
-  } : baseMeta;
+  } : scopedMeta;
   const failureCodes = scopedReport?.failure_codes ?? localResult?.failure_codes ?? [];
   const synthesis = scopedReport?.synthesis;
 

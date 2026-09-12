@@ -72,3 +72,33 @@ jobs:
       - run: .venv/bin/python -m ruff check src tests
       - run: .venv/bin/python -m mypy src
       - run: .venv/bin/python -m pytest --cov=sona -ra
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Install isolated browser-test dependencies
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund --prefix ui
+          npm run build --prefix ui
+          uv pip install --python .venv/bin/python 'playwright==1.57.0'
+          .venv/bin/python -m playwright install --with-deps chromium
+      - name: Run voice-studio UX branches against actual Sona HTTP and control routes
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/sona-voice-ux
+          .venv/bin/python scripts/voice_studio_e2e_server.py > /tmp/sona-voice-ux/server.log 2>&1 &
+          SERVER_PID=$!
+          trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
+          .venv/bin/python scripts/voice_studio_e2e.py --output /tmp/sona-voice-ux
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: sona-voice-ux-results
+          path: |
+            /tmp/sona-voice-ux/results.json
+            /tmp/sona-voice-ux/*.png
+            /tmp/sona-voice-ux/server.log
+          if-no-files-found: ignore
+          retention-days: 7

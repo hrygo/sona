@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { VoiceCatalogItem, VoiceDesignRequest } from "../contracts/voiceContract";
 import { SPEECHRAIL_TTS_MODEL, VoiceServiceError, voiceService } from "../services/voiceService";
+import { registrationMayHaveCompleted } from "../services/voiceWorkflow";
 import { playAudioBlob } from "../utils/audioPlayback";
 import { VoiceCandidateReview } from "./VoiceCandidateReview";
 import { DESIGN_REFERENCE_TEXT, VOICE_DESIGN_EXAMPLES, newDesignVoiceId, validateDesignText, type VoiceDesignExample } from "./voiceDesignExamples";
@@ -9,8 +10,11 @@ import "./VoiceDesignPanel.css";
 interface Props {
   readonly canRegister: boolean;
   readonly canPreview: boolean;
+  readonly deletedVoiceId?: string;
+  readonly externalBusy?: boolean;
+  readonly onDirtyChange?: (dirty: boolean) => void;
   readonly onCreated: (voice: VoiceCatalogItem) => void;
-  readonly onSelect: (id: string) => void;
+  readonly onSelect: (id: string) => void | boolean | Promise<void | boolean>;
   readonly onBusyChange: (busy: boolean) => void;
 }
 
@@ -23,13 +27,14 @@ function designErrorMessage(error: unknown): string {
     if (error.code === "mode_conflict") return "会议或字幕正在占用音频资源。请先结束该模式，再创建音色；当前尚未注册。";
     if (error.status === 409) return "此注册 ID 已存在，可能是上次请求已完成。请先检查保存结果，不会覆盖已有音色。";
     if (error.status === 429) return "语音资源正在使用中，请在会议、字幕或其他语音任务结束后重试。";
+    if (error.status >= 500 && !registrationMayHaveCompleted(error)) return "生成或参考核验未完成，尚未保存音色。请检查服务，可以修改后重试。";
     if (error.status === 0 || error.status >= 500) return "尚未确认注册结果。请先检查档案库，避免重复创建；重试将保留同一注册 ID。";
     return error.message;
   }
   return "注册未完成，请检查服务状态后重试。";
 }
 
-export function VoiceDesignPanel({ canRegister, canPreview, onCreated, onSelect, onBusyChange }: Props) {
+export function VoiceDesignPanel({ canRegister, canPreview, onCreated, onSelect, onBusyChange, deletedVoiceId, externalBusy = false, onDirtyChange }: Props) {
   const [name, setName] = useState("");
   const [instruction, setInstruction] = useState("");
   const [reference, setReference] = useState(DESIGN_REFERENCE_TEXT);
@@ -41,6 +46,8 @@ export function VoiceDesignPanel({ canRegister, canPreview, onCreated, onSelect,
   const [uncertain, setUncertain] = useState(false);
   const [voice, setVoice] = useState<VoiceCatalogItem | null>(null);
   const [attempt, setAttempt] = useState<VoiceDesignRequest | null>(null);
+  const [candidateBusy, setCandidateBusy] = useState(false);
+  const [restartRequested, setRestartRequested] = useState(false);
   const [previewed, setPreviewed] = useState(false);
   const mounted = useRef(true);
   const inFlight = useRef(false);
@@ -51,6 +58,23 @@ export function VoiceDesignPanel({ canRegister, canPreview, onCreated, onSelect,
     return () => { mounted.current = false; controller.current?.abort(); };
   }, []);
   useEffect(() => { if (!voice) onBusyChange(busy !== null); }, [busy, voice, onBusyChange]);
+
+  useEffect(() => {
+    const edited = !voice && (uncertain || Boolean(instruction.trim() && instruction !== selected?.instruction)
+      || Boolean(name.trim() && name !== selected?.name) || reference !== DESIGN_REFERENCE_TEXT || seedText !== "42");
+    onDirtyChange?.(edited);
+  }, [voice, uncertain, instruction, name, selected, reference, seedText, onDirtyChange]);
+
+  function resumeEditing() {
+    setVoice(null); setAttempt(null); setUncertain(false); setPreviewed(false);
+    setRestartRequested(false); setError(""); setCandidateBusy(false); onBusyChange(false);
+  }
+  useEffect(() => {
+    if (deletedVoiceId && voice?.id === deletedVoiceId) {
+      setVoice(null); setAttempt(null); setUncertain(false); setCandidateBusy(false);
+      setError("候选音色已删除，描述已保留，可以修改后重新创建。");
+    }
+  }, [deletedVoiceId, voice?.id]);
 
   function applyExample(example: VoiceDesignExample) {
     if (!name.trim() || name === selected?.name) setName(example.name);
@@ -67,22 +91,22 @@ export function VoiceDesignPanel({ canRegister, canPreview, onCreated, onSelect,
     return validateDesignText(instruction, reference, Number(seedText));
   }
   async function preview() {
-    if (inFlight.current || !canPreview) return;
+    if (inFlight.current || externalBusy || !canPreview) return;
     const invalid = validateDesignText(instruction, reference, seedText.trim() ? Number(seedText) : NaN);
     if (invalid) { setError(invalid); return; }
-    inFlight.current = true; setBusy("preview"); setError("");
+    inFlight.current = true; setBusy("preview"); setPreviewed(false); setError("");
     const abort = new AbortController(); controller.current = abort;
     try {
       const audio = await voiceService.preview({ model: SPEECHRAIL_TTS_MODEL,
         input: reference.trim(), instruction: instruction.trim(), seed: Number(seedText),
         language: "zh", response_format: "wav" }, abort.signal);
       await playAudioBlob(audio, abort.signal);
-      if (mounted.current) setPreviewed(true);
-    } catch (cause) { if (mounted.current && !abort.signal.aborted) setError(designErrorMessage(cause)); }
+      if (mounted.current && !abort.signal.aborted) setPreviewed(true);
+    } catch { if (mounted.current && !abort.signal.aborted) setError("草稿试听未完成，未创建音色。请检查语音服务后重试，也可以修改描述。"); }
     finally { inFlight.current = false; if (mounted.current) setBusy(null); }
   }
   async function register() {
-    if (inFlight.current || !canRegister) return;
+    if (inFlight.current || externalBusy || !canRegister) return;
     const invalid = validation();
     if (invalid) { setError(invalid); return; }
     inFlight.current = true; setBusy("register"); setError("");
@@ -97,13 +121,12 @@ export function VoiceDesignPanel({ canRegister, canPreview, onCreated, onSelect,
     setAttempt(request);
     sent = true;
       const result = await voiceService.design(request, abort.signal);
-      if (!mounted.current) return;
+      if (!mounted.current || abort.signal.aborted) return;
       setVoice(result.voice); setUncertain(false); onCreated(result.voice);
     } catch (cause) {
-      if (!mounted.current || abort.signal.aborted) return;
-      setError(designErrorMessage(cause));
-      setUncertain(sent && (!(cause instanceof VoiceServiceError)
-        || cause.status === 0 || cause.status >= 500 || (cause.status === 409 && cause.code !== "mode_conflict")));
+      if (!mounted.current) return;
+      setError(abort.signal.aborted ? "已停止等待注册，服务端可能已保存。请先检查保存结果，不要直接重复创建。" : designErrorMessage(cause));
+      setUncertain(sent && (abort.signal.aborted || registrationMayHaveCompleted(cause)));
     } finally { inFlight.current = false; if (mounted.current) { setBusy(null); onBusyChange(false); } }
   }
   async function reconcile() {
@@ -112,7 +135,7 @@ export function VoiceDesignPanel({ canRegister, canPreview, onCreated, onSelect,
     const abort = new AbortController(); controller.current = abort;
     try {
       const found = (await voiceService.list(abort.signal)).find((item) => item.id === attempt.id);
-      if (!mounted.current) return;
+      if (!mounted.current || abort.signal.aborted) return;
       if (found?.creation?.origin === "generated" && found.mode === "clone" && found.name === attempt.name && found.creation.seed === attempt.seed) {
         setVoice(found); setUncertain(false); onCreated(found);
       } else setError("暂未找到匹配的已保存音色。请确认服务端任务结束后，再用同一注册 ID 重试；不要反复创建新任务。");
@@ -121,10 +144,12 @@ export function VoiceDesignPanel({ canRegister, canPreview, onCreated, onSelect,
   }
 
   if (voice) return <div className="design-forge-container">
-    <VoiceCandidateReview key={voice.id} voice={voice} onUpdated={onCreated} onSelect={onSelect} onBusyChange={onBusyChange} />
+    <button type="button" className="btn-design-preview" disabled={candidateBusy || externalBusy} onClick={resumeEditing}>基于此描述再设计</button>
+    <p className="voice-flow-help">返回后保留描述，新设计使用新的 ID，不会覆盖已保存的音色。</p>
+    <VoiceCandidateReview key={voice.id} voice={voice} disabled={externalBusy || !canRegister} onUpdated={onCreated} onSelect={onSelect} onBusyChange={(value) => { setCandidateBusy(value); onBusyChange(value); }} />
   </div>;
 
-  const locked = busy !== null || uncertain;
+  const locked = busy !== null || uncertain || externalBusy;
   return <div className="design-forge-container" aria-busy={busy !== null}>
     <section className="voice-example-section" aria-labelledby="voice-examples-heading">
       <div className="voice-section-heading"><span className="voice-step-number">1</span><div>
@@ -181,9 +206,13 @@ export function VoiceDesignPanel({ canRegister, canPreview, onCreated, onSelect,
       <div className="voice-result-actions">
         <button type="button" className="btn-design-preview" disabled={!canPreview || locked || !instruction.trim()}
           onClick={() => void preview()}>{busy === "preview" ? "正在试听草稿…" : "试听草稿"}</button>
-        <button type="button" className="btn-submit-design" disabled={!canRegister || busy !== null || !name.trim() || !instruction.trim()}
+        <button type="button" className="btn-submit-design" disabled={!canRegister || externalBusy || busy !== null || !name.trim() || !instruction.trim()}
           onClick={() => void register()}>{busy === "register" ? "正在生成并核验参考…" : uncertain ? "使用同一 ID 重试" : "生成并保存可复用音色"}</button>
       </div>
+      {busy && <button type="button" className="btn-design-preview" onClick={() => {
+        controller.current?.abort(); setPreviewed(false);
+        if (busy === "preview") setError("草稿试听已停止，可以修改后重试。");
+      }}>{busy === "preview" ? "停止试听" : "停止等待"}</button>}
       <p className="voice-flow-help" aria-live="polite">{busy === "register"
         ? "服务端正在生成参考、检查音频和核对朗读文本。此阶段尚未验证最终合成输出。"
         : previewed ? "已试听草稿。保存时会重新生成并核验参考；最终音色需在保存后另外试听。"
@@ -193,6 +222,12 @@ export function VoiceDesignPanel({ canRegister, canPreview, onCreated, onSelect,
     {uncertain && attempt && <div className="voice-registration-recovery">
       <p className="voice-flow-help">待确认注册 ID：<code>{attempt.id}</code></p>
       <button type="button" className="btn-design-preview" disabled={busy !== null} onClick={() => void reconcile()}>检查保存结果</button>
+      <button type="button" className="btn-design-preview" disabled={busy !== null || externalBusy} onClick={() => setRestartRequested(true)}>修改描述并创建新候选</button>
+      {restartRequested && <div role="group" aria-label="确认新建候选">
+        <p>上次请求可能已经保存。新候选会使用另一 ID，旧候选仍留在档案库，请确认没有重复后再继续。</p>
+        <button type="button" disabled={busy !== null} onClick={resumeEditing}>确认开始新候选</button>
+        <button type="button" onClick={() => setRestartRequested(false)}>保留当前待确认记录</button>
+      </div>}
     </div>}
   </div>;
 }
