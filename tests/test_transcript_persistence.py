@@ -110,7 +110,7 @@ async def test_migration_creates_item_span_and_revision_tables(repository) -> No
 
 @pytest.mark.asyncio
 async def test_completed_item_writes_one_full_body_and_character_spans(repository) -> None:
-    repo, meeting_id, _ = repository
+    repo, meeting_id, schema = repository
 
     result = await repo.append_completed_item(meeting_id, _item())
     items = await repo.get_transcript_items(meeting_id)
@@ -122,6 +122,48 @@ async def test_completed_item_writes_one_full_body_and_character_spans(repositor
     assert items[0].source_item_id == "item-1"
     assert len(spans) == 4
     assert all(not hasattr(span, "text") for span in spans)
+    async with await AsyncConnection.connect(_database_url()) as connection:
+        cursor = await connection.execute(
+            f"SELECT count(*) FROM {schema}.transcript_segments WHERE meeting_id = %s",
+            (meeting_id,),
+        )
+        assert (await cursor.fetchone())[0] == 0
+
+
+@pytest.mark.asyncio
+async def test_legacy_read_switch_keeps_new_facts_for_rollback(repository) -> None:
+    repo, meeting_id, schema = repository
+    await repo.append_completed_item(meeting_id, _item())
+    span = (await repo.get_transcript_attribution_spans(meeting_id))[0]
+
+    async with await AsyncConnection.connect(_database_url()) as connection:
+        await connection.execute(
+            f"""
+            INSERT INTO {schema}.transcript_segments
+                (id, meeting_id, segment_order, source_epoch, speaker_key,
+                 start_ms, end_ms, text, source_session_id, source_segment_uid,
+                 source_item_id, speaker_status, timing_quality)
+            VALUES (%s, %s, 0, 1, '__unknown__', 0, 10, '你',
+                    'session-1', 'unit-0', 'item-1', 'unknown', 'aligned')
+            """,
+            (span.id, meeting_id),
+        )
+
+    legacy_settings = MeetingSettings(
+        database_url=_database_url(),
+        schema=schema,
+        recovery_dir=repo.settings.recovery_dir,
+        transcript_legacy_read_enabled=True,
+        transcript_legacy_write_enabled=True,
+    )
+    legacy_repo = PostgresMeetingRepository(legacy_settings)
+    await legacy_repo.open()
+    try:
+        document = await legacy_repo.get_transcript(meeting_id)
+        assert document.segments[0].text == "你"
+        assert len(await legacy_repo.get_transcript_items(meeting_id)) == 1
+    finally:
+        await legacy_repo.close()
 
 
 @pytest.mark.asyncio

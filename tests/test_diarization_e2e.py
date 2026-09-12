@@ -68,6 +68,7 @@ async def e2e_repo(tmp_path: Path) -> AsyncIterator[PostgresMeetingRepository]:
         database_url=database_url,
         schema=schema,
         recovery_dir=tmp_path / "recovery",
+        transcript_legacy_write_enabled=True,
     )
     await run_migrations(database_url, schema=schema)
     repo = PostgresMeetingRepository(settings)
