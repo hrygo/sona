@@ -122,6 +122,17 @@ it("requires both scoped output acceptance and completed actual audition before 
   await click("确认使用此音色"); expect(selected).toHaveBeenCalledWith(synthesis.voice);
 });
 
+it("merges output evidence with the saved reference evidence", async () => {
+  act(() => root.render(<VoiceCandidateReview voice={voice} onUpdated={created} onSelect={selected} />));
+  await click("检查输出（18 段）");
+  expect(created).toHaveBeenLastCalledWith(expect.objectContaining({
+    quality: expect.objectContaining({
+      reference: reference.reference,
+      synthesis: output.synthesis,
+    }),
+  }));
+});
+
 it.each(["warn", "reject", "unevaluated"] as const)("does not activate with a %s output report", async (status) => {
   vi.mocked(voiceService.qualityRun).mockResolvedValue({ ...output, status });
   act(() => root.render(<VoiceCandidateReview voice={voice} onUpdated={created} onSelect={selected} />));

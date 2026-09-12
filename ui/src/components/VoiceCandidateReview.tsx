@@ -1,5 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { hasAcceptedSynthesis, synthesisQuality, type VoiceCatalogItem } from "../contracts/voiceContract";
+import {
+  hasAcceptedSynthesis,
+  synthesisQuality,
+  type VoiceCatalogItem,
+  type VoiceQualityReport,
+} from "../contracts/voiceContract";
 import { SPEECHRAIL_TTS_MODEL, voiceService } from "../services/voiceService";
 import { playAudioBlob } from "../utils/audioPlayback";
 import { VoiceQualityCard } from "./VoiceQualityCard";
@@ -10,6 +15,18 @@ interface Props {
   readonly onUpdated: (voice: VoiceCatalogItem) => void;
   readonly onSelect: (id: string) => void | boolean | Promise<void | boolean>;
   readonly onBusyChange?: (busy: boolean) => void;
+}
+
+function mergeQualityReports(
+  existing: VoiceQualityReport | undefined,
+  incoming: VoiceQualityReport | undefined,
+): VoiceQualityReport | undefined {
+  if (!incoming) {
+    return existing?.reference ? { ...existing, synthesis: undefined } : undefined;
+  }
+  return existing?.reference
+    ? { ...incoming, reference: existing.reference }
+    : incoming;
 }
 
 /** Registration/reference evidence never stands in for synthesized-output evidence. */
@@ -36,13 +53,13 @@ export function VoiceCandidateReview({ voice, onUpdated, onSelect, onBusyChange,
     const abort = new AbortController();
     controller.current = abort;
     setBusy("quality"); setOutput(undefined); setHeard(false); setActivated(false); setMessage(""); setPlaybackMessage("");
-    onUpdated({ ...voice, quality: undefined });
+    onUpdated({ ...voice, quality: mergeQualityReports(voice.quality, undefined) });
     try {
       const report = await voiceService.qualityRun(voice.id, { runs: 3 }, abort.signal);
       if (!mounted.current || abort.signal.aborted) return;
       const scoped = synthesisQuality(report);
       setOutput(scoped);
-      if (scoped) onUpdated({ ...voice, quality: scoped });
+      if (scoped) onUpdated({ ...voice, quality: mergeQualityReports(voice.quality, scoped) });
       else setMessage("未收到合成输出报告，不能把参考验收视为输出通过。请确认 SpeechRail 版本。");
     } catch {
       if (mounted.current && !abort.signal.aborted) {

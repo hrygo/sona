@@ -2061,6 +2061,8 @@ class TestGeneratedVoiceProxy:
         ):
             response = client.post("/v1/voices/designs", content=body, headers=headers)
         assert response.status_code == 413
+        if declared:
+            assert "64 KiB" in response.json()["error"]["message"]
         post.assert_not_awaited()
 
     @pytest.mark.parametrize("exception", [httpx.ConnectError, httpx.ReadTimeout])

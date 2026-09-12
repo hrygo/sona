@@ -638,6 +638,12 @@ export function VoiceStudioModal({
     } finally { selectInFlight.current = false; if (isMountedRef.current) setSelectingVoiceId(null); }
   }
 
+  const handleCandidateUpdated = useCallback((updatedVoice: VoiceCatalogItem) => {
+    setLastClonedVoice((current) => current?.id === updatedVoice.id ? updatedVoice : current);
+    setReviewingVoice((current) => current?.id === updatedVoice.id ? updatedVoice : current);
+    onVoiceCreated(updatedVoice);
+  }, [onVoiceCreated]);
+
   /* ====================== 试听生成与播放 ====================== */
   const handleAuditionVoice = useCallback(async (vItem: VoiceCatalogItem) => {
     if (auditionInFlight.current || operationBusy || muteState !== "ready") return;
@@ -913,7 +919,7 @@ export function VoiceStudioModal({
             {/* Tab 1: 声音克隆 (Voice Clone) 创设流程 */}
             {reviewingVoice && <div className="design-forge-container">
               <button type="button" className="btn-design-preview" disabled={reviewBusy} onClick={() => setReviewingVoice(null)}>返回创建声音</button>
-              <VoiceCandidateReview key={reviewingVoice.id} voice={reviewingVoice} onUpdated={onVoiceCreated}
+              <VoiceCandidateReview key={reviewingVoice.id} voice={reviewingVoice} onUpdated={handleCandidateUpdated}
                 disabled={!canClone || muteState !== "ready" || refreshing || auditioningVoiceId !== null}
                 onSelect={selectVoice} onBusyChange={setReviewBusy} />
             </div>}
@@ -1120,7 +1126,7 @@ export function VoiceStudioModal({
                     {cloneStage === "success" && lastClonedVoice && (
                       <VoiceCandidateReview key={lastClonedVoice.id} voice={lastClonedVoice}
                         disabled={!canClone || muteState !== "ready" || refreshing || auditioningVoiceId !== null}
-                        onUpdated={onVoiceCreated} onSelect={selectVoice} onBusyChange={setReviewBusy} />
+                        onUpdated={handleCandidateUpdated} onSelect={selectVoice} onBusyChange={setReviewBusy} />
                     )}
                   </section>
                 )}

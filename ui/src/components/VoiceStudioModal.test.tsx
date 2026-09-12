@@ -511,7 +511,7 @@ interface CloneFetchResult {
   fetchMock: ReturnType<typeof vi.fn>;
 }
 
-function stubCloneFetch(): CloneFetchResult {
+function stubCloneFetch(outputProbeCount = 3): CloneFetchResult {
   const cloneBodies: FormData[] = [];
   const fetchMock = vi.fn(async (url: unknown, init?: RequestInit) => {
     const path = String(url);
@@ -547,7 +547,12 @@ function stubCloneFetch(): CloneFetchResult {
           status: "pass",
           run_id: "vqr-test",
           tested_at: "2026-09-09T10:00:00Z",
-          synthesis: { probe_count: 3, successful_probe_count: 3, deterministic: true },
+          synthesis: {
+            probe_count: outputProbeCount,
+            successful_probe_count: outputProbeCount,
+            deterministic: true,
+            transcript_match: 1,
+          },
           failure_codes: [],
         }),
       };
@@ -683,6 +688,35 @@ it("uploads the original recording unchanged and does not auto-run output checks
   expect(container.textContent).toContain("尚未评估");
   expect(onSelectVoice).not.toHaveBeenCalled();
   expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/v1/voices/clone/validate"))).toBe(true);
+});
+
+it("retains clone output evidence when switching creation tabs after the check", async () => {
+  const events: string[] = [];
+  const { recorders } = stubRecordingEnvironment(events);
+  const { cloneBodies } = stubCloneFetch(18);
+
+  try {
+    await recordSampleAudio(events, recorders);
+    await submitCloneWith("我的测试音色");
+    await waitForCloneRequest(cloneBodies);
+    await vi.waitFor(() => expect(container.textContent).toContain("输出待检查"));
+
+    await act(async () => {
+      Array.from(container.querySelectorAll<HTMLButtonElement>("button"))
+        .find((button) => button.textContent?.includes("检查输出（18 段）"))!.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => expect(container.textContent).toContain("输出检查通过"));
+
+    const tabs = Array.from(container.querySelectorAll<HTMLButtonElement>(".forge-tab-btn"));
+    act(() => tabs.find((button) => button.textContent?.includes("自然语言设计"))!.click());
+    act(() => tabs.find((button) => button.textContent?.includes("参考录音"))!.click());
+
+    expect(container.textContent).toContain("输出检查通过");
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 it("leaves browser-uninspectable audio for the server preflight without altering its bytes", async () => {

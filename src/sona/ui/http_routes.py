@@ -186,11 +186,17 @@ def _declared_body_size(request: Request, *, limit: int) -> Response | None:
             retryable=False,
         )
     if content_length > limit:
+        if limit % (1024 * 1024) == 0:
+            limit_text = f"{limit // (1024 * 1024)} MiB"
+        elif limit % 1024 == 0:
+            limit_text = f"{limit // 1024} KiB"
+        else:
+            limit_text = f"{limit} B"
         return _error_response(
             request,
             status_code=413,
             code="payload_too_large",
-            message=f"请求体过大（上限 {limit // (1024 * 1024)} MiB）",
+            message=f"请求体过大（上限 {limit_text}）",
             retryable=False,
         )
     return None
