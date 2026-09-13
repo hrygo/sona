@@ -145,8 +145,68 @@ async def test_reconciliation_page_keeps_item_rows_together(reconciliation_repos
         assert [row.text for row in rows] == ["你", "好"]
         assert next_cursor == high_id
 
+        # 游标落在同一 source item 中间时，下一页仍必须重放完整 item，
+        # 不能只返回 cursor 之后的后半段正文。
+        resumed_rows, resumed_cursor = await script._load_rows(
+            connection, schema, batch_size=1, after_id=low_id
+        )
+        assert [row.text for row in resumed_rows] == ["你", "好"]
+        assert resumed_cursor == high_id
+
         remaining, remaining_cursor = await script._load_rows(
             connection, schema, batch_size=1, after_id=next_cursor
         )
         assert remaining == []
         assert remaining_cursor is None
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_apply_is_text_conserving_and_idempotent(
+    reconciliation_repository,
+) -> None:
+    database_url, schema, meeting_id = reconciliation_repository
+    async with await AsyncConnection.connect(database_url) as connection:
+        await connection.execute(
+            f"""
+            INSERT INTO "{schema}".transcript_segments
+                (id, meeting_id, segment_order, source_epoch, speaker_key,
+                 start_ms, end_ms, text, source_session_id, source_segment_uid,
+                 source_item_id, speaker_status, timing_quality)
+            VALUES
+                (%s, %s, 0, 1, '__unknown__', 0, 100, '你',
+                       'session-apply', 'unit-0', 'item-apply', 'unknown', 'aligned'),
+                (%s, %s, 1, 1, '__unknown__', 100, 200, '好',
+                       'session-apply', 'unit-1', 'item-apply', 'unknown', 'aligned')
+            """,
+            (UUID("00000000-0000-0000-0000-000000000010"), meeting_id,
+             UUID("00000000-0000-0000-0000-000000000011"), meeting_id),
+        )
+        script = _reconciliation_script()
+        rows, cursor = await script._load_rows(
+            connection, schema, batch_size=1, after_id=None
+        )
+        report = build_reconciliation_report(rows, next_cursor=str(cursor))
+        assert report.ready is True
+        assert report.items[0].text == "你好"
+
+        async with connection.transaction():
+            await script._apply_item(connection, schema, report.items[0])
+        async with connection.transaction():
+            await script._apply_item(connection, schema, report.items[0])
+
+        item_cursor = await connection.execute(
+            f"SELECT text FROM \"{schema}\".transcript_items WHERE meeting_id = %s",
+            (meeting_id,),
+        )
+        span_cursor = await connection.execute(
+            f"""
+            SELECT count(*)
+            FROM "{schema}".transcript_attribution_spans
+            WHERE item_id IN (
+                SELECT id FROM "{schema}".transcript_items WHERE meeting_id = %s
+            )
+            """,
+            (meeting_id,),
+        )
+        assert [row[0] for row in await item_cursor.fetchall()] == ["你好"]
+        assert (await span_cursor.fetchone())[0] == 2

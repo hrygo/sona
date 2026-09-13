@@ -65,8 +65,8 @@
 | AC-MEET-01 | issue/spec 6.3 | completed event 校验 item/spans，事务写两表后广播 DisplayBlock | T2,T3 | session/repository integration tests | pass (T3 runtime event) |
 | AC-MEET-02 | spec 6.3 | diarization patch 重新投影但不重写正文事实 | T2,T3 | patch event test | pass (T2 facts + T3 event) |
 | AC-MEET-03 | spec 8.2 | DB 暂时不可用时 recovery journal 保证正文/patch 可恢复 | T2,T3,T8 | existing recovery suite + new replay tests | pass (T2 repository integration) |
-| AC-MEET-04 | spec 8.2 | diarization off/pending/degraded 不阻塞正文展示和 EOF 封存 | T3,T8 | barrier state tests | pending |
-| AC-MEET-05 | project AGENTS | 单一 PCM owner；assistant/subtitles/meeting 不双重消费 | T3,T5,T8 | runtime coordinator regression suite | pending |
+| AC-MEET-04 | spec 8.2 | diarization off/pending/degraded 不阻塞正文展示和 EOF 封存 | T3,T8 | `tests/test_meeting_finalization.py` barrier/degraded/off tests | pass |
+| AC-MEET-05 | project AGENTS | 单一 PCM owner；assistant/subtitles/meeting 不双重消费 | T3,T5,T8 | `tests/test_runtime_mode.py` transition/owner regression suite | pass |
 | AC-API-01 | spec 8.1 | `segments` 兼容字段保留，由 projector/adapter 生成 | T3 | OpenAPI fixture + API tests | pass (T3 adapter) |
 | AC-API-02 | spec 8.1 | 新增可选 `display_blocks`，客户端不能提交为事实 | T3,T6 | schema/API request rejection tests | pass (T3 schema/event) |
 | AC-API-03 | spec 8.1 | 默认不返回 span 明细，显式诊断请求才返回 | T3 | API permission/shape tests | pass |
@@ -91,19 +91,19 @@
 | AC-UI-06 | spec 7 | `role=log` / `role=status` 只对完整 block、重连、降级通知 | T6 | accessible viewer/live log tests | pass |
 | AC-UI-07 | issue/spec 7 | 证据点击定位到可读 block/time，不打开逐字稿 | T4,T6 | block/item anchor + evidence navigation test | pass |
 | AC-UI-08 | issue #14 页面验收补充 | 实时字幕优先渲染 `display_blocks`；旧逐字/逐行 `lines` payload 必须先聚合为可读 block，不能逐字创建字幕卡片 | T5,T6 | `SubtitleStream.test.tsx` legacy character regression + browser page smoke on independent worktree | pass |
-| AC-RAIL-01 | issue 14 | SpeechRail completed 事件补 source item、sequence、event version | T7 | SpeechRail contract tests | pending |
-| AC-RAIL-02 | issue 14 | SpeechRail 补结构化诊断字段 | T7 | protocol fixture/schema tests | pending |
-| AC-RAIL-03 | issue 14 | 空文本、重复 UID、越界时间、字符级 unit 契约测试 | T7 | negative contract tests | pending |
-| AC-RAIL-04 | issue/spec | SpeechRail 不做 UI 专用合并，不改变 completed/diarization 事实语义 | T7 | diff/contract assertions | pending |
+| AC-RAIL-01 | issue 14 | SpeechRail completed 事件补 source item、sequence、event version | T7 | SpeechRail `84b12d4b` + `tests/test_diarization_extensions.py` | pass |
+| AC-RAIL-02 | issue 14 | SpeechRail 补结构化诊断字段 | T7 | SpeechRail `84b12d4b` + contract fixtures/schema tests | pass |
+| AC-RAIL-03 | issue 14 | 空文本、重复 UID、越界时间、字符级 unit 契约测试 | T7 | `tests/test_diarization_extensions.py` negative contract tests | pass |
+| AC-RAIL-04 | issue/spec | SpeechRail 不做 UI 专用合并，不改变 completed/diarization 事实语义 | T7 | SpeechRail source diff + 20 protocol tests; merge is in `origin/main` | pass |
 | AC-MIG-01 | spec 9 | migration 可重复执行，schema/indices/constraints 正确 | T2 | migration integration test | pass |
-| AC-MIG-02 | spec 9 | 历史旧表 source UID 对账，正文守恒报告无遗漏 | T8 | reconciliation script + fixture report | pending |
-| AC-MIG-03 | spec 9 | 发布窗口内旧表只读，新会议停止写旧表 | T8 | write-path guard + integration test | pending |
-| AC-MIG-04 | spec 9 | rollback 可恢复旧读路径且不删除新事实 | T8 | rollback simulation | pending |
-| AC-QUALITY-01 | issue | Python 全量 pytest 通过，coverage `fail_under=80` | T9 | `SONA_TEST_DATABASE_URL=... uv run pytest tests/` | pending |
-| AC-QUALITY-02 | project AGENTS | `uv run mypy src/` 通过 | T9 | exit 0 | pending |
-| AC-QUALITY-03 | project AGENTS | `uv run ruff check src/ tests/` 通过 | T9 | exit 0 | pending |
-| AC-QUALITY-04 | issue | `cd ui && npm test -- --run` 通过 | T9 | exit 0 + test count | pending |
-| AC-QUALITY-05 | issue | `cd ui && npm run build` 通过 | T9 | exit 0 | pending |
+| AC-MIG-02 | spec 9 | 历史旧表 source UID 对账，正文守恒报告无遗漏 | T8 | reconciliation report/apply + temporary-schema integration tests | pass |
+| AC-MIG-03 | spec 9 | 发布窗口内旧表只读，新会议停止写旧表 | T8 | default `transcript_legacy_write_enabled=false` + zero legacy-row test | pass |
+| AC-MIG-04 | spec 9 | rollback 可恢复旧读路径且不删除新事实 | T8 | `test_legacy_read_switch_keeps_new_facts_for_rollback` | pass |
+| AC-QUALITY-01 | issue | Python 全量 pytest 通过，coverage `fail_under=80` | T9 | `SONA_TEST_DATABASE_URL=postgresql:///knowledge uv run pytest tests/` → `83.34%` | pass |
+| AC-QUALITY-02 | project AGENTS | `uv run mypy src/` 通过 | T9 | `Success: no issues found in 112 source files` | pass |
+| AC-QUALITY-03 | project AGENTS | `uv run ruff check src/ tests/` 通过 | T9 | `All checks passed!` | pass |
+| AC-QUALITY-04 | issue | `cd ui && npm test -- --run` 通过 | T9 | `51 files / 477 passed` | pass |
+| AC-QUALITY-05 | issue | `cd ui && npm run build` 通过 | T9 | `tsc --noEmit` + Vite production build exit 0 | pass |
 | AC-QUALITY-06 | skill | correctness/readability/architecture/security/performance 五轴 review 无 Critical/Required 未处理项 | T9 | review checklist in PR description | pending |
 
 矩阵完整性规则：任何新增行为必须新增 AC ID 或明确归入现有 AC；任何修改文件必须在对应任务的 Files 列出现；任何 AC 必须有至少一个自动化证据，UI/迁移/跨服务项目可追加人工或 diff 证据，但不能只写“人工确认”。最终 PR 描述必须逐项引用本矩阵的 AC ID 和验证结果。
@@ -304,11 +304,18 @@
 **Interfaces:**
 - Sona consumes source item identity, sequence, event version and structured diagnostics without UI-specific merge semantics.
 
-- [ ] Step 1: Compare current SpeechRail event payloads with AC-RAIL-01–04 and write RED contract tests for missing/invalid fields.
-- [ ] Step 2: Implement only the additive protocol fields and validation.
-- [ ] Step 3: Run SpeechRail focused/full contract tests and record the commit/PR dependency.
-- [ ] Step 4: Verify AC-RAIL-01–04 and update the Sona PR description with exact upstream commit or linked PR.
-- [ ] Step 5: Commit `feat(protocol): 补充转录 source identity 与诊断字段` in SpeechRail if needed.
+- [x] Step 1: Compare current SpeechRail event payloads with AC-RAIL-01–04 and write RED contract tests for missing/invalid fields.
+- [x] Step 2: Implement only the additive protocol fields and validation.
+- [x] Step 3: Run SpeechRail focused/full contract tests and record the commit/PR dependency.
+- [x] Step 4: Verify AC-RAIL-01–04 and update the Sona PR description with exact upstream commit or linked PR.
+- [x] Step 5: Commit `feat(protocol): 补充转录 source identity 与诊断字段` in SpeechRail if needed.
+
+#### 验收记录
+
+- Commit: `84b12d4b feat(protocol): 补充转录事件版本与诊断字段`（已在 SpeechRail `origin/main`）
+- AC: `AC-RAIL-01–04` 全部 `pass`
+- Tests: `PYTHONPATH=/Users/hrygo/Documents/SpeechRail-issue-14/src /Users/hrygo/Documents/SpeechRail/.venv/bin/pytest -o addopts='' -q tests/test_diarization_extensions.py` → `20 passed`
+- Scope: SpeechRail 仅补充版本、source identity、sequence、diagnostics 与 schema/fixture 校验；未将 UI 合并语义放入 SpeechRail。
 
 ## Task 8: Historical Reconciliation and Rollback Window
 
@@ -319,12 +326,20 @@
 **Interfaces:**
 - Reconciliation is explicit, dry-run capable, bounded, resumable and reports source UID/text conservation; it never deletes old rows.
 
-- [ ] Step 1: Write RED tests for dry-run, duplicate UID detection, text conservation, resumability and rollback read path.
-- [ ] Step 2: Implement reconciliation report and bounded migration guard.
-- [ ] Step 3: Run against isolated fixtures and a temporary schema; do not point tests at production DSN.
-- [ ] Step 4: Enable new-write/old-read window only after report is clean; keep rollback switch documented.
-- [ ] Step 5: Verify AC-MIG-02–04 and AC-MEET-04/05; update matrix.
-- [ ] Step 6: Commit `feat(migration): 增加历史转录对账与回滚窗口`.
+- [x] Step 1: Write RED tests for dry-run, duplicate UID detection, text conservation, resumability and rollback read path.
+- [x] Step 2: Implement reconciliation report and bounded migration guard.
+- [x] Step 3: Run against isolated fixtures and a temporary schema; do not point tests at production DSN.
+- [x] Step 4: Enable new-write/old-read window only after report is clean; keep rollback switch documented.
+- [x] Step 5: Verify AC-MIG-02–04 and AC-MEET-04/05; update matrix.
+- [x] Step 6: Commit `feat(migration): 增加历史转录对账与回滚窗口`.
+
+#### 验收记录
+
+- Commit: `280855b feat(migration): 增加历史转录对账与回滚窗口` plus follow-up cursor fix in the current Sona task commit
+- AC: `AC-MIG-02–04`、`AC-MEET-04/05` 全部 `pass`
+- Tests: `SONA_TEST_DATABASE_URL=postgresql:///knowledge uv run pytest -o addopts='' -q tests/test_transcript_reconciliation.py tests/test_transcript_persistence.py` → `18 passed`; barrier/runtime suite → `175 passed`
+- Lint: `uv run ruff check scripts/reconcile-transcript-items.py tests/test_transcript_reconciliation.py` → `All checks passed!`
+- Other evidence: reconciliation pages select complete source items by group cursor; apply is text-conserving and idempotent; default new writes leave `transcript_segments` unchanged; rollback read switch preserves new facts.
 
 ## Task 9: Final Quality Gate, Review and PR
 
