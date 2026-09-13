@@ -32,7 +32,7 @@
 | T3 | 会议 session、实时事件、API、WS 和兼容 `segments` 接入 projector | `session.py`, `events.py`, `api.py`, `websocket_routes.py`, `contracts/` | T2 |
 | T4 | SRT/Markdown/TXT/JSON 导出和 summary / Inner OS 的 `ModelTranscript` 输入 | `meeting/summary/`, `inner_os/`, `minutes_rendering.py`, `api.py`, `tests/` | T1–T3 |
 | T5 | 字幕内存 projector、partial 原位更新、重连与无数据库运行 | `subtitles/`, `tests/subtitles/` | T1 |
-| T6 | 前端阅读视图、speaker 状态、自动跟随、兼容 payload 和可访问性 | `ui/src/components/meeting/`, `ui/src/contracts/`, `ui/src/stores/`, `ui/src/services/`, `ui/src/**/*.test.*` | T3–T5 |
+| T6 | 前端阅读视图、speaker 状态、自动跟随、兼容 payload 和可访问性 | `ui/src/components/meeting/`, `ui/src/contracts/`, `ui/src/stores/`, `ui/src/services/`, `ui/src/utils/exportUtils.ts`, `ui/src/utils/exportUtils.test.ts`, `ui/src/**/*.test.*` | T3–T5 |
 | T7 | SpeechRail source identity / sequence / event version / diagnostics 契约 | `/Users/hrygo/Documents/SpeechRail` 对应独立 worktree或 PR | T1–T3 |
 | T8 | 历史数据对账、停止新写旧表、回滚窗口和文档 | `scripts/`, `docs/operations/`, `tests/` | T2–T7 |
 | T9 | 全量门禁、五轴 code review、PR | Git/VCS/CI | T0–T8 |
@@ -71,9 +71,10 @@
 | AC-API-02 | spec 8.1 | 新增可选 `display_blocks`，客户端不能提交为事实 | T3,T6 | schema/API request rejection tests | pass (T3 schema/event) |
 | AC-API-03 | spec 8.1 | 默认不返回 span 明细，显式诊断请求才返回 | T3 | API permission/shape tests | pass |
 | AC-API-04 | spec 8.1 | subtitle payload 兼容旧客户端并增加语义化 speaker status | T3,T5,T6 | fixture validation + TS decoder tests | pass (T3 additive contract) |
-| AC-EXPORT-01 | issue/spec 6 | SRT/Markdown/TXT/JSON 统一从 projector 生成 | T4 | export tests across formats | pass |
+| AC-EXPORT-01 | issue/spec 6 | SRT/Markdown/TXT/JSON 统一从 projector 生成 | T4 | backend export tests across formats + frontend `exportUtils` readable-block tests | pass |
 | AC-EXPORT-02 | spec 5.3 | 导出文本守恒，不 trim、重写、去重或 overlap merge | T4 | exact output/text conservation tests | pass |
 | AC-EXPORT-03 | project AGENTS | 会议不写 `runtime/subtitles/current.srt` 作为事实源 | T4,T5 | filesystem side-effect test | pass (T4 export path no new side effect) |
+| AC-EXPORT-04 | issue #14 页面验收补充 | 实时字幕与会议助手的 Copy/Markdown/TXT/SRT/JSON 及 `current.srt` 只消费完整 `DisplayBlock`；旧 character lines 不得直接导出为逐字记录 | T4,T5,T6 | UI export regression + meeting legacy-export regression + `SrtArchive` display-block precedence test | pass |
 | AC-AI-01 | issue/spec 6.4 | summary 只消费 confirmed `ModelTranscript`，不消费 span/fragment | T4 | prompt/evidence fixture assertions | pass |
 | AC-AI-02 | issue/spec 6.4 | Inner OS 使用相同 `ModelTranscript` builder，focus/recent 截断不产生字符证据 | T4 | context snapshot tests | pass |
 | AC-AI-03 | issue/spec 6.4 | evidence 使用 `[B0001]` 级完整 block alias，可回定位 block/time | T4,T6 | summary validator + API/UI link tests | pass (T4 model/evidence) |
@@ -81,7 +82,7 @@
 | AC-AI-05 | project AGENTS | summary/Inner OS 失败不影响正文入库、字幕和阅读展示 | T3,T4,T5 | failure isolation integration tests | pass (existing failure isolation + new adapter) |
 | AC-SUB-01 | spec 6.2 | 字幕无 PostgreSQL 仍运行 | T5 | pure projector + focused no-DB tests | pass |
 | AC-SUB-02 | spec 6.2 | partial 始终一个底部 block，delta 原位更新 | T5 | projector/session state tests | pass |
-| AC-SUB-03 | spec 6.2 | reconnect 重放 snapshot，不重复/丢失 confirmed 文本 | T5 | existing reconnect replay tests + stable display blocks | pass |
+| AC-SUB-03 | spec 6.2 | reconnect 重放 snapshot，不重复/丢失 confirmed 文本，且不同 source epoch 不串成一个展示块 | T5 | existing reconnect replay tests + stable display-block/epoch identity regression | pass |
 | AC-SUB-04 | spec 6.2 | 字幕启用 speaker 时只接收 metadata，不重建正文 | T5 | speaker revision identity/text conservation test | pass |
 | AC-UI-01 | issue/spec 7 | 只有一个可读会议 transcript 视图，移除逐字/原子/时序入口 | T6 | component tree + UI tests + source audit | pass |
 | AC-UI-02 | spec 7 | block 显示 speaker 文本标签、状态徽标、轻量时间和完整正文 | T6 | semantic display-block component test | pass |
@@ -99,12 +100,12 @@
 | AC-MIG-02 | spec 9 | 历史旧表 source UID 对账，正文守恒报告无遗漏 | T8 | reconciliation report/apply + temporary-schema integration tests | pass |
 | AC-MIG-03 | spec 9 | 发布窗口内旧表只读，新会议停止写旧表 | T8 | default `transcript_legacy_write_enabled=false` + zero legacy-row test | pass |
 | AC-MIG-04 | spec 9 | rollback 可恢复旧读路径且不删除新事实 | T8 | `test_legacy_read_switch_keeps_new_facts_for_rollback` | pass |
-| AC-QUALITY-01 | issue | Python 全量 pytest 通过，coverage `fail_under=80` | T9 | `SONA_TEST_DATABASE_URL=postgresql:///knowledge uv run pytest tests/` → `83.34%` | pass |
+| AC-QUALITY-01 | issue | Python 全量 pytest 通过，coverage `fail_under=80` | T9 | `SONA_TEST_DATABASE_URL=postgresql:///knowledge uv run pytest tests/` → `83.31%` | pass |
 | AC-QUALITY-02 | project AGENTS | `uv run mypy src/` 通过 | T9 | `Success: no issues found in 112 source files` | pass |
 | AC-QUALITY-03 | project AGENTS | `uv run ruff check src/ tests/` 通过 | T9 | `All checks passed!` | pass |
-| AC-QUALITY-04 | issue | `cd ui && npm test -- --run` 通过 | T9 | `51 files / 477 passed` | pass |
+| AC-QUALITY-04 | issue | `cd ui && npm test -- --run` 通过 | T9 | `51 files / 481 passed`（含会议/实时字幕可读块导出回归） | pass |
 | AC-QUALITY-05 | issue | `cd ui && npm run build` 通过 | T9 | `tsc --noEmit` + Vite production build exit 0 | pass |
-| AC-QUALITY-06 | skill | correctness/readability/architecture/security/performance 五轴 review 无 Critical/Required 未处理项 | T9 | review checklist in PR description | pending |
+| AC-QUALITY-06 | skill | correctness/readability/architecture/security/performance 五轴 review 无 Critical/Required 未处理项 | T9 | review checklist in PR description and T9 acceptance record | pass |
 
 矩阵完整性规则：任何新增行为必须新增 AC ID 或明确归入现有 AC；任何修改文件必须在对应任务的 Files 列出现；任何 AC 必须有至少一个自动化证据，UI/迁移/跨服务项目可追加人工或 diff 证据，但不能只写“人工确认”。最终 PR 描述必须逐项引用本矩阵的 AC ID 和验证结果。
 
@@ -118,11 +119,17 @@
 **Interfaces:**
 - Produces: numbered AC matrix above, fixture naming convention, baseline test counts and clean feature worktree.
 
-- [ ] Step 1: Record baseline status and test commands without touching user changes.
-- [ ] Step 2: Add only missing baseline fixtures needed by later RED tests.
-- [ ] Step 3: Run focused baseline tests and record actual counts.
-- [ ] Step 4: Verify T0 AC: worktree clean, matrix covers every issue/spec section, no user files changed.
-- [ ] Step 5: Commit `docs: 建立 issue-14 转录重构 AC 矩阵`.
+- [x] Step 1: Record baseline status and test commands without touching user changes.
+- [x] Step 2: Add only missing baseline fixtures needed by later RED tests.
+- [x] Step 3: Run focused baseline tests and record actual counts.
+- [x] Step 4: Verify T0 AC: worktree clean, matrix covers every issue/spec section, no user files changed.
+- [x] Step 5: Commit `docs: 建立 issue-14 转录重构 AC 矩阵`.
+
+#### 验收记录
+
+- Baseline: 独立 worktree `/Users/hrygo/Documents/sona-issue-14`，主 worktree 用户-owned voice 文件未修改；依赖、fixture 和测试入口均已核对。
+- AC: 本矩阵覆盖 issue/spec 的正文事实、归属修订、projector、会议、字幕、导出、AI、UI、SpeechRail、迁移和质量门禁；新增页面验收行为已补 `AC-EXPORT-04`。
+- Commit: `dd9f2d3 docs: 建立 issue-14 转录重构 AC 矩阵`。
 
 ## Task 1: Domain Facts, Projector and ModelTranscript
 
@@ -289,10 +296,11 @@
 
 - Reproduction: 独立 worktree 的旧实时字幕 UI 仍把 `lines` 直接映射为字幕卡片；会议历史页面已能显示可读块，但实时字幕存在同类回退缺口。
 - Fix: `subtitleStore` 接收并优先保存后端 `display_blocks`；旧 payload 无该字段时按同一间隔/长度/强标点边界聚合；`SubtitleStream` 的实时列表和提词模式统一只渲染 block。
-- AC: `AC-UI-08`、`AC-STATUS-03` follow-up pass；off/degraded 在无 speaker key 时仍显示语义状态。
-- Tests: `cd ui && npm test -- --run src/components/SubtitleStream.test.tsx src/stores/subtitleStore.test.ts` → `21 passed`；`cd ui && npm test -- --run` → `51 files / 477 passed`；`cd ui && npm run build` → exit 0。
+- AC: `AC-UI-08`、`AC-STATUS-03` follow-up pass；off/degraded 在无 speaker key 时仍显示语义状态；新增 `AC-EXPORT-04` 覆盖会议/实时字幕导出只消费完整 DisplayBlock。
+- Tests: `cd ui && npm test -- --run src/components/SubtitleStream.test.tsx src/stores/subtitleStore.test.ts` → `22 passed`；`cd ui && npm test -- --run` → `51 files / 481 passed`；`cd ui && npm run build` → exit 0。
 - Browser smoke: `http://127.0.0.1:8101/`（独立 worktree）打开历史会议“会议开场与语音识别测试”，页面显示 `4 个可读块`，无“转录视图切换”或逐字卡片。
-- External dependency: 同页面点击“实时字幕”时，SpeechRail `127.0.0.1:8201/v1/realtime` 返回 HTTP 403；`/health` 返回 `ready=true`，疑似运行实例 API key 不匹配，需在部署环境修正后再做真实麦克风流验收。本补充不把该外部阻断伪装成通过。
+- Live smoke follow-up: 首次无 key 启动按预期复现 HTTP 403；随后仅将 SpeechRail managed `config/.env` 的 key 注入独立进程环境（未写入仓库、未输出值），实时字幕页面显示“SpeechRail 已连接”、PCM owner 切换为实时字幕，停止后 owner 释放。
+- Export follow-up: `exportUtils` 对会议助手旧 `segments` fallback 先按阅读块聚合；有 `display_blocks` 时会议 Copy/Markdown/TXT/SRT/JSON 与实时字幕导出、`current.srt` 均只取完整 DisplayBlock；字符级回归测试通过。
 
 ## Task 7: SpeechRail Contract Alignment
 
@@ -347,16 +355,24 @@
 - Modify only if verification finds a required defect; otherwise no implementation files.
 - PR description must include the final AC matrix status and evidence links/commands.
 
-- [ ] Step 1: Run the full Python suite with isolated test schema:
+- [x] Step 1: Run the full Python suite with isolated test schema:
   `SONA_TEST_DATABASE_URL=postgresql:///knowledge uv run pytest tests/`.
-- [ ] Step 2: Run `uv run mypy src/`.
-- [ ] Step 3: Run `uv run ruff check src/ tests/`.
-- [ ] Step 4: Run `cd ui && npm test -- --run`.
-- [ ] Step 5: Run `cd ui && npm run build`.
-- [ ] Step 6: Review staged diff for secrets, unrelated user changes, generated files, SQL safety, API compatibility, and file-size/architecture regressions.
-- [ ] Step 7: Execute five-axis review: correctness, readability, architecture, security, performance. Resolve every Critical/Required finding.
-- [ ] Step 8: Re-run all changed-task AC checks after review fixes and mark every AC `pass`; no `pending` row is allowed.
+- [x] Step 2: Run `uv run mypy src/`.
+- [x] Step 3: Run `uv run ruff check src/ tests/`.
+- [x] Step 4: Run `cd ui && npm test -- --run`.
+- [x] Step 5: Run `cd ui && npm run build`.
+- [x] Step 6: Review staged diff for secrets, unrelated user changes, generated files, SQL safety, API compatibility, and file-size/architecture regressions.
+- [x] Step 7: Execute five-axis review: correctness, readability, architecture, security, performance. Resolve every Critical/Required finding.
+- [x] Step 8: Re-run all changed-task AC checks after review fixes and mark every AC `pass`; no `pending` row is allowed.
 - [ ] Step 9: Push feature branch and create PR referencing issue #14 with a concise change summary, verification evidence, migration/rollback notes, SpeechRail dependency, and full AC matrix.
+
+#### 验收记录
+
+- Full Python: `SONA_TEST_DATABASE_URL=postgresql:///knowledge uv run pytest tests/` → exit 0, coverage `83.31%`，达到 `fail_under=80`。
+- Static quality: `uv run mypy src/` → `Success: no issues found in 112 source files`; `uv run ruff check src/ tests/` → `All checks passed!`；`git diff --check` → exit 0。
+- Frontend: `cd ui && npm test -- --run` → `51 files / 481 passed`；`cd ui && npm run build` → `tsc --noEmit` 与 Vite production build exit 0（仅既存 chunk size warning）。
+- Five-axis review: correctness（正文/DisplayBlock 守恒、跨 epoch 不串块）、readability（导出转换函数职责单一）、architecture（SpeechRail 不承载 UI 合并、会议/字幕共享 projector 语义）、security（无 key/个人数据落盘，旧表只读迁移）、performance（有界块聚合、导出不重复请求）均无 Critical/Required 未处理项。
+- Remaining: Step 9 需要推送当前分支并把完整矩阵/证据写入 PR；实时页面成功依赖运行环境先加载 SpeechRail managed key。
 
 ## 每任务验收记录模板
 
