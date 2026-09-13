@@ -143,7 +143,7 @@ describe("SubtitleStream workspace layout", () => {
       await Promise.resolve();
     });
 
-    expect(writeText).toHaveBeenCalledWith("会话 1 · A: 这是一条测试字幕");
+    expect(writeText).toHaveBeenCalledWith("分人未启用: 这是一条测试字幕");
     expect(copyButton.textContent).toContain("已复制");
     expect(container.querySelector(".subtitle-action-status")?.textContent).toContain("已复制");
   });
@@ -182,6 +182,51 @@ describe("SubtitleStream workspace layout", () => {
     expect(anchorClick).toHaveBeenCalledOnce();
     expect(revokeObjectURL).toHaveBeenCalledWith("blob:subtitle");
     expect(srtButton.textContent).toContain("已下载");
+  });
+
+  it("exports the readable block instead of legacy character lines", async () => {
+    const createObjectURL = vi.fn().mockReturnValue("blob:subtitle-block");
+    const revokeObjectURL = vi.fn();
+    const anchorClick = vi.fn();
+    Object.defineProperty(URL, "createObjectURL", {
+      configurable: true,
+      value: createObjectURL,
+    });
+    Object.defineProperty(URL, "revokeObjectURL", {
+      configurable: true,
+      value: revokeObjectURL,
+    });
+    Object.defineProperty(HTMLAnchorElement.prototype, "click", {
+      configurable: true,
+      value: anchorClick,
+    });
+    const charLines = [
+      { speaker: "会话 1 · A", text: "实", start: "00:00:01.000", end: "00:00:01.100" },
+      { speaker: "会话 1 · A", text: "时", start: "00:00:01.100", end: "00:00:01.200" },
+      { speaker: "会话 1 · A", text: "字幕。", start: "00:00:01.200", end: "00:00:02.000" },
+    ];
+    useSubtitleStore.setState({ lines: charLines, rawLines: charLines, displayBlocks: [] });
+
+    act(() => {
+      root.render(<SubtitleStream />);
+    });
+
+    const srtButton = Array.from(container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("SRT"),
+    ) as HTMLButtonElement;
+    act(() => {
+      srtButton.click();
+    });
+
+    const blob = createObjectURL.mock.calls[0]?.[0] as Blob;
+    const content = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result));
+      reader.onerror = () => reject(reader.error);
+      reader.readAsText(blob);
+    });
+    expect(content).toContain("实时字幕。\n");
+    expect(content).not.toContain("\n实\n");
   });
 
   it("renders legacy per-character lines as one readable subtitle block", () => {

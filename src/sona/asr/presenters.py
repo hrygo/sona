@@ -82,16 +82,17 @@ def _subtitle_display_blocks(window: ASRWindow) -> tuple[DisplayBlock, ...]:
 
     source_session_id = window.source_session_id or f"subtitle-epoch-{window.source_epoch}"
     namespace = uuid5(NAMESPACE_URL, f"sona:subtitle:{source_session_id}")
-    source_item_id = f"subtitle:{source_session_id}:{window.source_epoch}"
     items: list[TranscriptItem] = []
     spans: list[TranscriptAttributionSpan] = []
     for sequence, segment in enumerate(window.segments):
         source_uid = segment.source_uid or _fallback_source_uid(segment)
+        segment_session_id = segment.source_session_id or source_session_id
+        source_item_id = f"subtitle:{segment_session_id}:{segment.source_epoch}"
         item_id = uuid5(namespace, f"item:{source_uid}")
         item = TranscriptItem(
             id=item_id,
             meeting_id=namespace,
-            source_session_id=segment.source_session_id or source_session_id,
+            source_session_id=segment_session_id,
             source_epoch=segment.source_epoch,
             source_item_id=source_item_id,
             source_segment_uid=source_uid,

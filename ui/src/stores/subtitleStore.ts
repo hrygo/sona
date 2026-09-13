@@ -211,6 +211,64 @@ export function deriveSubtitleDisplayBlocks(
   return blocks;
 }
 
+/** 将可读块转换为兼容导出器使用的语义化字幕行。 */
+export function displayBlocksToSubtitleLines(
+  blocks: readonly DisplayBlock[],
+): SubtitleLine[] {
+  return blocks
+    .filter((block) => !block.is_partial)
+    .map((block) => ({
+      speaker: displayBlockSpeakerLabel(block),
+      text: block.text,
+      start: formatSubtitleTime(block.start_ms),
+      end: formatSubtitleTime(block.end_ms),
+    }));
+}
+
+/** SRT 只接受有可靠时间范围的完整可读块，避免写入伪精确时间。 */
+export function toSRTDisplayBlocks(blocks: readonly DisplayBlock[]): string {
+  return toSRT(
+    displayBlocksToSubtitleLines(blocks).filter((line) => line.start !== "" && line.end !== ""),
+  );
+}
+
+/** 纯文本导出按可读块输出；无时间块显式保留“时间不可用”。 */
+export function toPlainTextDisplayBlocks(blocks: readonly DisplayBlock[]): string {
+  return displayBlocksToSubtitleLines(blocks)
+    .map((line) => {
+      const time = line.start && line.end ? `[${line.start} - ${line.end}]` : "[时间不可用]";
+      return `${time} ${line.speaker}: ${line.text}`;
+    })
+    .join("\n");
+}
+
+function displayBlockSpeakerLabel(block: DisplayBlock): string {
+  if (block.speaker_name) return block.speaker_name;
+  if (block.speaker_key) return block.speaker_key;
+  switch (block.speaker_status) {
+    case "off":
+      return "分人未启用";
+    case "degraded":
+      return "分人不可用";
+    case "pending":
+    case "unknown":
+    case "tentative":
+      return "正在确认";
+    default:
+      return "未识别说话人";
+  }
+}
+
+function formatSubtitleTime(value: number | null): string {
+  if (value === null || !Number.isFinite(value) || value < 0) return "";
+  const totalSeconds = Math.floor(value / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  const milliseconds = value % 1000;
+  return `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}.${String(milliseconds).padStart(3, "0")}`;
+}
+
 function isDiarizationState(value: unknown): value is SubtitleDiarizationState {
   if (!value || typeof value !== "object") return false;
   const record = value as Record<string, unknown>;

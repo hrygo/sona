@@ -3,8 +3,10 @@ import { useEventSocket } from "../hooks/useEventSocket";
 import {
   formatSpeaker,
   speakerColor,
-  toSRT,
   toMarkdownNotes,
+  displayBlocksToSubtitleLines,
+  toPlainTextDisplayBlocks,
+  toSRTDisplayBlocks,
   useSubtitleStore,
   isSubtitleSnapshotPayload,
   deriveSubtitleDisplayBlocks,
@@ -45,7 +47,7 @@ const ACTION_FEEDBACK_LABELS: Record<SubtitleAction, string> = {
   markdown: "已开始下载 Markdown 会议纪要",
   srt: "已开始下载 SRT 字幕文件",
   txt: "已开始下载纯文本字幕",
-  json: "已开始下载 JSON 时序数据",
+  json: "已开始下载 JSON 可读块数据",
 };
 
 const ACTION_FEEDBACK_DURATION_MS = 1800;
@@ -211,6 +213,10 @@ export default function SubtitleStream({
     ),
     [displayBlocks, lines, diarization.status],
   );
+  const confirmedBlocks = useMemo(
+    () => readableBlocks.filter((block) => !block.is_partial),
+    [readableBlocks],
+  );
   const teleprompterSettings = useUISettingsStore((s) => s.teleprompterSettings);
   const setTeleprompterSettings = useUISettingsStore((s) => s.setTeleprompterSettings);
   const micMuted = useUISettingsStore((s) => s.micMuted);
@@ -349,14 +355,13 @@ export default function SubtitleStream({
   // Available unique anonymous speaker labels.
   const availableSpeakers = useMemo(() => {
     const set = new Set<string>();
-    readableBlocks.forEach((block) => set.add(displayBlockSpeaker(block)));
+    confirmedBlocks.forEach((block) => set.add(displayBlockSpeaker(block)));
     return Array.from(set).sort((a, b) => a.localeCompare(b, "zh-CN"));
-  }, [readableBlocks]);
+  }, [confirmedBlocks]);
 
   // Filter logic
   const filteredBlocks = useMemo(() => {
-    return readableBlocks
-      .filter((block) => !block.is_partial)
+    return confirmedBlocks
       .map((block, originalIndex) => ({ block, originalIndex }))
       .filter(({ block, originalIndex }) => {
         if (speakerFilter === "starred") {
@@ -369,12 +374,12 @@ export default function SubtitleStream({
         if (!q) return true;
         return block.text.toLowerCase().includes(q);
       });
-  }, [readableBlocks, speakerFilter, searchQuery, starredIndices]);
+  }, [confirmedBlocks, speakerFilter, searchQuery, starredIndices]);
 
   /* ---- 导出操作 ---- */
   const handleExportMarkdown = useCallback(() => {
-    if (!lines.length) return;
-    const content = toMarkdownNotes(lines, starredIndices);
+    if (!confirmedBlocks.length) return;
+    const content = toMarkdownNotes(displayBlocksToSubtitleLines(confirmedBlocks), starredIndices);
     try {
       downloadBlob(
         content,
@@ -386,11 +391,11 @@ export default function SubtitleStream({
     } catch {
       showToast("Markdown 会议纪要下载失败", "error");
     }
-  }, [lines, markActionSuccess, starredIndices]);
+  }, [confirmedBlocks, markActionSuccess, starredIndices]);
 
   const handleExportSRT = useCallback(() => {
-    if (!lines.length) return;
-    const content = toSRT(lines);
+    if (!confirmedBlocks.length) return;
+    const content = toSRTDisplayBlocks(confirmedBlocks);
     try {
       downloadBlob(
         content,
@@ -402,13 +407,11 @@ export default function SubtitleStream({
     } catch {
       showToast("SRT 字幕文件下载失败", "error");
     }
-  }, [lines, markActionSuccess]);
+  }, [confirmedBlocks, markActionSuccess]);
 
   const handleExportTXT = useCallback(() => {
-    if (!lines.length) return;
-    const content = lines
-      .map((l) => `[${l.start} - ${l.end}] ${formatSpeaker(l.speaker)}: ${l.text}`)
-      .join("\n");
+    if (!confirmedBlocks.length) return;
+    const content = toPlainTextDisplayBlocks(confirmedBlocks);
     try {
       downloadBlob(
         content,
@@ -420,11 +423,11 @@ export default function SubtitleStream({
     } catch {
       showToast("纯文本字幕下载失败", "error");
     }
-  }, [lines, markActionSuccess]);
+  }, [confirmedBlocks, markActionSuccess]);
 
   const handleExportJSON = useCallback(() => {
-    if (!lines.length) return;
-    const content = JSON.stringify(lines, null, 2);
+    if (!confirmedBlocks.length) return;
+    const content = JSON.stringify(confirmedBlocks, null, 2);
     try {
       downloadBlob(
         content,
@@ -432,15 +435,17 @@ export default function SubtitleStream({
         "application/json",
       );
       markActionSuccess("json");
-      showToast("JSON 时序数据已开始下载", "success");
+      showToast("JSON 可读块数据已开始下载", "success");
     } catch {
-      showToast("JSON 时序数据下载失败", "error");
+      showToast("JSON 可读块数据下载失败", "error");
     }
-  }, [lines, markActionSuccess]);
+  }, [confirmedBlocks, markActionSuccess]);
 
   const handleCopyAll = useCallback(async () => {
-    if (!lines.length) return;
-    const content = lines.map((l) => `${formatSpeaker(l.speaker)}: ${l.text}`).join("\n");
+    if (!confirmedBlocks.length) return;
+    const content = confirmedBlocks
+      .map((block) => `${displayBlockSpeaker(block)}: ${block.text}`)
+      .join("\n");
     try {
       await copyTextToClipboard(content);
       markActionSuccess("copy");
@@ -448,7 +453,7 @@ export default function SubtitleStream({
     } catch {
       showToast("复制失败，请检查浏览器剪贴板权限", "error");
     }
-  }, [lines, markActionSuccess]);
+  }, [confirmedBlocks, markActionSuccess]);
 
   const handleClear = useCallback(async () => {
     useSubtitleStore.getState().clear();
@@ -645,7 +650,7 @@ export default function SubtitleStream({
                   type="button"
                   className={`btn-ctrl subtitle-sidebar-action ${feedbackAction === "copy" ? "is-feedback" : ""}`}
                   onClick={handleCopyAll}
-                  disabled={!lines.length}
+                  disabled={!confirmedBlocks.length}
                   title={feedbackAction === "copy" ? "已复制到剪贴板" : "一键复制全部纯文本字幕"}
                 >
                   <span>{feedbackAction === "copy" ? "✓" : "📋"}</span>{" "}
@@ -655,7 +660,7 @@ export default function SubtitleStream({
                   type="button"
                   className={`btn-ctrl subtitle-sidebar-action ${feedbackAction === "markdown" ? "is-feedback" : ""}`}
                   onClick={handleExportMarkdown}
-                  disabled={!lines.length}
+                  disabled={!confirmedBlocks.length}
                   title={
                     feedbackAction === "markdown"
                       ? "已开始下载 Markdown 会议纪要"
@@ -669,7 +674,7 @@ export default function SubtitleStream({
                   type="button"
                   className={`btn-ctrl subtitle-sidebar-action ${feedbackAction === "srt" ? "is-feedback" : ""}`}
                   onClick={handleExportSRT}
-                  disabled={!lines.length}
+                  disabled={!confirmedBlocks.length}
                   title={
                     feedbackAction === "srt"
                       ? "已开始下载 SRT 字幕文件"
@@ -683,7 +688,7 @@ export default function SubtitleStream({
                   type="button"
                   className={`btn-ctrl subtitle-sidebar-action ${feedbackAction === "txt" ? "is-feedback" : ""}`}
                   onClick={handleExportTXT}
-                  disabled={!lines.length}
+                  disabled={!confirmedBlocks.length}
                   title={feedbackAction === "txt" ? "已开始下载纯文本字幕" : "导出为纯文本文件"}
                 >
                   <span>{feedbackAction === "txt" ? "✓" : "📄"}</span>{" "}
@@ -693,8 +698,8 @@ export default function SubtitleStream({
                   type="button"
                   className={`btn-ctrl subtitle-sidebar-action ${feedbackAction === "json" ? "is-feedback" : ""}`}
                   onClick={handleExportJSON}
-                  disabled={!lines.length}
-                  title={feedbackAction === "json" ? "已开始下载 JSON 时序数据" : "导出为 JSON 时序数据"}
+                  disabled={!confirmedBlocks.length}
+                  title={feedbackAction === "json" ? "已开始下载 JSON 可读块数据" : "导出为 JSON 可读块数据"}
                 >
                   <span>{feedbackAction === "json" ? "✓" : "📊"}</span>{" "}
                   {feedbackAction === "json" ? "已下载" : "JSON"}
@@ -703,7 +708,7 @@ export default function SubtitleStream({
                   type="button"
                   className="btn-ctrl btn-ctrl-danger subtitle-sidebar-action"
                   onClick={handleClear}
-                  disabled={!lines.length}
+                  disabled={!confirmedBlocks.length}
                   title="清空当前字幕列表"
                 >
                   <span>🗑️</span> 清空
@@ -715,7 +720,7 @@ export default function SubtitleStream({
               </div>
 
               <div className="subtitle-sidebar-stats">
-                <span>{lines.length} 条字幕</span>
+                <span>{confirmedBlocks.length} 条发言</span>
                 {starredIndices.size > 0 && <span>⭐ {starredIndices.size} 重点</span>}
               </div>
             </section>
@@ -746,7 +751,7 @@ export default function SubtitleStream({
             <SubtitleWaveform
               connected={listeningPresentation.active}
               hasPartial={Boolean(partial)}
-              activeTextTrigger={partial || readableBlocks.length}
+              activeTextTrigger={partial || confirmedBlocks.length}
             />
           </div>
 
@@ -775,7 +780,7 @@ export default function SubtitleStream({
               </div>
             )}
 
-            {!readableBlocks.length && !partial && (
+            {!confirmedBlocks.length && !partial && (
               <div className="subtitle-empty-wrap">
                 <span className="subtitle-empty-icon">🎙️</span>
                 <p className="subtitle-empty-title">等待语音字幕...</p>
@@ -800,7 +805,7 @@ export default function SubtitleStream({
 
           <footer className="subtitle-bottom-toolbar">
             <div className="subtitle-meta-stats">
-              <span>当前显示 {filteredBlocks.length} / {readableBlocks.length} 条发言</span>
+              <span>当前显示 {filteredBlocks.length} / {confirmedBlocks.length} 条发言</span>
               {starredIndices.size > 0 && <span>· {starredIndices.size} 条重点</span>}
             </div>
             <span className="subtitle-footer-hint">滚动可查看历史，字幕会自动跟随最新内容</span>
@@ -833,7 +838,7 @@ export default function SubtitleStream({
                       ? `○ ${listeningPresentation.label}`
                       : "○ 等待 ASR 连接"}
                   {" · "}
-                  <span>已转录 {readableBlocks.length} 条发言</span>
+                  <span>已转录 {confirmedBlocks.length} 条发言</span>
                 </span>
               </div>
             </div>
@@ -930,7 +935,7 @@ export default function SubtitleStream({
             )}
 
             <div className="presentation-container">
-              {!readableBlocks.length && !partial && (
+              {!confirmedBlocks.length && !partial && (
                 <div className="presentation-empty">
                   <span className="presentation-empty-icon">🎙️</span>
                   <h3>舞台提词与字幕大屏已就绪</h3>
@@ -938,8 +943,8 @@ export default function SubtitleStream({
                 </div>
               )}
 
-              {readableBlocks.map((block, idx) => {
-                const isLatest = idx === readableBlocks.length - 1 && !partial;
+              {confirmedBlocks.map((block, idx) => {
+                const isLatest = idx === confirmedBlocks.length - 1 && !partial;
                 return (
                   <div
                     className={`presentation-line ${isLatest ? "latest-line" : ""}`}

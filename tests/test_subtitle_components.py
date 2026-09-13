@@ -24,6 +24,7 @@ from sona.subtitles import (
     SubtitleProxyState,
     TranscriptionGap,
 )
+from sona.subtitles.archive import SrtArchive
 
 
 class FakeTranscriber:
@@ -346,7 +347,8 @@ async def test_standard_subtitles_accumulate_confirmed_history_and_keep_partial(
     current = tmp_path / "subtitles" / "current.srt"
     srt = current.read_text(encoding="utf-8")
     assert all(text in srt for text in ("第一句", "第二句", "第三句"))
-    assert srt.count("\n\n") == 2
+    assert srt.count("\n\n") == 0
+    assert "第一句第二句第三句" in srt
     await proxy.stop()
 
 
@@ -519,6 +521,14 @@ async def test_standard_subtitle_reconnect_preserves_confirmed_history(
         "断线前",
         "断线后",
     ]
+    assert [block["text"] for block in proxy._last_payload["display_blocks"]] == [
+        "断线前",
+        "断线后",
+    ]
+    assert (
+        proxy._last_payload["display_blocks"][0]["block_id"]
+        != proxy._last_payload["display_blocks"][1]["block_id"]
+    )
     current = tmp_path / "subtitles" / "current.srt"
     srt = current.read_text(encoding="utf-8")
     assert "断线前" in srt and "断线后" in srt
@@ -891,6 +901,34 @@ async def test_srt_persist_uses_atomic_replace(tmp_path: Path) -> None:
     assert not (tmp_path / "subtitles" / "current.srt.tmp").exists()
     assert "你好世界" in current.read_text(encoding="utf-8")
     await proxy.stop()
+
+
+def test_srt_archive_uses_readable_display_blocks_over_legacy_lines(tmp_path: Path) -> None:
+    archive = SrtArchive(tmp_path / "subtitles")
+    archive.persist_confirmed(
+        {
+            "lines": [
+                {"start": "0:00:01.000", "end": "0:00:01.100", "text": "实"},
+                {"start": "0:00:01.100", "end": "0:00:01.200", "text": "时"},
+                {"start": "0:00:01.200", "end": "0:00:02.000", "text": "字幕。"},
+            ],
+            "display_blocks": [
+                {
+                    "start_ms": 1000,
+                    "end_ms": 2000,
+                    "text": "实时字幕。",
+                    "timing_quality": "aligned",
+                    "is_partial": False,
+                    "speaker_status": "off",
+                }
+            ],
+        }
+    )
+
+    output = (tmp_path / "subtitles" / "current.srt").read_text(encoding="utf-8")
+    assert output.count("\n\n") == 0
+    assert "实时字幕。" in output
+    assert "\n实\n" not in output
 
 
 async def test_close_epoch_archives_srt_only_once(tmp_path: Path) -> None:
