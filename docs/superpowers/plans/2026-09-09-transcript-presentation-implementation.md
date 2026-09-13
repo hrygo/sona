@@ -364,7 +364,7 @@
 - [x] Step 6: Review staged diff for secrets, unrelated user changes, generated files, SQL safety, API compatibility, and file-size/architecture regressions.
 - [x] Step 7: Execute five-axis review: correctness, readability, architecture, security, performance. Resolve every Critical/Required finding.
 - [x] Step 8: Re-run all changed-task AC checks after review fixes and mark every AC `pass`; no `pending` row is allowed.
-- [ ] Step 9: Push feature branch and create PR referencing issue #14 with a concise change summary, verification evidence, migration/rollback notes, SpeechRail dependency, and full AC matrix.
+- [x] Step 9: Push feature branch and create PR referencing issue #14 with a concise change summary, verification evidence, migration/rollback notes, SpeechRail dependency, and full AC matrix.
 
 #### 验收记录
 
@@ -372,7 +372,7 @@
 - Static quality: `uv run mypy src/` → `Success: no issues found in 112 source files`; `uv run ruff check src/ tests/` → `All checks passed!`；`git diff --check` → exit 0。
 - Frontend: `cd ui && npm test -- --run` → `51 files / 481 passed`；`cd ui && npm run build` → `tsc --noEmit` 与 Vite production build exit 0（仅既存 chunk size warning）。
 - Five-axis review: correctness（正文/DisplayBlock 守恒、跨 epoch 不串块）、readability（导出转换函数职责单一）、architecture（SpeechRail 不承载 UI 合并、会议/字幕共享 projector 语义）、security（无 key/个人数据落盘，旧表只读迁移）、performance（有界块聚合、导出不重复请求）均无 Critical/Required 未处理项。
-- Remaining: Step 9 需要推送当前分支并把完整矩阵/证据写入 PR；实时页面成功依赖运行环境先加载 SpeechRail managed key。
+- PR: #17 已推送并写入完整 AC 矩阵、验证命令、迁移/回滚说明、SpeechRail 依赖与页面验收证据；实时页面成功依赖运行环境先加载 SpeechRail managed key。
 
 ## 每任务验收记录模板
 
