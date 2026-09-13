@@ -3,6 +3,7 @@ import type {
   ExportFormat,
   MeetingDetail,
   MeetingMinutesVersion,
+  DisplayBlock,
   TranscriptSegment,
 } from "../../contracts/meetingContract";
 import { MeetingTranscriptViewer } from "./MeetingTranscriptViewer";
@@ -16,6 +17,7 @@ import { ChevronLeftIcon } from "../Icons";
 interface MeetingDetailViewProps {
   meeting: MeetingDetail;
   segments: readonly TranscriptSegment[];
+  displayBlocks?: readonly DisplayBlock[];
   minutes: MeetingMinutesVersion | null;
   minutesList: readonly MeetingMinutesVersion[];
   selectedMinutesVersion: number | null;
@@ -35,6 +37,7 @@ interface MeetingDetailViewProps {
 export function MeetingDetailView({
   meeting,
   segments,
+  displayBlocks,
   minutes,
   minutesList,
   selectedMinutesVersion,
@@ -179,7 +182,9 @@ export function MeetingDetailView({
   const handleEvidenceClick = (segmentId: string) => {
     setHighlightedSegmentId(segmentId);
     setTimeout(() => {
-      const el = document.getElementById(`segment-${segmentId}`);
+      const el =
+        document.getElementById(`segment-${segmentId}`) ||
+        document.querySelector<HTMLElement>(`[data-item-id="${segmentId}"]`);
       if (el) {
         el.scrollIntoView({ behavior: "smooth", block: "center" });
         el.classList.remove("is-evidence-target-inneros");
@@ -454,6 +459,7 @@ export function MeetingDetailView({
       >
         <MeetingTranscriptViewer
           segments={segments}
+          displayBlocks={displayBlocks}
           highlightedSegmentId={highlightedSegmentId}
           onRenameSpeaker={onRenameSpeaker}
           starredIds={starredIds}

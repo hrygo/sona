@@ -176,6 +176,12 @@ class MeetingSummaryService:
                 status="generating",
             )
             document = await self.repository.get_transcript(meeting_id)
+            get_model_transcript = getattr(self.repository, "get_model_transcript", None)
+            if get_model_transcript is not None:
+                model_document = get_model_transcript(meeting_id)
+                if inspect.isawaitable(model_document):
+                    model_document = await model_document
+                document = model_document
             speakers = _attr(document, "speakers", ()) or _attr(
                 _attr(job, "meeting"), "speakers", ()
             ) or ()

@@ -97,6 +97,17 @@ class MeetingSettings(BaseSettings):
             " namespaced diarization opt-in"
         ),
     )
+    transcript_legacy_write_enabled: bool = Field(
+        default=False,
+        description=(
+            "迁移窗口兼容开关：completed item 是否继续镜像写入旧 transcript_segments；"
+            "默认关闭，新正文事实只写入 transcript_items/attribution spans"
+        ),
+    )
+    transcript_legacy_read_enabled: bool = Field(
+        default=False,
+        description="回滚开关：强制兼容读取旧 transcript_segments；默认使用新事实回退读取",
+    )
     allowed_origins: list[str] = Field(
         default_factory=lambda: [
             "http://127.0.0.1:8100",

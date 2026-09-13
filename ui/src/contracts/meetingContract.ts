@@ -21,7 +21,15 @@ export type StorageHealth = "ok" | "degraded" | "unavailable";
 export type ExportFormat = "md" | "txt" | "srt" | "json";
 
 /** SPK-E2E-1 归属状态（speaker_details=1 协商后才出现） */
-export type SpeakerStatus = "unknown" | "tentative" | "stable";
+export type SpeakerStatus =
+  | "identified"
+  | "anonymous"
+  | "pending"
+  | "off"
+  | "degraded"
+  | "unknown"
+  | "tentative"
+  | "stable";
 export type TimingQuality = "aligned" | "unavailable";
 
 export interface TranscriptSegment {
@@ -51,7 +59,26 @@ export interface TranscriptViewBlock {
   readonly start_ms: number;
   readonly end_ms: number;
   readonly text: string;
+  readonly speaker_status?: SpeakerStatus;
+  readonly timing_quality?: TimingQuality;
   readonly isStarred?: boolean;
+}
+
+/** 后端统一 projector 的可读 block；不包含 attribution span 明细。 */
+export interface DisplayBlock {
+  readonly block_id: string;
+  readonly item_ids: readonly string[];
+  readonly source_ids: readonly string[];
+  readonly order: number;
+  readonly speaker_key: string | null;
+  readonly speaker_name: string | null;
+  readonly speaker_status: SpeakerStatus;
+  readonly speaker_color_token: string;
+  readonly start_ms: number | null;
+  readonly end_ms: number | null;
+  readonly text: string;
+  readonly timing_quality: TimingQuality;
+  readonly is_partial: boolean;
 }
 
 export interface ReadingBlockOptions {
@@ -162,6 +189,7 @@ export interface TranscriptResponse {
   readonly transcript_revision: number;
   readonly content_revision: number;
   readonly segments: TranscriptSegment[];
+  readonly display_blocks?: DisplayBlock[];
 }
 
 /** V1 HTTP 通用错误响应 (§13.1) */
@@ -269,6 +297,7 @@ export interface TranscriptReconciledPayload {
   readonly content_revision: number;
   readonly replace_from_ms: number;
   readonly segments: TranscriptSegment[];
+  readonly display_blocks?: DisplayBlock[];
 }
 
 export interface SpeakerUpdatedPayload {

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
 
+from sona.meeting.model_transcript import ModelTranscript, ModelTranscriptEvidence
 from sona.meeting.models import NormalizedSegment, TranscriptDocument
 
 
@@ -35,7 +36,7 @@ class InnerOSContextSnapshot:
 
 
 def build_context_snapshot(
-    document: TranscriptDocument,
+    document: TranscriptDocument | ModelTranscript,
     *,
     question: str,
     max_chars: int = 48_000,
@@ -46,6 +47,14 @@ def build_context_snapshot(
         raise ValueError("max_chars must be positive")
     if recent_chars < 0:
         raise ValueError("recent_chars must not be negative")
+    if isinstance(document, ModelTranscript):
+        return _build_model_context_snapshot(
+            document,
+            question=question,
+            max_chars=max_chars,
+            recent_chars=recent_chars,
+            focus_segment_ids=focus_segment_ids,
+        )
     segments = tuple(
         sorted(document.segments, key=lambda item: (item.start_ms, item.end_ms, item.order))
     )
@@ -110,6 +119,76 @@ def build_context_snapshot(
         included_segment_count=len(evidence),
         cropped=len(evidence) < len(segments),
         selection_strategy="cjk_relevance_then_recent_window",
+    )
+
+
+def _build_model_context_snapshot(
+    document: ModelTranscript,
+    *,
+    question: str,
+    max_chars: int,
+    recent_chars: int,
+    focus_segment_ids: tuple[UUID, ...],
+) -> InnerOSContextSnapshot:
+    """从 block-level evidence 选择上下文，永不拆分正文 block。"""
+    evidence = tuple(document.evidence)
+    known = {item_id for item in evidence for item_id in item.item_ids}
+    if any(segment_id not in known for segment_id in focus_segment_ids):
+        raise ValueError("focus segment does not belong to current confirmed meeting")
+    if sum(len(item.text) for item in evidence) <= max_chars:
+        selected = list(evidence)
+    else:
+        recent_budget = min(recent_chars, max_chars)
+        recent: list[ModelTranscriptEvidence] = []
+        recent_used = 0
+        for item in reversed(evidence):
+            cost = len(item.text)
+            if cost <= recent_budget - recent_used:
+                recent.append(item)
+                recent_used += cost
+        recent.reverse()
+        recent_ids = {item.alias for item in recent}
+        terms = _relevance_terms(question)
+        ranked = sorted(
+            (item for item in evidence if item.alias not in recent_ids),
+            key=lambda item: (
+                not any(item_id in focus_segment_ids for item_id in item.item_ids),
+                -_relevance_score(item.text, terms),
+                item.start_ms or 0,
+            ),
+        )
+        early: list[ModelTranscriptEvidence] = []
+        remaining = max_chars - recent_used
+        for item in ranked:
+            if len(item.text) <= remaining:
+                early.append(item)
+                remaining -= len(item.text)
+        early.sort(key=lambda item: item.start_ms or 0)
+        selected = early + recent
+    snapshots = tuple(
+        EvidenceSnapshot(
+            alias=item.alias,
+            segment_id=item.item_ids[0],
+            start_ms=item.start_ms or 0,
+            end_ms=item.end_ms or item.start_ms or 0,
+            speaker_key=item.speaker_key or "unknown",
+            speaker_name=item.speaker_name or "正在确认",
+            text=item.text,
+            content_hash=hashlib.sha256(item.text.encode()).hexdigest(),
+        )
+        for item in selected
+        if item.item_ids
+    )
+    return InnerOSContextSnapshot(
+        meeting_id=document.meeting_id or UUID(int=0),
+        transcript_revision=document.transcript_revision,
+        content_revision=document.content_revision,
+        captured_at=datetime.now(UTC),
+        evidence=snapshots,
+        total_segment_count=len(evidence),
+        included_segment_count=len(snapshots),
+        cropped=len(snapshots) < len(evidence),
+        selection_strategy="block_relevance_then_recent_window",
     )
 
 

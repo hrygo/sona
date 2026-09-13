@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
+from sona.meeting.model_transcript import ModelTranscript
 from sona.meeting.models import MinutesResult
 from sona.meeting.summary.errors import InvalidEvidenceError
 
@@ -52,6 +53,9 @@ def _format_timestamp(ms: int) -> str:
 def format_transcript(document: Any, speakers: Any = ()) -> str:
     """将封存转录格式化为带 UUID 和时间证据的可信资料块。"""
 
+    if isinstance(document, ModelTranscript):
+        return document.text
+
     lines: list[str] = []
     for segment in _attr(document, "segments", ()) or ():
         segment_id = _segment_id(segment)
@@ -70,6 +74,12 @@ def format_transcript(document: Any, speakers: Any = ()) -> str:
 
 
 def _segment_references(document: Any) -> dict[str, UUID]:
+    if isinstance(document, ModelTranscript):
+        return {
+            evidence.alias: evidence.item_ids[0]
+            for evidence in document.evidence
+            if evidence.item_ids
+        }
     references: dict[str, UUID] = {}
     for segment in _attr(document, "segments", ()) or ():
         text = str(_attr(segment, "text", "")).replace("\x00", " ").strip()
@@ -84,6 +94,13 @@ def _format_model_transcript(
     document: Any,
     speakers: Any = (),
 ) -> tuple[str, dict[str, UUID]]:
+    if isinstance(document, ModelTranscript):
+        model_references = {
+            evidence.alias: evidence.item_ids[0]
+            for evidence in document.evidence
+            if evidence.item_ids
+        }
+        return document.text, model_references
     references: dict[str, UUID] = {}
     lines: list[str] = []
     for segment in _attr(document, "segments", ()) or ():
@@ -113,7 +130,15 @@ def _evidence_ids(value: Any) -> list[UUID]:
 def validate_evidence(result: MinutesResult, document: Any) -> MinutesResult:
     """确保所有纪要证据均能回指当前封存转录的 UUID。"""
 
-    known = {_segment_id(segment) for segment in (_attr(document, "segments", ()) or ())}
+    known = (
+        {
+            item_id
+            for evidence in document.evidence
+            for item_id in evidence.item_ids
+        }
+        if isinstance(document, ModelTranscript)
+        else {_segment_id(segment) for segment in (_attr(document, "segments", ()) or ())}
+    )
     if not known and any(
         _evidence_ids(_attr(item, "evidence_segment_ids", ()))
         for field in (

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { ApiError, type TranscriptSegment } from "../contracts/meetingContract";
+import { ApiError, type DisplayBlock, type TranscriptSegment } from "../contracts/meetingContract";
 import {
   mockMeetingDetailCompleted,
   mockMeetingSummaryCompleted,
@@ -21,6 +21,37 @@ describe("meetingStore", () => {
   });
 
   describe("reconcileTranscript (§8 转录对账算法)", () => {
+    it("stores backend display blocks alongside compatibility segments", () => {
+      const blocks: DisplayBlock[] = [
+        {
+          block_id: "block-1",
+          item_ids: ["item-1"],
+          source_ids: ["session-1#segment-1"],
+          order: 0,
+          speaker_key: "speaker-1",
+          speaker_name: "说话人 1",
+          speaker_status: "identified",
+          speaker_color_token: "speaker-blue",
+          start_ms: 0,
+          end_ms: 1000,
+          text: "完整正文",
+          timing_quality: "aligned",
+          is_partial: false,
+        },
+      ];
+
+      useMeetingStore.getState().reconcileTranscript(
+        0,
+        [],
+        1,
+        1,
+        null,
+        blocks,
+      );
+
+      expect(useMeetingStore.getState().displayBlocks).toEqual(blocks);
+    });
+
     it("preserves stable history before replace_from_ms and replaces overlapping window", () => {
       // 初始有 2 段
       const initialSegments: TranscriptSegment[] = [
