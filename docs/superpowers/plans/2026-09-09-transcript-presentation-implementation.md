@@ -61,7 +61,7 @@
 | AC-PROJ-08 | spec 5.3 | timing unavailable 不显示伪精确时间，不提供错误 click-to-source 定位 | T1,T4,T6 | serializer/UI accessibility tests | pass (T1 model) |
 | AC-STATUS-01 | issue/spec 7 | 明确支持 `identified`、`anonymous`、`pending`、`off`、`degraded` | T1,T3,T6 | Python/TS contract + rendering tests | pass (T1 Python) |
 | AC-STATUS-02 | spec 7 | anonymous 显示稳定“说话人 N”，pending 显示“正在确认” | T1,T6 | label mapping + component tests | pass (T1 ModelTranscript labels) |
-| AC-STATUS-03 | spec 7 | off 显示“分人未启用”，degraded 显示“分人不可用” | T1,T3,T6 | degraded/off event tests + UI tests | pending |
+| AC-STATUS-03 | spec 7 | off 显示“分人未启用”，degraded 显示“分人不可用” | T1,T3,T6 | degraded/off event tests + UI tests | pass (T6 follow-up) |
 | AC-MEET-01 | issue/spec 6.3 | completed event 校验 item/spans，事务写两表后广播 DisplayBlock | T2,T3 | session/repository integration tests | pass (T3 runtime event) |
 | AC-MEET-02 | spec 6.3 | diarization patch 重新投影但不重写正文事实 | T2,T3 | patch event test | pass (T2 facts + T3 event) |
 | AC-MEET-03 | spec 8.2 | DB 暂时不可用时 recovery journal 保证正文/patch 可恢复 | T2,T3,T8 | existing recovery suite + new replay tests | pass (T2 repository integration) |
@@ -90,6 +90,7 @@
 | AC-UI-05 | spec 7 | speaker patch 只更新标签/颜色，不造成全文跳动 | T6 | store update + stable block/item anchor coverage | pass |
 | AC-UI-06 | spec 7 | `role=log` / `role=status` 只对完整 block、重连、降级通知 | T6 | accessible viewer/live log tests | pass |
 | AC-UI-07 | issue/spec 7 | 证据点击定位到可读 block/time，不打开逐字稿 | T4,T6 | block/item anchor + evidence navigation test | pass |
+| AC-UI-08 | issue #14 页面验收补充 | 实时字幕优先渲染 `display_blocks`；旧逐字/逐行 `lines` payload 必须先聚合为可读 block，不能逐字创建字幕卡片 | T5,T6 | `SubtitleStream.test.tsx` legacy character regression + browser page smoke on independent worktree | pass |
 | AC-RAIL-01 | issue 14 | SpeechRail completed 事件补 source item、sequence、event version | T7 | SpeechRail contract tests | pending |
 | AC-RAIL-02 | issue 14 | SpeechRail 补结构化诊断字段 | T7 | protocol fixture/schema tests | pending |
 | AC-RAIL-03 | issue 14 | 空文本、重复 UID、越界时间、字符级 unit 契约测试 | T7 | negative contract tests | pending |
@@ -283,6 +284,15 @@
 - Build: `npm run build` → `tsc --noEmit` 通过，Vite production build 成功；仅有既存 bundle size warning。
 - AC: `AC-UI-01–07`、`AC-API-04`、`AC-STATUS-02/03` 在 T6 范围内 pass；后端 `display_blocks` 优先、旧 `segments` fallback、语义 speaker 状态、时间不可用文案、自动跟随暂停/恢复、`role=log/status` 和 block/item 证据锚点均有测试或源代码证据。
 - Scope: `CHANGES MADE` 更新 contract/store/socket、历史与实时 reader、单一 block-level 阅读 UI、状态/无障碍/自动跟随和证据定位；`DIDN'T TOUCH` 主 worktree 用户-owned voice 文件、后端事实模型；`POTENTIAL CONCERNS` jsdom 全量测试仍输出既存 canvas/act 警告，但退出码为 0，未新增失败。
+
+#### 页面验收补充（2026-09-13，T5/T6 follow-up）
+
+- Reproduction: 独立 worktree 的旧实时字幕 UI 仍把 `lines` 直接映射为字幕卡片；会议历史页面已能显示可读块，但实时字幕存在同类回退缺口。
+- Fix: `subtitleStore` 接收并优先保存后端 `display_blocks`；旧 payload 无该字段时按同一间隔/长度/强标点边界聚合；`SubtitleStream` 的实时列表和提词模式统一只渲染 block。
+- AC: `AC-UI-08`、`AC-STATUS-03` follow-up pass；off/degraded 在无 speaker key 时仍显示语义状态。
+- Tests: `cd ui && npm test -- --run src/components/SubtitleStream.test.tsx src/stores/subtitleStore.test.ts` → `21 passed`；`cd ui && npm test -- --run` → `51 files / 477 passed`；`cd ui && npm run build` → exit 0。
+- Browser smoke: `http://127.0.0.1:8101/`（独立 worktree）打开历史会议“会议开场与语音识别测试”，页面显示 `4 个可读块`，无“转录视图切换”或逐字卡片。
+- External dependency: 同页面点击“实时字幕”时，SpeechRail `127.0.0.1:8201/v1/realtime` 返回 HTTP 403；`/health` 返回 `ready=true`，疑似运行实例 API key 不匹配，需在部署环境修正后再做真实麦克风流验收。本补充不把该外部阻断伪装成通过。
 
 ## Task 7: SpeechRail Contract Alignment
 

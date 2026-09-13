@@ -41,6 +41,8 @@ describe("SubtitleStream workspace layout", () => {
     useSubtitleStore.setState({
       lines: [],
       rawLines: [],
+      displayBlocks: [],
+      diarization: { status: "off", reason: null },
       partial: "",
       connected: false,
       starredIndices: new Set<number>(),
@@ -180,6 +182,56 @@ describe("SubtitleStream workspace layout", () => {
     expect(anchorClick).toHaveBeenCalledOnce();
     expect(revokeObjectURL).toHaveBeenCalledWith("blob:subtitle");
     expect(srtButton.textContent).toContain("已下载");
+  });
+
+  it("renders legacy per-character lines as one readable subtitle block", () => {
+    const charLines = [
+      { speaker: "会话 1 · A", text: "实", start: "00:00:01.000", end: "00:00:01.100" },
+      { speaker: "会话 1 · A", text: "时", start: "00:00:01.100", end: "00:00:01.200" },
+      { speaker: "会话 1 · A", text: "字幕。", start: "00:00:01.200", end: "00:00:02.000" },
+    ];
+    useSubtitleStore.setState({ lines: charLines, rawLines: charLines, displayBlocks: [] });
+
+    act(() => {
+      root.render(<SubtitleStream />);
+    });
+
+    const rows = container.querySelectorAll(".subtitle-row-card");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.textContent).toContain("实时字幕。");
+  });
+
+  it("renders backend degraded blocks with an explicit status label", () => {
+    useSubtitleStore.setState({
+      lines: [{ speaker: "旧说话人", text: "不应逐行展示", start: "00:00:01", end: "00:00:02" }],
+      rawLines: [{ speaker: "旧说话人", text: "不应逐行展示", start: "00:00:01", end: "00:00:02" }],
+      displayBlocks: [{
+        block_id: "subtitle-block-1",
+        item_ids: ["item-1"],
+        source_ids: ["item-1#segment-1"],
+        order: 0,
+        speaker_key: null,
+        speaker_name: null,
+        speaker_status: "degraded",
+        speaker_color_token: "speaker-degraded",
+        start_ms: 1000,
+        end_ms: 2000,
+        text: "完整的实时字幕。",
+        timing_quality: "aligned",
+        is_partial: false,
+      }],
+      diarization: { status: "degraded", reason: "SpeechRail unavailable" },
+    });
+
+    act(() => {
+      root.render(<SubtitleStream />);
+    });
+
+    const rows = container.querySelectorAll(".subtitle-row-card");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.textContent).toContain("分人不可用");
+    expect(rows[0]?.textContent).toContain("完整的实时字幕。");
+    expect(rows[0]?.textContent).not.toContain("不应逐行展示");
   });
 
   it("does not call a muted microphone an active listening source", () => {
