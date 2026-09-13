@@ -555,9 +555,12 @@ class PostgresMeetingRepository:
                 await self._register_transcription_source(
                     connection, meeting_id, item
                 )
-                await self._insert_transcript_item_and_spans(
+                item_record = await self._insert_transcript_item_and_spans(
                     connection, meeting_id, meeting.language, item
                 )
+                if item_record is None and item.canonical_text.strip():
+                    # 相同 source item 的完整重放不应再次推进版本或写入事件。
+                    return None
                 rows = (
                     await self._insert_completed_segments(connection, meeting_id, item)
                     if self.settings.transcript_legacy_write_enabled
@@ -674,13 +677,14 @@ class PostgresMeetingRepository:
         source_segment_uid = f"item:{item.item_id}"
         start_ms = (item.meeting_start_sample + item.audio_start_sample) // 16
         end_ms = (item.meeting_start_sample + item.audio_end_sample) // 16
-        await connection.execute(
+        item_cursor = await connection.execute(
             f"""
             INSERT INTO {self._schema}.transcript_items
                 (id, meeting_id, source_session_id, source_epoch, source_item_id,
                  source_segment_uid, sequence, start_ms, end_ms, text, language)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (meeting_id, source_session_id, source_item_id) DO NOTHING
+            RETURNING id
             """,
             (
                 item_uuid,
@@ -696,6 +700,62 @@ class PostgresMeetingRepository:
                 language,
             ),
         )
+        if await item_cursor.fetchone() is None:
+            existing_cursor = await connection.execute(
+                f"""
+                SELECT id, source_epoch, source_item_id, source_segment_uid,
+                       sequence, start_ms, end_ms, text, language
+                FROM {self._schema}.transcript_items
+                WHERE meeting_id = %s
+                  AND source_session_id = %s
+                  AND source_item_id = %s
+                """,
+                (meeting_id, item.source_session_id, item.item_id),
+            )
+            existing = await existing_cursor.fetchone()
+            if existing is None:
+                raise RepositoryUnavailableError("正文冲突后无法读取既有 source item")
+            expected_item = (
+                item.source_epoch,
+                item.item_id,
+                source_segment_uid,
+                item.sequence,
+                start_ms,
+                end_ms,
+                item.canonical_text,
+                language,
+            )
+            if tuple(existing[1:]) != expected_item:
+                raise MeetingConflictError("同 source item 内容冲突")
+
+            spans_cursor = await connection.execute(
+                f"""
+                SELECT source_session_id, source_segment_uid, text_start, text_end,
+                       audio_start_ms, audio_end_ms, timing_quality
+                FROM {self._schema}.transcript_attribution_spans
+                WHERE item_id = %s
+                """,
+                (existing[0],),
+            )
+            existing_spans = {
+                tuple(row) for row in await spans_cursor.fetchall()
+            }
+            expected_spans = {
+                (
+                    item.source_session_id,
+                    unit.segment_uid,
+                    unit.text_start,
+                    unit.text_end,
+                    (item.meeting_start_sample + unit.audio_start_sample) // 16,
+                    (item.meeting_start_sample + unit.audio_end_sample) // 16,
+                    unit.timing_quality,
+                )
+                for unit in item.units
+            }
+            if existing_spans != expected_spans:
+                raise MeetingConflictError("同 source item attribution 内容冲突")
+            return None
+
         for unit in item.units:
             span_id = segment_identity(
                 meeting_id, item.source_session_id, unit.segment_uid
@@ -707,7 +767,6 @@ class PostgresMeetingRepository:
                      text_start, text_end, audio_start_ms, audio_end_ms,
                      timing_quality, speaker_status)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'pending')
-                ON CONFLICT (item_id, source_segment_uid) DO NOTHING
                 """,
                 (
                     span_id,
@@ -1691,7 +1750,7 @@ class PostgresMeetingRepository:
                 raise MeetingNotFoundError("会议不存在")
             segment_cursor = await connection.execute(
                 f"""
-                SELECT {_SEGMENT_COLUMNS_DETAIL}
+                SELECT {_SEGMENT_COLUMNS_DETAIL}, source_session_id, source_item_id
                 FROM {self._schema}.transcript_segments
                 WHERE meeting_id = %s
                 ORDER BY segment_order, start_ms, id
@@ -1704,30 +1763,36 @@ class PostgresMeetingRepository:
                 (meeting_id,),
             )
             has_new_facts = await item_cursor.fetchone() is not None
-            segments = (
-                tuple(
-                    NormalizedSegment(
-                        id=cast(UUID, row[0]),
-                        order=int(row[1]),
-                        source_epoch=int(row[2]),
-                        speaker_key=str(row[3]),
-                        start_ms=int(row[4]),
-                        end_ms=int(row[5]),
-                        text=str(row[6]),
-                        translation=cast(str | None, row[7]),
-                        detected_language=cast(str | None, row[8]),
-                        speaker_status=cast(str | None, row[9]),
-                        timing_quality=cast(str | None, row[10]),
-                        overlap_ratio=float(row[11]),
-                        speaker_manual=bool(row[12]),
-                    )
-                    for row in segment_rows
+            legacy_segments = tuple(_segment_from_detail_row(row) for row in segment_rows)
+            if self.settings.transcript_legacy_read_enabled or not has_new_facts:
+                segments = legacy_segments
+            else:
+                item_keys_cursor = await connection.execute(
+                    f"""
+                    SELECT source_session_id, source_item_id
+                    FROM {self._schema}.transcript_items
+                    WHERE meeting_id = %s
+                    """,
+                    (meeting_id,),
                 )
-                if segment_rows and (
-                    self.settings.transcript_legacy_read_enabled or not has_new_facts
+                new_item_keys = {
+                    (str(row[0]), str(row[1]))
+                    for row in await item_keys_cursor.fetchall()
+                }
+                legacy_segments = tuple(
+                    segment
+                    for row, segment in zip(segment_rows, legacy_segments, strict=True)
+                    if (row[13], row[14]) not in new_item_keys
                 )
-                else tuple(await self._load_new_fact_segments(connection, meeting_id))
-            )
+                new_segments = tuple(await self._load_new_fact_segments(connection, meeting_id))
+                merged_segments = sorted(
+                    (*legacy_segments, *new_segments),
+                    key=lambda segment: (segment.start_ms, segment.end_ms, str(segment.id)),
+                )
+                segments = tuple(
+                    segment.model_copy(update={"order": index})
+                    for index, segment in enumerate(merged_segments)
+                )
             speaker_cursor = await connection.execute(
                 f"""
                 SELECT meeting_id, speaker_key, source_epoch, raw_speaker,

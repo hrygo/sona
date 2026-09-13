@@ -12,7 +12,7 @@ from psycopg import AsyncConnection
 
 from sona.config import MeetingSettings
 from sona.meeting.migrations import run_migrations
-from sona.meeting.repository import PostgresMeetingRepository
+from sona.meeting.repository import MeetingConflictError, PostgresMeetingRepository
 from sona.meeting.speaker_attribution import (
     CompletedAttributionUnit,
     CompletedItem,
@@ -30,15 +30,21 @@ def _database_url() -> str:
     return value
 
 
-def _item(event_id: str = "event-1") -> CompletedItem:
-    text = "你好世界"
+def _item(
+    event_id: str = "event-1",
+    *,
+    item_id: str = "item-1",
+    text: str = "你好世界",
+    meeting_start_sample: int = 0,
+    unit_audio_offset: int = 0,
+) -> CompletedItem:
     units = tuple(
         CompletedAttributionUnit(
             segment_uid=f"unit-{index}",
             text_start=index,
             text_end=index + 1,
-            audio_start_sample=index * 160,
-            audio_end_sample=(index + 1) * 160,
+            audio_start_sample=index * 160 + (unit_audio_offset if index == 1 else 0),
+            audio_end_sample=(index + 1) * 160 + (unit_audio_offset if index == 1 else 0),
             timing_quality="aligned",
         )
         for index in range(len(text))
@@ -46,8 +52,8 @@ def _item(event_id: str = "event-1") -> CompletedItem:
     return CompletedItem(
         source_session_id="session-1",
         source_epoch=1,
-        meeting_start_sample=0,
-        item_id="item-1",
+        meeting_start_sample=meeting_start_sample,
+        item_id=item_id,
         event_id=event_id,
         sequence=0,
         audio_start_sample=0,
@@ -202,6 +208,67 @@ async def test_replaying_completed_item_is_idempotent_for_new_tables(repository)
     assert second is None
     assert len(await repo.get_transcript_items(meeting_id)) == 1
     assert len(await repo.get_transcript_attribution_spans(meeting_id)) == 4
+
+
+@pytest.mark.asyncio
+async def test_conflicting_completed_item_replay_is_rejected(repository) -> None:
+    repo, meeting_id, _ = repository
+    await repo.append_completed_item(meeting_id, _item())
+
+    conflicting = _item(event_id="event-2", text="完全不同")
+    with pytest.raises(MeetingConflictError, match="source item"):
+        await repo.append_completed_item(meeting_id, conflicting)
+
+    items = await repo.get_transcript_items(meeting_id)
+    assert len(items) == 1
+    assert items[0].text == "你好世界"
+    assert len(await repo.get_transcript_attribution_spans(meeting_id)) == 4
+
+
+@pytest.mark.asyncio
+async def test_conflicting_attribution_replay_is_rejected(repository) -> None:
+    repo, meeting_id, _ = repository
+    await repo.append_completed_item(meeting_id, _item())
+
+    conflicting = _item(event_id="event-2", unit_audio_offset=16)
+    with pytest.raises(MeetingConflictError, match="attribution"):
+        await repo.append_completed_item(meeting_id, conflicting)
+
+    spans = await repo.get_transcript_attribution_spans(meeting_id)
+    assert len(spans) == 4
+    assert spans[1].audio_start_ms == 10
+
+
+@pytest.mark.asyncio
+async def test_default_read_keeps_legacy_rows_when_new_facts_are_added(repository) -> None:
+    repo, meeting_id, schema = repository
+    legacy_id = uuid4()
+    async with await AsyncConnection.connect(_database_url()) as connection:
+        await connection.execute(
+            f"""
+            INSERT INTO {schema}.transcript_segments
+                (id, meeting_id, segment_order, source_epoch, speaker_key,
+                 start_ms, end_ms, text, source_session_id, source_segment_uid,
+                 source_item_id, speaker_status, timing_quality)
+            VALUES (%s, %s, 0, 1, '__unknown__', 0, 100, '历史正文',
+                    'legacy-session', 'legacy-unit-0', 'legacy-item', 'unknown', 'aligned')
+            """,
+            (legacy_id, meeting_id),
+        )
+
+    await repo.append_completed_item(
+        meeting_id,
+        _item(
+            event_id="event-new",
+            item_id="new-item",
+            text="新正文",
+            meeting_start_sample=1600,
+        ),
+    )
+
+    document = await repo.get_transcript(meeting_id)
+
+    assert [segment.text for segment in document.segments] == ["历史正文", "新", "正", "文"]
 
 
 @pytest.mark.asyncio
