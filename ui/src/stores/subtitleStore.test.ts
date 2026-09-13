@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   formatSpeaker,
+  deriveSubtitleDisplayBlocks,
   isStandaloneFiller,
   reduceSubtitleSnapshot,
   toSRT,
@@ -32,6 +33,46 @@ describe("subtitle snapshot reducer", () => {
 
     expect(next.lines).toEqual([]);
     expect(next.partial).toBe("");
+  });
+
+  it("prefers backend display blocks over legacy flat lines", () => {
+    const block = {
+      block_id: "block-1",
+      item_ids: ["item-1"],
+      source_ids: ["item-1#segment-1"],
+      order: 0,
+      speaker_key: null,
+      speaker_name: null,
+      speaker_status: "pending" as const,
+      speaker_color_token: "speaker-pending",
+      start_ms: 0,
+      end_ms: 1000,
+      text: "完整正文",
+      timing_quality: "aligned" as const,
+      is_partial: false,
+    };
+    const next = reduceSubtitleSnapshot(
+      { lines: [], partial: "", diarization: { status: "off", reason: null } },
+      { lines: [{ speaker: "旧", text: "逐字", start: "00:00:00", end: "00:00:01" }], display_blocks: [block] },
+    );
+
+    expect(next.displayBlocks).toEqual([block]);
+  });
+
+  it("aggregates legacy subtitle characters and preserves degraded speaker state", () => {
+    const blocks = deriveSubtitleDisplayBlocks(
+      [
+        { speaker: "会话 1 · A", text: "实", start: "00:00:01.000", end: "00:00:01.100" },
+        { speaker: "会话 1 · A", text: "时", start: "00:00:01.100", end: "00:00:01.200" },
+        { speaker: "会话 1 · A", text: "字幕。", start: "00:00:01.200", end: "00:00:02.000" },
+      ],
+      "degraded",
+    );
+
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]?.text).toBe("实时字幕。");
+    expect(blocks[0]?.speaker_status).toBe("degraded");
+    expect(blocks[0]?.speaker_key).toBeNull();
   });
 
   it("filters out old raw lines when clearedOffset is set", () => {

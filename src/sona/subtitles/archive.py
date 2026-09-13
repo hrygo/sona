@@ -38,7 +38,7 @@ class SrtArchive:
         signature = self._srt_signature(payload)
         if not signature or signature == self._persisted_confirmed_signature:
             return
-        output = self._render_srt(self._confirmed_lines(payload))
+        output = self._render_srt(self._srt_lines(payload))
         self._output_dir.mkdir(parents=True, exist_ok=True)
         temporary = self._output_dir / "current.srt.tmp"
         current = self._output_dir / "current.srt"
@@ -77,6 +77,22 @@ class SrtArchive:
     @staticmethod
     def confirmed_signature(payload: Mapping[str, object]) -> tuple[tuple[str, ...], ...]:
         """返回含 speaker 的快照签名，用于浏览器广播去重。"""
+        display_blocks = SrtArchive._display_blocks(payload)
+        if display_blocks:
+            return tuple(
+                (
+                    str(block.get("start_ms") if block.get("start_ms") is not None else ""),
+                    str(block.get("end_ms") if block.get("end_ms") is not None else ""),
+                    str(
+                        block.get("speaker_name")
+                        or block.get("speaker_key")
+                        or block.get("speaker_status")
+                        or ""
+                    ),
+                    str(block.get("text") or ""),
+                )
+                for block in display_blocks
+            )
         return tuple(
             (
                 str(line.get("start") or ""),
@@ -96,8 +112,43 @@ class SrtArchive:
                 str(line.get("end") or ""),
                 str(line.get("text") or ""),
             )
-            for line in SrtArchive._confirmed_lines(payload)
+            for line in SrtArchive._srt_lines(payload)
         )
+
+    @staticmethod
+    def _display_blocks(payload: Mapping[str, object]) -> list[dict[str, Any]]:
+        blocks = payload.get("display_blocks")
+        if not isinstance(blocks, list):
+            return []
+        return [
+            block
+            for block in blocks
+            if isinstance(block, dict)
+            and not bool(block.get("is_partial"))
+            and str(block.get("text") or "").strip()
+        ]
+
+    @classmethod
+    def _srt_lines(cls, payload: Mapping[str, object]) -> list[dict[str, Any]]:
+        display_blocks = cls._display_blocks(payload)
+        if display_blocks:
+            lines: list[dict[str, Any]] = []
+            for block in display_blocks:
+                start = block.get("start_ms")
+                end = block.get("end_ms")
+                if (
+                    block.get("timing_quality") != "aligned"
+                    or isinstance(start, bool)
+                    or not isinstance(start, (int, float))
+                    or isinstance(end, bool)
+                    or not isinstance(end, (int, float))
+                    or start < 0
+                    or end < start
+                ):
+                    continue
+                lines.append({"start": start, "end": end, "text": block["text"]})
+            return lines
+        return cls._confirmed_lines(payload)
 
     @staticmethod
     def _confirmed_lines(payload: Mapping[str, object]) -> list[dict[str, Any]]:
@@ -124,12 +175,21 @@ class SrtArchive:
 
     @staticmethod
     def _srt_timestamp(value: object) -> str:
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            milliseconds = max(0, int(value))
+            total_seconds, clock_millis = divmod(milliseconds, 1000)
+            hours, remainder = divmod(total_seconds, 3600)
+            minutes, seconds = divmod(remainder, 60)
+            return f"{hours:02d}:{minutes:02d}:{seconds:02d},{clock_millis:03d}"
         raw = str(value or "00:00:00").strip().replace(".", ",")
         clock, separator, fraction = raw.partition(",")
         parts = clock.split(":")
         if len(parts) == 3:
-            hours, minutes, seconds = parts
+            clock_hours, clock_minutes, clock_seconds = parts
         else:
-            hours, minutes, seconds = "0", "0", "0"
-        millis = (fraction if separator else "0").ljust(3, "0")[:3]
-        return f"{hours.zfill(2)}:{minutes.zfill(2)}:{seconds.zfill(2)},{millis}"
+            clock_hours, clock_minutes, clock_seconds = "0", "0", "0"
+        text_millis = (fraction if separator else "0").ljust(3, "0")[:3]
+        return (
+            f"{clock_hours.zfill(2)}:{clock_minutes.zfill(2)}:"
+            f"{clock_seconds.zfill(2)},{text_millis}"
+        )

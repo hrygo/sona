@@ -42,9 +42,9 @@ async def _load_rows(
           AND source_session_id <> ''
           AND source_item_id IS NOT NULL
           AND source_item_id <> ''
-          AND (%s::uuid IS NULL OR id > %s::uuid)
         GROUP BY meeting_id, source_session_id, source_item_id
-        ORDER BY max(id::text)
+        HAVING (%s::uuid IS NULL OR max(id::text)::uuid > %s::uuid)
+        ORDER BY max(id::text)::uuid
         LIMIT %s
         """,
         (after_id, after_id, batch_size),

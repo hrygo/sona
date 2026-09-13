@@ -1,9 +1,19 @@
 import type {
+  DisplayBlock,
   ExportFormat,
   MeetingDetail,
   MeetingMinutesVersion,
   TranscriptSegment,
 } from "../contracts/meetingContract";
+import { deriveReadingBlocks } from "../components/meeting/transcriptViewModel";
+
+export interface ExportTranscriptSegment {
+  readonly id: string;
+  readonly speaker_name: string;
+  readonly start_ms: number | null;
+  readonly end_ms: number | null;
+  readonly text: string;
+}
 
 /**
  * Format milliseconds to standard SRT timestamp format: HH:MM:SS,mmm
@@ -36,11 +46,75 @@ export function msToReadableTime(ms: number): string {
   return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
 }
 
-export function generateSrtContent(segments: readonly TranscriptSegment[]): string {
+export function displayBlocksToExportSegments(
+  blocks: readonly DisplayBlock[],
+): ExportTranscriptSegment[] {
+  return blocks
+    .filter((block) => !block.is_partial)
+    .map((block) => ({
+      id: block.item_ids[0] || block.block_id,
+      speaker_name:
+        block.speaker_name ||
+        (block.speaker_status === "off"
+          ? "分人未启用"
+          : block.speaker_status === "degraded"
+            ? "分人不可用"
+            : block.speaker_status === "pending"
+              ? "正在确认"
+              : "未识别说话人"),
+      start_ms: block.start_ms,
+      end_ms: block.end_ms,
+      text: block.text,
+    }));
+}
+
+function legacySegmentsToDisplayBlocks(
+  segments: readonly TranscriptSegment[],
+): DisplayBlock[] {
+  return deriveReadingBlocks(segments).map((block, index) => {
+    const source = segments.find((segment) => segment.id === block.segment_ids[0]);
+    const status = source?.speaker_status;
+    const speakerStatus =
+      status === "pending" || status === "off" || status === "degraded"
+        ? status
+        : "identified";
+    return {
+      block_id: block.block_id,
+      item_ids: block.segment_ids,
+      source_ids: block.segment_ids,
+      order: index,
+      speaker_key: block.speaker_key || null,
+      speaker_name: block.speaker_name || null,
+      speaker_status: speakerStatus,
+      speaker_color_token: `legacy-${index}`,
+      start_ms: block.start_ms,
+      end_ms: block.end_ms,
+      text: block.text,
+      timing_quality: "aligned",
+      is_partial: false,
+    };
+  });
+}
+
+function resolveExportSegments(
+  segments: readonly TranscriptSegment[],
+  displayBlocks?: readonly DisplayBlock[],
+): { segments: ExportTranscriptSegment[]; blocks: DisplayBlock[] } {
+  const blocks = displayBlocks?.length
+    ? [...displayBlocks]
+    : legacySegmentsToDisplayBlocks(segments);
+  return {
+    segments: blocks.length ? displayBlocksToExportSegments(blocks) : [...segments],
+    blocks,
+  };
+}
+
+export function generateSrtContent(segments: readonly ExportTranscriptSegment[]): string {
   return segments
+    .filter((seg) => seg.start_ms !== null && seg.end_ms !== null)
     .map((seg, index) => {
-      const startTime = msToSrtTimestamp(seg.start_ms);
-      const endTime = msToSrtTimestamp(seg.end_ms);
+      const startTime = msToSrtTimestamp(seg.start_ms ?? 0);
+      const endTime = msToSrtTimestamp(seg.end_ms ?? seg.start_ms ?? 0);
       return `${index + 1}\n${startTime} --> ${endTime}\n[${seg.speaker_name}] ${seg.text}\n`;
     })
     .join("\n");
@@ -48,7 +122,7 @@ export function generateSrtContent(segments: readonly TranscriptSegment[]): stri
 
 export function generatePlainTextContent(
   meeting: MeetingDetail,
-  segments: readonly TranscriptSegment[],
+  segments: readonly ExportTranscriptSegment[],
   minutes: MeetingMinutesVersion | null,
   starredIds?: ReadonlySet<string>,
 ): string {
@@ -91,7 +165,10 @@ export function generatePlainTextContent(
   for (const seg of segments) {
     const isStarred = starredIds?.has(seg.id);
     const starTag = isStarred ? " [⭐ 重点]" : "";
-    lines.push(`[${msToReadableTime(seg.start_ms)} - ${msToReadableTime(seg.end_ms)}] ${seg.speaker_name}${starTag}:`);
+    const timing = seg.start_ms !== null && seg.end_ms !== null
+      ? `[${msToReadableTime(seg.start_ms)} - ${msToReadableTime(seg.end_ms)}]`
+      : "[时间不可用]";
+    lines.push(`${timing} ${seg.speaker_name}${starTag}:`);
     lines.push(`  ${seg.text}\n`);
   }
 
@@ -100,7 +177,7 @@ export function generatePlainTextContent(
 
 export function generateMarkdownContent(
   meeting: MeetingDetail,
-  segments: readonly TranscriptSegment[],
+  segments: readonly ExportTranscriptSegment[],
   minutes: MeetingMinutesVersion | null,
   starredIds?: ReadonlySet<string>,
 ): string {
@@ -169,7 +246,9 @@ export function generateMarkdownContent(
   lines.push("| 时间 | 说话人 | 重点 | 转录内容 |");
   lines.push("|---|---|:---:|---|");
   for (const seg of segments) {
-    const time = `${msToReadableTime(seg.start_ms)}–${msToReadableTime(seg.end_ms)}`;
+    const time = seg.start_ms !== null && seg.end_ms !== null
+      ? `${msToReadableTime(seg.start_ms)}–${msToReadableTime(seg.end_ms)}`
+      : "时间不可用";
     const isStarred = starredIds?.has(seg.id);
     const starTag = isStarred ? "⭐" : "-";
     const textFormatted = isStarred ? `**${seg.text}**` : seg.text;
@@ -181,14 +260,19 @@ export function generateMarkdownContent(
 
 export function generateJsonContent(
   meeting: MeetingDetail,
-  segments: readonly TranscriptSegment[],
+  segments: readonly ExportTranscriptSegment[],
   minutes: MeetingMinutesVersion | null,
+  displayBlocks?: readonly DisplayBlock[],
 ): string {
+  const exportSegments = displayBlocks?.length
+    ? displayBlocksToExportSegments(displayBlocks)
+    : segments;
   return JSON.stringify(
     {
       meeting,
       minutes,
-      segments,
+      segments: exportSegments,
+      ...(displayBlocks?.length ? { display_blocks: displayBlocks } : {}),
       exported_at: new Date().toISOString(),
     },
     null,
@@ -214,28 +298,31 @@ export function exportMeetingData(
   minutes: MeetingMinutesVersion | null,
   format: ExportFormat,
   starredIds?: ReadonlySet<string>,
+  displayBlocks?: readonly DisplayBlock[],
 ): void {
   const safeTitle = (meeting.title || "meeting").replace(/[/\\?%*:|"<>]/g, "_");
+  const resolved = resolveExportSegments(segments, displayBlocks);
+  const exportSegments = resolved.segments;
 
   switch (format) {
     case "srt": {
-      const srt = generateSrtContent(segments);
+      const srt = generateSrtContent(exportSegments);
       clientSideDownload(srt, `${safeTitle}.srt`, "text/plain;charset=utf-8");
       break;
     }
     case "txt": {
-      const txt = generatePlainTextContent(meeting, segments, minutes, starredIds);
+      const txt = generatePlainTextContent(meeting, exportSegments, minutes, starredIds);
       clientSideDownload(txt, `${safeTitle}.txt`, "text/plain;charset=utf-8");
       break;
     }
     case "json": {
-      const json = generateJsonContent(meeting, segments, minutes);
+      const json = generateJsonContent(meeting, exportSegments, minutes, resolved.blocks);
       clientSideDownload(json, `${safeTitle}.json`, "application/json;charset=utf-8");
       break;
     }
     case "md":
     default: {
-      const md = generateMarkdownContent(meeting, segments, minutes, starredIds);
+      const md = generateMarkdownContent(meeting, exportSegments, minutes, starredIds);
       clientSideDownload(md, `${safeTitle}.md`, "text/markdown;charset=utf-8");
       break;
     }

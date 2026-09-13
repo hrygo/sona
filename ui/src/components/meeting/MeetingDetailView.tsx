@@ -92,7 +92,7 @@ export function MeetingDetailView({
 
   const handleExport = async (format: ExportFormat) => {
     try {
-      exportMeetingData(meeting, segments, minutes, format, starredIds);
+      exportMeetingData(meeting, segments, minutes, format, starredIds, displayBlocks);
       setIsExportMenuOpen(false);
       showToast(`已成功下载 .${format} 文件`, "success");
     } catch {
